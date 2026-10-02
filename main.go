@@ -395,6 +395,66 @@ type row struct {
 	Fav     bool
 }
 
+// displayLabel builds a recallable name for a pane: agent title, tab label,
+// workspace label and cwd basename, de-duplicated. The pane id is used only
+// when nothing else identifies the pane, and never printed twice.
+func displayLabel(s *snapshot, id, stored string) string {
+	var p *paneRec
+	for i := range s.Panes {
+		if s.Panes[i].PaneID == id {
+			p = &s.Panes[i]
+			break
+		}
+	}
+	if p == nil {
+		if stored != "" {
+			return stored
+		}
+		return id
+	}
+	title := strings.TrimSpace(p.TerminalTitleStrip)
+	if title == "" {
+		title = strings.TrimSpace(p.TerminalTitle)
+	}
+	tabLabel, wsLabel := "", ""
+	for _, t := range s.Tabs {
+		if t.TabID == p.TabID {
+			tabLabel = strings.TrimSpace(t.Label)
+		}
+	}
+	for _, w := range s.Workspaces {
+		if w.WorkspaceID == p.WorkspaceID {
+			wsLabel = strings.TrimSpace(w.Label)
+		}
+	}
+	cwd := ""
+	if dir := strings.TrimSpace(p.CWD); dir != "" && dir != "/" {
+		cwd = filepath.Base(dir)
+	}
+	var parts []string
+	seen := map[string]bool{}
+	add := func(v string) {
+		if v == "" || v == "." || seen[v] {
+			return
+		}
+		seen[v] = true
+		parts = append(parts, v)
+	}
+	add(title)
+	add(tabLabel)
+	add(wsLabel)
+	if cwd != "" {
+		add("@" + cwd)
+	}
+	if len(parts) == 0 {
+		if stored != "" {
+			return stored
+		}
+		return id
+	}
+	return strings.Join(parts, " · ")
+}
+
 func buildRows(s *snapshot, st *store, query string) []row {
 	q := strings.ToLower(strings.TrimSpace(query))
 	match := func(id, label string) bool {
@@ -418,9 +478,7 @@ func buildRows(s *snapshot, st *store, query string) []row {
 		if ps != nil {
 			label = ps.Label
 		}
-		if label == "" {
-			label = paneLabel(s, id)
-		}
+		label = displayLabel(s, id, label)
 		if !match(id, label) {
 			return
 		}
@@ -514,20 +572,27 @@ func renderFrame(rows []row, sel int, query string, status string, width, height
 		if r.Fav {
 			fav = "*"
 		}
-		chip := ""
+		chipText := ""
 		if r.Status != "" && r.Status != "unknown" {
-			chip = keySub + " [" + r.Status + "]" + keyReset
+			chipText = "[" + r.Status + "]"
 		}
-		meta := fmt.Sprintf("%s%d visits %s%s", keySub, r.Visits, ago(r.Last), keyReset)
-		line := fmt.Sprintf("%s %s %-46s%s", fav, r.PaneID, clip(r.Label, 46), chip)
+		// One fixed layout for every row, the way prefix+k paints it: a two
+		// column favourite marker, a label cell, a chip cell at a stable
+		// column, then the counts. The selected row is painted as ONE span so
+		// the accent bar covers label, status and metadata together.
+		favCol := fav + " "
+		labelCell := pad(clip(r.Label, 44), 44)
+		chipCell := pad(chipText, 12)
+		metaCol := fmt.Sprintf("%d visits %s", r.Visits, ago(r.Last))
+		plain := favCol + labelCell + chipCell + " " + metaCol
 		if i == sel {
-			b.WriteString(keySelectBg + keySelectFg + keyBold + pad(line, width-1) + keyReset + " " + meta + "\r\n")
+			b.WriteString(keySelectBg + keySelectFg + keyBold + pad(plain, width-1) + keyReset + "\r\n")
 		} else {
-			b.WriteString(" " + line + " " + meta + "\r\n")
+			b.WriteString(" " + favCol + labelCell + keySub + chipCell + metaCol + keyReset + "\r\n")
 		}
 	}
 	b.WriteString(keySub + strings.Repeat("─", max(8, width-1)) + keyReset + "\r\n")
-	b.WriteString(keyOverlay + " enter jump   * favorite   j/k move   type filter   esc close" + keyReset + "\r\n")
+	b.WriteString(keyOverlay + " enter jump   f favorite   j/k move   type filter   esc close" + keyReset + "\r\n")
 	if status != "" {
 		b.WriteString(keySub + status + keyReset + "\r\n")
 	}
