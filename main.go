@@ -581,7 +581,9 @@ func renderFrame(rows []row, sel int, query string, status string, width, height
 		// column, then the counts. The selected row is painted as ONE span so
 		// the accent bar covers label, status and metadata together.
 		favCol := fav + " "
-		labelCell := pad(clip(r.Label, 44), 44)
+		// The label cell always ends in a separator space, so a full-width
+		// label can never run into the status chip cell.
+		labelCell := pad(clip(r.Label, 43), 44)
 		chipCell := pad(chipText, 12)
 		metaCol := fmt.Sprintf("%d visits %s", r.Visits, ago(r.Last))
 		plain := favCol + labelCell + chipCell + " " + metaCol
