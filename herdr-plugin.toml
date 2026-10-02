@@ -1,0 +1,44 @@
+id = "RooseveltAdvisors.herdr-recall"
+name = "Herdr Recall"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Pane picker on prefix+shift+l: jump to panes by recency, most used, or favorites"
+credit = "RooseveltAdvisors/herdr-recall"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["go", "build", "-o", "bin/herdr-recall", "."]
+
+[[actions]]
+id = "open-picker"
+title = "Open recall picker"
+contexts = ["workspace", "pane"]
+command = ["./bin/herdr-recall", "open-picker"]
+
+[[actions]]
+id = "stats"
+title = "Print recall state"
+contexts = ["workspace", "pane"]
+command = ["./bin/herdr-recall", "stats"]
+
+[[events]]
+on = "tab.focused"
+command = ["./bin/herdr-recall", "hook", "tab.focused"]
+
+[[events]]
+on = "workspace.focused"
+command = ["./bin/herdr-recall", "hook", "workspace.focused"]
+
+[[events]]
+on = "tab.closed"
+command = ["./bin/herdr-recall", "hook", "tab.closed"]
+
+[[events]]
+on = "workspace.closed"
+command = ["./bin/herdr-recall", "hook", "workspace.closed"]
+
+[[panes]]
+id = "picker"
+title = "Recall"
+placement = "overlay"
+command = ["./bin/herdr-recall", "picker"]
