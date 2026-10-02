@@ -959,6 +959,26 @@ func runPicker() int {
 			return 0
 		}
 		b := buf[:n]
+		// Rapid g presses arrive in one read ("gg"): replay every leading g as
+		// its own press so gg always jumps to the top row.
+		if !searching && !showHelp && n >= 2 && b[0] == 'g' {
+			k := 0
+			for k < n && b[k] == 'g' {
+				k++
+			}
+			for i := 0; i < k; i++ {
+				if pendingG {
+					sel = 0
+					pendingG = false
+				} else {
+					pendingG = true
+				}
+			}
+			if k >= n {
+				continue // the whole read was g presses; redraw at the new row
+			}
+			b, n = b[k:], len(b)-k // mixed read: handle the rest normally
+		}
 		// A lone g waits for its second g; any other key discards it.
 		if b[0] != 'g' || n != 1 {
 			pendingG = false
