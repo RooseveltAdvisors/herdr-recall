@@ -684,7 +684,10 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	narrow := width < 80
 	starW, statusW, metaW := 2, 12, 18
 	if narrow {
-		statusW, metaW = 9, 8
+		// The name is the point of the picker: a narrow pane keeps only the
+		// coloured dot and a short visit count and gives every remaining
+		// column to the label.
+		statusW, metaW = 2, 6
 	}
 	labelW := width - starW - statusW - metaW
 	if labelW < 4 {
@@ -717,6 +720,10 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		switch {
 		case word == "":
 			statusCell = strings.Repeat(" ", statusW)
+		case narrow && i == sel:
+			statusCell = scol + "●" + keySelectFg + " "
+		case narrow:
+			statusCell = scol + "●" + keyReset + " "
 		case i == sel:
 			statusCell = pad(scol+"●"+keySelectFg+" "+word, statusW)
 		default:
@@ -724,7 +731,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		}
 		var metaCol string
 		if narrow {
-			metaCol = fmt.Sprintf("%dv %s", r.Visits, agoShort(r.Last))
+			metaCol = fmt.Sprintf("%dv", r.Visits)
 		} else {
 			metaCol = fmt.Sprintf("%d visits %s", r.Visits, ago(r.Last))
 		}
@@ -755,6 +762,9 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		} else {
 			emit(hintFooter("enter", "jump", "f", "favorite", "j/k", "move", "/", "search", "esc", "close"))
 		}
+	}
+	if width < 80 && !searching {
+		emit(keyOverlay + "narrow pane (" + strconv.Itoa(width) + " cols): prefix+b hides the sidebar for a wide panel" + keyReset)
 	}
 	if status != "" {
 		emit(keySub + status + keyReset)
@@ -838,6 +848,12 @@ func runPicker() int {
 		return 1
 	}
 	defer tty.Close()
+	// Close this picker's own pane on every exit path (Esc, q, jump). Registered
+	// before the stty restore so the restore still runs first.
+	if s, err := loadSnapshot(); err == nil {
+		selfPane, selfTab := s.FocusedPaneID, s.FocusedTabID
+		defer closeSelf(selfPane, selfTab)
+	}
 	// raw mode without external dependencies
 	raw := exec.Command("stty", "raw", "-echo")
 	raw.Stdin = tty
@@ -955,11 +971,44 @@ func runPicker() int {
 // entrypoints
 // ---------------------------------------------------------------------------
 
+// closeSelf closes the picker's own pane, and the tab it was opened in when
+// that tab is left empty, so Esc and a jump never leave the picker behind.
+func closeSelf(paneID, tabID string) {
+	if paneID == "" {
+		return
+	}
+	_, _ = herdr("pane", "close", paneID)
+	if tabID == "" {
+		return
+	}
+	s, err := loadSnapshot()
+	if err != nil {
+		return
+	}
+	found := false
+	for _, l := range s.Layouts {
+		if l.TabID == tabID {
+			found = true
+			if len(l.Panes) == 0 {
+				_, _ = herdr("tab", "close", tabID)
+			}
+			return
+		}
+	}
+	if !found {
+		// herdr dropped the empty layout already; close the leftover tab.
+		_, _ = herdr("tab", "close", tabID)
+	}
+}
+
 func openPicker() int {
 	if id, err := recordFocus(); err == nil {
 		_ = id
 	}
-	if _, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "overlay", "--focus"); err != nil {
+	// A tab is the widest placement herdr offers a plugin (overlay inserts a
+	// sliver into the active layout); the pane closes itself on Esc, on q and
+	// after a jump, so no tab is left behind.
+	if _, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "tab", "--focus"); err != nil {
 		fmt.Fprintf(os.Stderr, "recall: open picker: %v\n", err)
 		return 1
 	}
