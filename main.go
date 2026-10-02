@@ -20,6 +20,10 @@ import (
 
 const pluginID = "RooseveltAdvisors.herdr-recall"
 
+// recentLimit caps the RECENT section so MOST USED has room to list
+// high-visit panes whose last-seen timestamps aged out of recency.
+const recentLimit = 8
+
 const (
 	keyReset   = "\x1b[0m"
 	keyDim     = "\x1b[2m"
@@ -432,6 +436,8 @@ func buildRows(s *snapshot, st *store, query string) []row {
 		})
 	}
 	// favorites first, then recency, then most used (each pane once).
+	// RECENT is capped so panes with high visit counts but older last-seen
+	// timestamps surface in MOST USED instead of hiding behind it.
 	for _, f := range st.Favorites {
 		add(f, "FAVORITES")
 	}
@@ -442,7 +448,10 @@ func buildRows(s *snapshot, st *store, query string) []row {
 	}
 	sort.Slice(byLast, func(i, j int) bool { return st.Panes[byLast[i]].Last > st.Panes[byLast[j]].Last })
 	sort.Slice(byVisits, func(i, j int) bool { return st.Panes[byVisits[i]].Visits > st.Panes[byVisits[j]].Visits })
-	for _, id := range byLast {
+	for i, id := range byLast {
+		if i >= recentLimit {
+			break
+		}
 		add(id, "RECENT")
 	}
 	for _, id := range byVisits {
