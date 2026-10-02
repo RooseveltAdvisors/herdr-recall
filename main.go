@@ -651,6 +651,47 @@ func fitLine(s string, w int) string {
 	return out.String()
 }
 
+// renderHelp draws the ? overlay: every key and what it does. Esc returns to
+// the list on the same row; the picker itself stays open.
+func renderHelp(width, height int) string {
+	var b strings.Builder
+	b.WriteString("\x1b[2J\x1b[H")
+	emit := func(line string) { b.WriteString(fitLine(line, width) + "\r\n") }
+	emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help - esc returns to the list" + keyReset)
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	keys := [][2]string{
+		{"/", "search panes (esc back to the list)"},
+		{"enter", "jump to the selected pane"},
+		{"j / k", "move one row (list scrolls one row)"},
+		{"g g", "jump to the first row"},
+		{"G", "jump to the last row"},
+		{"ctrl+u", "half page up (in search: clear query)"},
+		{"ctrl+d", "half page down (in search: page down)"},
+		{"f", "favorite or unfavorite the row"},
+		{"?", "open or close this help"},
+		{"esc", "close help, then close the picker"},
+		{"q", "quit"},
+	}
+	for _, kv := range keys {
+		emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
+	}
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit(keyOverlay + "body text stays light, status dot colours: red blocked, yellow working, teal done, green idle" + keyReset)
+	return b.String()
+}
+
+// filterRows narrows the frozen list to the query without changing its order.
+func filterRows(rows []row, query string) []row {
+	q := strings.ToLower(query)
+	out := make([]row, 0, len(rows))
+	for _, r := range rows {
+		if strings.Contains(strings.ToLower(r.Label), q) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // renderFrame draws one screenful. Exposed via --render so screenshots and
 // tests use the exact bytes a live session would show.
 func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height int) string {
@@ -682,7 +723,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
-	starW, statusW, metaW := 2, 12, 18
+	starW, statusW, metaW := 2, 12, 8
 	if narrow {
 		// The name is the point of the picker: a narrow pane keeps only the
 		// coloured dot and a short visit count and gives every remaining
@@ -715,7 +756,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		// a stable column, then the counts. The selected row is painted as ONE
 		// span so the accent bar covers label, status and metadata together,
 		// with the dot keeping its colour inside the bar.
-		labelCell := pad(clip(r.Label, labelW), labelW)
+		labelCell := pad(clipTail(r.Label, labelW), labelW)
 		var statusCell string
 		switch {
 		case word == "":
@@ -729,12 +770,9 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		default:
 			statusCell = pad(scol+"● "+word+keyReset, statusW)
 		}
-		var metaCol string
-		if narrow {
-			metaCol = fmt.Sprintf("%dv", r.Visits)
-		} else {
-			metaCol = fmt.Sprintf("%d visits %s", r.Visits, ago(r.Last))
-		}
+		// The name gets the columns: visits is a short "3v" either way, and the
+		// status is a dot plus its word, so "pi - wiseman . THE-FM" fits.
+		metaCol := fmt.Sprintf("%dv", r.Visits)
 		if i == sel {
 			span := keySelectBg + keySelectFg + keyBold
 			line := span
@@ -744,7 +782,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 				line += " "
 			}
 			line += " " + labelCell + statusCell + " " + metaCol
-			emit(pad(line, width-1) + keyReset)
+			emit(pad(line, width) + keyReset)
 		} else {
 			emit(starCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
 		}
@@ -752,24 +790,36 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	if searching {
 		if narrow {
-			emit(keyAccentFg + "esc" + keyReset + keyOverlay + " back" + keyReset + keyOverlay + "  enter  ctrl+u" + keyReset)
+			emit(keyAccentFg + "esc" + keyReset + keyOverlay + " back  enter jump" + keyReset)
+			emit(keyOverlay + "ctrl+u clear  ctrl+d down  type to filter" + keyReset)
 		} else {
-			emit(hintFooter("enter", "jump", "j/k", "move", "ctrl+u", "clear", "esc", "back"))
+			emit(hintFooter("enter", "jump", "j/k", "move", "ctrl+u", "clear", "ctrl+d", "down", "esc", "back"))
 		}
 	} else {
 		if narrow {
-			emit(keyAccentFg + "/" + keyReset + keyOverlay + " search" + keyReset + keyOverlay + "  enter jump  esc close" + keyReset)
+			emit(keyAccentFg + "/" + keyReset + keyOverlay + " search  enter jump  f fav" + keyReset)
+			emit(keyAccentFg + "?" + keyReset + keyOverlay + " help  gg/G first/last  j/k move  esc close" + keyReset)
 		} else {
-			emit(hintFooter("enter", "jump", "f", "favorite", "j/k", "move", "/", "search", "esc", "close"))
+			emit(hintFooter("/", "search", "enter", "jump", "f", "favorite", "?", "help", "j/k", "move", "gg/G", "ends", "esc", "close"))
 		}
-	}
-	if width < 80 && !searching {
-		emit(keyOverlay + "narrow pane (" + strconv.Itoa(width) + " cols): prefix+b hides the sidebar for a wide panel" + keyReset)
 	}
 	if status != "" {
 		emit(keySub + status + keyReset)
 	}
 	return b.String()
+}
+
+// clipTail keeps the distinguishing end of a name: "portal-internal-scheduler"
+// shows its tail, never the "portal-int…" head clip.
+func clipTail(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 1 {
+		return "…"
+	}
+	return "…" + string(r[len(r)-(n-1):])
 }
 
 func clip(s string, n int) string {
@@ -869,13 +919,20 @@ func runPicker() int {
 	sel := 0
 	status := ""
 	searching := false
+	showHelp := false
+	pendingG := false
+	// The row order is frozen when the picker opens: one snapshot, one sort.
+	// Keys never rebuild or re-sort the list; search only narrows it.
+	frozen, err := loadSnapshot()
+	if err != nil {
+		frozen = &snapshot{}
+	}
+	allRows := buildRows(frozen, st, "")
 	for {
-		snap, err := loadSnapshot()
-		if err != nil {
-			status = "snapshot: " + err.Error()
-			snap = &snapshot{}
+		rows := allRows
+		if q := strings.TrimSpace(query); q != "" {
+			rows = filterRows(allRows, q)
 		}
-		rows := buildRows(snap, st, query)
 		if sel >= len(rows) {
 			sel = len(rows) - 1
 		}
@@ -883,7 +940,17 @@ func runPicker() int {
 			sel = 0
 		}
 		w, h := termSize(tty)
-		frame := renderFrame(rows, sel, query, status, searching, w, h)
+		// Draw to the larger of the tty and the layout rect: a 45 column pane
+		// must not paint itself 23 wide because the tty read lagged.
+		if rw := paneRectWidth(frozen, frozen.FocusedPaneID); rw > w {
+			w = rw
+		}
+		var frame string
+		if showHelp {
+			frame = renderHelp(w, h)
+		} else {
+			frame = renderFrame(rows, sel, query, status, searching, w, h)
+		}
 		tty.WriteString(frame)
 
 		buf := make([]byte, 8)
@@ -892,8 +959,17 @@ func runPicker() int {
 			return 0
 		}
 		b := buf[:n]
+		// A lone g waits for its second g; any other key discards it.
+		if b[0] != 'g' || n != 1 {
+			pendingG = false
+		}
+		half := max(1, (h-3)/2)
 		switch {
 		case b[0] == 0x1b && n == 1:
+			if showHelp {
+				showHelp = false // esc closes help, the row stays
+				continue
+			}
 			if searching {
 				// Esc leaves search mode first; a second Esc closes.
 				searching = false
@@ -902,6 +978,12 @@ func runPicker() int {
 				continue
 			}
 			return 0 // esc closes from browse mode
+		case showHelp:
+			// While help is open only esc, ? and q act; the list does not move.
+			switch b[0] {
+			case '?', 'q':
+				showHelp = false
+			}
 		case b[0] == 0x1b && n > 1 && b[1] == '[':
 			switch {
 			case n > 2 && (b[2] == 'A'):
@@ -925,12 +1007,23 @@ func runPicker() int {
 				continue
 			}
 			return 0
+		case b[0] == '?' && !searching:
+			showHelp = true
 		case b[0] == '/' && !searching:
 			// slash enters search mode, the way prefix+k does; it is never a
 			// filter character in browse mode.
 			searching = true
 			query = ""
 			sel = 0
+		case b[0] == 'g' && !searching && n == 1:
+			if pendingG {
+				sel = 0 // gg jumps to the first row
+				pendingG = false
+			} else {
+				pendingG = true
+			}
+		case b[0] == 'G' && !searching:
+			sel = max(0, len(rows)-1) // G jumps to the last row
 		case b[0] == 'j' && !searching:
 			if sel < len(rows)-1 {
 				sel++
@@ -948,10 +1041,28 @@ func runPicker() int {
 					status = "unfavorited " + id
 				}
 				_ = saveStore(st)
+				for i := range allRows {
+					if allRows[i].PaneID == id {
+						allRows[i].Fav = st.isFavorite(id)
+					}
+				}
 			}
-		case b[0] == 0x15 && searching: // ctrl+u clears the query
-			query = ""
-			sel = 0
+		case b[0] == 0x15: // ctrl+u
+			if searching {
+				query = ""
+				sel = 0
+			} else if sel > half {
+				sel -= half // browse: half a page up
+			} else {
+				sel = 0
+			}
+		case b[0] == 0x04: // ctrl+d
+			if sel+half < len(rows) {
+				sel += half // half a page down, in browse and in search
+			}
+			if sel >= len(rows) {
+				sel = max(0, len(rows)-1)
+			}
 		case b[0] == 0x7f || b[0] == 0x08:
 			if searching && len(query) > 0 {
 				query = query[:len(query)-1]
@@ -1001,13 +1112,26 @@ func closeSelf(paneID, tabID string) {
 	}
 }
 
+func paneRectWidth(s *snapshot, paneID string) int {
+	for _, l := range s.Layouts {
+		for _, lp := range l.Panes {
+			if lp.PaneID == paneID {
+				return lp.Rect.Width
+			}
+		}
+	}
+	return 0
+}
+
 func openPicker() int {
 	if id, err := recordFocus(); err == nil {
 		_ = id
 	}
 	// A tab is the widest placement herdr offers a plugin (overlay inserts a
 	// sliver into the active layout); the pane closes itself on Esc, on q and
-	// after a jump, so no tab is left behind.
+	// after a jump, so no tab is left behind. Herdr 0.9.3 cannot give a plugin
+	// pane 80 columns, so no resize is attempted - the frame draws to the
+	// larger of the tty and the layout rect instead.
 	if _, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "tab", "--focus"); err != nil {
 		fmt.Fprintf(os.Stderr, "recall: open picker: %v\n", err)
 		return 1
