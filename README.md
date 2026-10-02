@@ -49,17 +49,14 @@ After pressing `f` on a row:
 
 ![favorite toggle](assets/screenshot-favorite-toggle.png)
 
-Browse mode (footer shows `/ search`):
+Browse mode (footer shows `/ search`); the four status colours show in the
+same frame (red blocked, yellow working, teal done, green idle):
 
-![browse mode](assets/screenshot-browse.png)
+![browse mode with status colours](assets/screenshot-browse.png)
 
 Search mode after pressing `/` with a typed query:
 
 ![search mode](assets/screenshot-search.png)
-
-Status colours, red blocked / yellow working / teal done / green idle:
-
-![status colours](assets/screenshot-status-colours.png)
 
 The picker draws to the width of the pane it opens in, measured from its own
 tty, so a row never wraps even in a narrow overlay.
