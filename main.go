@@ -603,23 +603,72 @@ func hintFooter(pairs ...string) string {
 	return strings.Join(parts, keyOverlay+"   "+keyReset) + "\r\n"
 }
 
+// agoShort is the compact age form used when the overlay pane is narrow.
+func agoShort(ts int64) string {
+	if ts == 0 {
+		return "-"
+	}
+	d := time.Since(time.Unix(ts, 0))
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// fitLine clips a rendered line to w display columns without breaking an ANSI
+// sequence, so a line can never wrap inside a narrow overlay pane.
+func fitLine(s string, w int) string {
+	rs := []rune(s)
+	var out strings.Builder
+	count := 0
+	for i := 0; i < len(rs); i++ {
+		if rs[i] == 0x1b {
+			j := i
+			for j < len(rs) && rs[j] != 'm' {
+				j++
+			}
+			if j < len(rs) {
+				out.WriteString(string(rs[i : j+1]))
+				i = j
+				continue
+			}
+			out.WriteString(string(rs[i:]))
+			return out.String()
+		}
+		if count >= w {
+			out.WriteString(keyReset)
+			return out.String()
+		}
+		out.WriteRune(rs[i])
+		count++
+	}
+	return out.String()
+}
+
 // renderFrame draws one screenful. Exposed via --render so screenshots and
 // tests use the exact bytes a live session would show.
 func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height int) string {
 	var b strings.Builder
 	b.WriteString("\x1b[2J\x1b[H") // clear
+	// Every line is clipped to the pane's real width: one pane, one row, no
+	// wrapping, whatever width the overlay happens to be.
+	emit := func(line string) { b.WriteString(fitLine(line, width) + "\r\n") }
 	if searching {
-		b.WriteString(keyAccentFg + keyBold + " / " + keyReset)
-		if query == "" {
-			b.WriteString(keyOverlay + "search panes" + keyReset)
-		} else {
-			b.WriteString(keyText + query + keyReset)
+		prompt := keyOverlay + "search panes" + keyReset
+		if query != "" {
+			prompt = keyText + query + keyReset
 		}
+		emit(keyAccentFg + keyBold + " / " + keyReset + prompt)
 	} else {
-		b.WriteString(keyAccentFg + keyBold + "> " + keyReset + keyOverlay + "/ search panes" + keyReset)
+		emit(keyAccentFg + keyBold + "> " + keyReset + keyOverlay + "/ search panes" + keyReset)
 	}
-	b.WriteString("\r\n")
-	b.WriteString(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset + "\r\n")
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	footer := 2
 	visible := height - footer - 1
 	if visible < 3 {
@@ -630,6 +679,17 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		start = sel - visible + 1
 	}
 	lastSection := ""
+	// Column budget: a narrow overlay keeps the status dot and a short visit
+	// count on the same row as a clipped label; a wide one gets the full form.
+	narrow := width < 80
+	starW, statusW, metaW := 2, 12, 18
+	if narrow {
+		statusW, metaW = 9, 8
+	}
+	labelW := width - starW - statusW - metaW
+	if labelW < 4 {
+		labelW = 4
+	}
 	for i, r := range rows {
 		if i < start {
 			continue
@@ -638,7 +698,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 			break
 		}
 		if r.Section != lastSection {
-			b.WriteString(sectionColor(r.Section) + keyBold + "  " + r.Section + keyReset + "\r\n")
+			emit(sectionColor(r.Section) + keyBold + "  " + r.Section + keyReset)
 			lastSection = r.Section
 		}
 		starCell := "  "
@@ -652,17 +712,22 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		// a stable column, then the counts. The selected row is painted as ONE
 		// span so the accent bar covers label, status and metadata together,
 		// with the dot keeping its colour inside the bar.
-		labelCell := pad(clip(r.Label, 43), 44)
+		labelCell := pad(clip(r.Label, labelW), labelW)
 		var statusCell string
 		switch {
 		case word == "":
-			statusCell = strings.Repeat(" ", 12)
+			statusCell = strings.Repeat(" ", statusW)
 		case i == sel:
-			statusCell = pad(scol + "●" + keySelectFg + " " + word, 12)
+			statusCell = pad(scol+"●"+keySelectFg+" "+word, statusW)
 		default:
-			statusCell = pad(scol+"● "+word+keyReset, 12)
+			statusCell = pad(scol+"● "+word+keyReset, statusW)
 		}
-		metaCol := fmt.Sprintf("%d visits %s", r.Visits, ago(r.Last))
+		var metaCol string
+		if narrow {
+			metaCol = fmt.Sprintf("%dv %s", r.Visits, agoShort(r.Last))
+		} else {
+			metaCol = fmt.Sprintf("%d visits %s", r.Visits, ago(r.Last))
+		}
 		if i == sel {
 			span := keySelectBg + keySelectFg + keyBold
 			line := span
@@ -672,19 +737,27 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 				line += " "
 			}
 			line += " " + labelCell + statusCell + " " + metaCol
-			b.WriteString(pad(line, width-1) + keyReset + "\r\n")
+			emit(pad(line, width-1) + keyReset)
 		} else {
-			b.WriteString(starCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset + "\r\n")
+			emit(starCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
 		}
 	}
-	b.WriteString(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset + "\r\n")
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	if searching {
-		b.WriteString(hintFooter("enter", "jump", "j/k", "move", "ctrl+u", "clear", "esc", "back"))
+		if narrow {
+			emit(keyAccentFg + "esc" + keyReset + keyOverlay + " back" + keyReset + keyOverlay + "  enter  ctrl+u" + keyReset)
+		} else {
+			emit(hintFooter("enter", "jump", "j/k", "move", "ctrl+u", "clear", "esc", "back"))
+		}
 	} else {
-		b.WriteString(hintFooter("enter", "jump", "f", "favorite", "j/k", "move", "/", "search", "esc", "close"))
+		if narrow {
+			emit(keyAccentFg + "/" + keyReset + keyOverlay + " search" + keyReset + keyOverlay + "  enter jump  esc close" + keyReset)
+		} else {
+			emit(hintFooter("enter", "jump", "f", "favorite", "j/k", "move", "/", "search", "esc", "close"))
+		}
 	}
 	if status != "" {
-		b.WriteString(keySub + status + keyReset + "\r\n")
+		emit(keySub + status + keyReset)
 	}
 	return b.String()
 }
@@ -730,9 +803,15 @@ func max(a, b int) int {
 // interactive picker
 // ---------------------------------------------------------------------------
 
-func termSize() (int, int) {
-	w, h := 100, 30
-	if out, err := exec.Command("stty", "size").Output(); err == nil {
+// termSize measures the pane's own tty. The overlay pane this plugin runs in
+// is narrow (31 columns in the live session), so the size must come from the
+// tty the picker itself holds, and a failure must never fall back to a wide
+// default: a frame wider than the pane wraps and every row becomes unreadable.
+func termSize(tty *os.File) (int, int) {
+	w, h := 0, 0
+	cmd := exec.Command("stty", "size")
+	cmd.Stdin = tty
+	if out, err := cmd.Output(); err == nil {
 		f := strings.Fields(string(out))
 		if len(f) == 2 {
 			if v, err := strconv.Atoi(f[0]); err == nil && v > 0 {
@@ -742,6 +821,12 @@ func termSize() (int, int) {
 				w = v
 			}
 		}
+	}
+	if w <= 0 {
+		w = 80 // herdr's own panel width, never 100
+	}
+	if h <= 0 {
+		h = 24
 	}
 	return w, h
 }
@@ -781,7 +866,7 @@ func runPicker() int {
 		if sel < 0 {
 			sel = 0
 		}
-		w, h := termSize()
+		w, h := termSize(tty)
 		frame := renderFrame(rows, sel, query, status, searching, w, h)
 		tty.WriteString(frame)
 
@@ -897,7 +982,7 @@ func renderOnce() int {
 			sel = n
 		}
 	}
-	w, h := 100, 30
+	w, h := 80, 24
 	if v := os.Getenv("RECALL_W"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			w = n
