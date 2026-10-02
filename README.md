@@ -4,7 +4,8 @@ A pane recall picker for [Herdr](https://herdr.dev). It remembers which panes
 you actually use and lets you jump back to any of them from one overlay list.
 
 Press `prefix+shift+l` and a picker opens in the style of Herdr's built-in
-goto overlay (`prefix+k`). Panes are listed in three groups:
+goto overlay (`prefix+k`). It starts in browse mode; press `/` to search.
+Panes are listed in three groups:
 
 - **FAVORITES** - panes you starred, always at the top
 - **RECENT** - most recently focused panes
@@ -16,11 +17,19 @@ goto overlay (`prefix+k`). Panes are listed in three groups:
 | Key | Action |
 | --- | ------ |
 | `prefix+shift+l` | open the picker |
+| `/` | enter search mode (browse mode never treats a key as a filter) |
+| type to filter | search mode only: typed characters filter the list |
+| `ctrl+u` | search mode: clear the query |
 | `enter` | jump to the selected pane |
-| `f` | favorite / unfavorite the selected row |
-| `j` / `k` or arrows | move the selection |
-| type to filter | pane id or title substring |
-| `esc` | close |
+| `f` | browse mode: favorite / unfavorite the selected row |
+| `j` / `k` or arrows | browse mode: move the selection; arrows also move in search mode |
+| `esc` | search mode: leave search and keep the picker open |
+| `esc` | browse mode: close the picker |
+
+The footer shows the keys for the mode you are in: key names in accent,
+hint words dim, the same way `prefix+k` does. Status appears as a coloured
+dot plus a coloured word (red blocked, yellow working, teal done, green
+idle), section headers are coloured, and the favourite star is yellow.
 
 ## Screenshots
 

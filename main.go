@@ -25,14 +25,24 @@ const pluginID = "RooseveltAdvisors.herdr-recall"
 const recentLimit = 8
 
 const (
-	keyReset   = "\x1b[0m"
-	keyDim     = "\x1b[2m"
-	keyBold    = "\x1b[1m"
-	keyAccentFg = "\x1b[38;5;81m"  // matches the overlay accent line style
-	keySub     = "\x1b[38;5;246m"  // subtext
-	keyOverlay = "\x1b[38;5;244m"  // overlay0, used for placeholder and hints
-	keySelectBg = "\x1b[48;5;81m"  // selected row background
-	keySelectFg = "\x1b[38;5;235m" // text on accent
+	keyReset    = "\x1b[0m"
+	keyDim      = "\x1b[2m"
+	keyBold     = "\x1b[1m"
+	keyAccentFg = "\x1b[38;5;81m"  // accent, used for selected-row bar, key names
+	keySub      = "\x1b[38;5;246m"  // subtext, kept for compatibility
+	keyOverlay  = "\x1b[38;5;244m"  // overlay0: hints and placeholders only
+	keySelectBg = "\x1b[48;5;81m"   // selected row background
+	keySelectFg = "\x1b[38;5;235m"  // contrast text on accent
+	keyText     = "\x1b[38;5;252m"  // readable body text on the panel
+	keySurface  = "\x1b[38;5;238m"  // mid surface colour for separators
+	keyStar     = "\x1b[38;5;221m"  // warm yellow favourite star
+	keySecFav   = "\x1b[38;5;221m"  // FAVORITES header, warm
+	keySecRec   = "\x1b[38;5;81m"   // RECENT header, accent
+	keySecUsed  = "\x1b[38;5;44m"   // MOST USED header, teal
+	keyStBad    = "\x1b[38;5;203m"  // blocked: red
+	keyStBusy   = "\x1b[38;5;221m"  // working: yellow
+	keyStGood   = "\x1b[38;5;44m"   // done: teal
+	keyStFree   = "\x1b[38;5;114m"  // idle: green
 )
 
 // ---------------------------------------------------------------------------
@@ -535,18 +545,81 @@ func ago(ts int64) string {
 	}
 }
 
+// statusWord strips the brackets and unknown-ness of a row status.
+func statusWord(status string) string {
+	switch status {
+	case "", "unknown":
+		return ""
+	case "blocked", "failed":
+		return "blocked"
+	case "working", "running", "fixing":
+		return "working"
+	case "done", "completed":
+		return "done"
+	case "idle", "paused":
+		return "idle"
+	default:
+		return status
+	}
+}
+
+// statusColor maps a status to the same colour vocabulary herdr's own
+// status.go state_dot uses: red blocked, yellow working, teal done, green idle.
+func statusColor(status string) string {
+	switch statusWord(status) {
+	case "blocked":
+		return keyStBad
+	case "working":
+		return keyStBusy
+	case "done":
+		return keyStGood
+	case "idle":
+		return keyStFree
+	default:
+		return ""
+	}
+}
+
+func sectionColor(section string) string {
+	switch section {
+	case "FAVORITES":
+		return keySecFav
+	case "RECENT":
+		return keySecRec
+	case "MOST USED":
+		return keySecUsed
+	default:
+		return keyOverlay
+	}
+}
+
+// hintFooter paints key names in accent and their hint words dim, the way the
+// built-in goto footer does.
+func hintFooter(pairs ...string) string {
+	parts := make([]string, 0, (len(pairs)+1)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		parts = append(parts, keyAccentFg+pairs[i]+keyReset+keyOverlay+" "+pairs[i+1]+keyReset)
+	}
+	return strings.Join(parts, keyOverlay+"   "+keyReset) + "\r\n"
+}
+
 // renderFrame draws one screenful. Exposed via --render so screenshots and
 // tests use the exact bytes a live session would show.
-func renderFrame(rows []row, sel int, query string, status string, width, height int) string {
+func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height int) string {
 	var b strings.Builder
 	b.WriteString("\x1b[2J\x1b[H") // clear
-	if query == "" {
-		b.WriteString(keyAccentFg + keyBold + "> " + keyReset + keyOverlay + "search panes" + keyReset)
+	if searching {
+		b.WriteString(keyAccentFg + keyBold + " / " + keyReset)
+		if query == "" {
+			b.WriteString(keyOverlay + "search panes" + keyReset)
+		} else {
+			b.WriteString(keyText + query + keyReset)
+		}
 	} else {
-		b.WriteString(keyAccentFg + keyBold + "> " + keyReset + query + keyReset)
+		b.WriteString(keyAccentFg + keyBold + "> " + keyReset + keyOverlay + "/ search panes" + keyReset)
 	}
 	b.WriteString("\r\n")
-	b.WriteString(keySub + strings.Repeat("─", max(8, width-1)) + keyReset + "\r\n")
+	b.WriteString(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset + "\r\n")
 	footer := 2
 	visible := height - footer - 1
 	if visible < 3 {
@@ -565,36 +638,51 @@ func renderFrame(rows []row, sel int, query string, status string, width, height
 			break
 		}
 		if r.Section != lastSection {
-			b.WriteString(keyOverlay + keyBold + "  " + r.Section + keyReset + "\r\n")
+			b.WriteString(sectionColor(r.Section) + keyBold + "  " + r.Section + keyReset + "\r\n")
 			lastSection = r.Section
 		}
-		fav := " "
+		starCell := "  "
 		if r.Fav {
-			fav = "*"
+			starCell = keyStar + "*" + keyReset + " "
 		}
-		chipText := ""
-		if r.Status != "" && r.Status != "unknown" {
-			chipText = "[" + r.Status + "]"
-		}
-		// One fixed layout for every row, the way prefix+k paints it: a two
-		// column favourite marker, a label cell, a chip cell at a stable
-		// column, then the counts. The selected row is painted as ONE span so
-		// the accent bar covers label, status and metadata together.
-		favCol := fav + " "
-		// The label cell always ends in a separator space, so a full-width
-		// label can never run into the status chip cell.
+		word := statusWord(r.Status)
+		scol := statusColor(r.Status)
+		// One fixed layout for every row, the way prefix+k paints it: star,
+		// a label cell that always ends in a separator space, a status cell at
+		// a stable column, then the counts. The selected row is painted as ONE
+		// span so the accent bar covers label, status and metadata together,
+		// with the dot keeping its colour inside the bar.
 		labelCell := pad(clip(r.Label, 43), 44)
-		chipCell := pad(chipText, 12)
+		var statusCell string
+		switch {
+		case word == "":
+			statusCell = strings.Repeat(" ", 12)
+		case i == sel:
+			statusCell = pad(scol + "●" + keySelectFg + " " + word, 12)
+		default:
+			statusCell = pad(scol+"● "+word+keyReset, 12)
+		}
 		metaCol := fmt.Sprintf("%d visits %s", r.Visits, ago(r.Last))
-		plain := favCol + labelCell + chipCell + " " + metaCol
 		if i == sel {
-			b.WriteString(keySelectBg + keySelectFg + keyBold + pad(plain, width-1) + keyReset + "\r\n")
+			span := keySelectBg + keySelectFg + keyBold
+			line := span
+			if r.Fav {
+				line += keyStar + "*" + span
+			} else {
+				line += " "
+			}
+			line += " " + labelCell + statusCell + " " + metaCol
+			b.WriteString(pad(line, width-1) + keyReset + "\r\n")
 		} else {
-			b.WriteString(" " + favCol + labelCell + keySub + chipCell + metaCol + keyReset + "\r\n")
+			b.WriteString(starCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset + "\r\n")
 		}
 	}
-	b.WriteString(keySub + strings.Repeat("─", max(8, width-1)) + keyReset + "\r\n")
-	b.WriteString(keyOverlay + " enter jump   f favorite   j/k move   type filter   esc close" + keyReset + "\r\n")
+	b.WriteString(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset + "\r\n")
+	if searching {
+		b.WriteString(hintFooter("enter", "jump", "j/k", "move", "ctrl+u", "clear", "esc", "back"))
+	} else {
+		b.WriteString(hintFooter("enter", "jump", "f", "favorite", "j/k", "move", "/", "search", "esc", "close"))
+	}
 	if status != "" {
 		b.WriteString(keySub + status + keyReset + "\r\n")
 	}
@@ -679,6 +767,7 @@ func runPicker() int {
 	query := ""
 	sel := 0
 	status := ""
+	searching := false
 	for {
 		snap, err := loadSnapshot()
 		if err != nil {
@@ -693,7 +782,7 @@ func runPicker() int {
 			sel = 0
 		}
 		w, h := termSize()
-		frame := renderFrame(rows, sel, query, status, w, h)
+		frame := renderFrame(rows, sel, query, status, searching, w, h)
 		tty.WriteString(frame)
 
 		buf := make([]byte, 8)
@@ -704,7 +793,14 @@ func runPicker() int {
 		b := buf[:n]
 		switch {
 		case b[0] == 0x1b && n == 1:
-			return 0 // esc closes
+			if searching {
+				// Esc leaves search mode first; a second Esc closes.
+				searching = false
+				query = ""
+				sel = 0
+				continue
+			}
+			return 0 // esc closes from browse mode
 		case b[0] == 0x1b && n > 1 && b[1] == '[':
 			switch {
 			case n > 2 && (b[2] == 'A'):
@@ -728,15 +824,21 @@ func runPicker() int {
 				continue
 			}
 			return 0
-		case b[0] == 'j':
+		case b[0] == '/' && !searching:
+			// slash enters search mode, the way prefix+k does; it is never a
+			// filter character in browse mode.
+			searching = true
+			query = ""
+			sel = 0
+		case b[0] == 'j' && !searching:
 			if sel < len(rows)-1 {
 				sel++
 			}
-		case b[0] == 'k':
+		case b[0] == 'k' && !searching:
 			if sel > 0 {
 				sel--
 			}
-		case b[0] == 'f':
+		case b[0] == 'f' && !searching:
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
 				if st.toggleFavorite(id) {
@@ -746,14 +848,18 @@ func runPicker() int {
 				}
 				_ = saveStore(st)
 			}
+		case b[0] == 0x15 && searching: // ctrl+u clears the query
+			query = ""
+			sel = 0
 		case b[0] == 0x7f || b[0] == 0x08:
-			if len(query) > 0 {
+			if searching && len(query) > 0 {
 				query = query[:len(query)-1]
 				sel = 0
 			}
-		case b[0] == 'q' && query == "":
+		case b[0] == 'q' && !searching:
 			return 0
-		case b[0] >= 0x20 && b[0] < 0x7f:
+		case searching && b[0] >= 0x20 && b[0] < 0x7f:
+			// only search mode filters; browse mode ignores typed letters
 			query += string(b[0])
 			sel = 0
 		}
@@ -783,6 +889,7 @@ func renderOnce() int {
 		return 1
 	}
 	query := os.Getenv("RECALL_QUERY")
+	searching := os.Getenv("RECALL_SEARCH") == "1"
 	rows := buildRows(snap, st, query)
 	sel := 0
 	if v := os.Getenv("RECALL_SEL"); v != "" {
@@ -801,7 +908,7 @@ func renderOnce() int {
 			h = n
 		}
 	}
-	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), w, h))
+	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), searching, w, h))
 	return 0
 }
 
