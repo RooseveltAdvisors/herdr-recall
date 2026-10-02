@@ -898,12 +898,9 @@ func runPicker() int {
 		return 1
 	}
 	defer tty.Close()
-	// Close this picker's own pane on every exit path (Esc, q, jump). Registered
-	// before the stty restore so the restore still runs first.
-	if s, err := loadSnapshot(); err == nil {
-		selfPane, selfTab := s.FocusedPaneID, s.FocusedTabID
-		defer closeSelf(selfPane, selfTab)
-	}
+	// Exiting the process dismisses the popup (Esc, q and a jump all return to
+	// the same view); no pane close or tab close is ever issued, so no tab can
+	// be left behind.
 	// raw mode without external dependencies
 	raw := exec.Command("stty", "raw", "-echo")
 	raw.Stdin = tty
@@ -1102,36 +1099,6 @@ func runPicker() int {
 // entrypoints
 // ---------------------------------------------------------------------------
 
-// closeSelf closes the picker's own pane, and the tab it was opened in when
-// that tab is left empty, so Esc and a jump never leave the picker behind.
-func closeSelf(paneID, tabID string) {
-	if paneID == "" {
-		return
-	}
-	_, _ = herdr("pane", "close", paneID)
-	if tabID == "" {
-		return
-	}
-	s, err := loadSnapshot()
-	if err != nil {
-		return
-	}
-	found := false
-	for _, l := range s.Layouts {
-		if l.TabID == tabID {
-			found = true
-			if len(l.Panes) == 0 {
-				_, _ = herdr("tab", "close", tabID)
-			}
-			return
-		}
-	}
-	if !found {
-		// herdr dropped the empty layout already; close the leftover tab.
-		_, _ = herdr("tab", "close", tabID)
-	}
-}
-
 func paneRectWidth(s *snapshot, paneID string) int {
 	for _, l := range s.Layouts {
 		for _, lp := range l.Panes {
@@ -1147,12 +1114,11 @@ func openPicker() int {
 	if id, err := recordFocus(); err == nil {
 		_ = id
 	}
-	// A tab is the widest placement herdr offers a plugin (overlay inserts a
-	// sliver into the active layout); the pane closes itself on Esc, on q and
-	// after a jump, so no tab is left behind. Herdr 0.9.3 cannot give a plugin
-	// pane 80 columns, so no resize is attempted - the frame draws to the
-	// larger of the tty and the layout rect instead.
-	if _, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "tab", "--focus"); err != nil {
+	// Popup is a session modal, like prefix+k: it floats over the current view
+	// and does not change the tab layout. Exiting the process dismisses it, so
+	// no pane close or tab close is ever issued. The CLI help omits popup, but
+	// the 0.9.3 server implements it (width/height are popup-only flags).
+	if _, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "popup", "--width", "80%", "--height", "70%"); err != nil {
 		fmt.Fprintf(os.Stderr, "recall: open picker: %v\n", err)
 		return 1
 	}

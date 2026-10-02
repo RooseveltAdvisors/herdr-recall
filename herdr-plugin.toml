@@ -40,5 +40,7 @@ command = ["./bin/herdr-recall", "hook", "workspace.closed"]
 [[panes]]
 id = "picker"
 title = "Recall"
-placement = "overlay"
+placement = "popup"
+width = "80%"
+height = "70%"
 command = ["./bin/herdr-recall", "picker"]
