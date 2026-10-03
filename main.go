@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -322,87 +323,58 @@ func paneLabel(s *snapshot, id string) string {
 // jump: workspace, tab, then geometry hops until the pane is focused
 // ---------------------------------------------------------------------------
 
-func dirFor(cur, dst rect) string {
-	dx := dst.X - cur.X
-	dy := dst.Y - cur.Y
-	if abs(dx) >= abs(dy) {
-		if dx >= 0 {
-			return "right"
-		}
-		return "left"
-	}
-	if dy >= 0 {
-		return "down"
-	}
-	return "up"
-}
-
-func abs(v int) int {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
-
 func jumpTo(paneID string) error {
 	snap, err := loadSnapshot()
 	if err != nil {
 		return err
 	}
-	var pane *paneRec
-	for i := range snap.Panes {
-		if snap.Panes[i].PaneID == paneID {
-			pane = &snap.Panes[i]
+	live := false
+	for _, p := range snap.Panes {
+		if p.PaneID == paneID {
+			live = true
 			break
 		}
 	}
-	if pane == nil {
-		return fmt.Errorf("pane %s not in snapshot", paneID)
+	if !live {
+		return fmt.Errorf("that pane is closed")
 	}
-	if _, err := herdr("workspace", "focus", pane.WorkspaceID); err != nil {
+	return focusPane(paneID)
+}
+
+// focusPane uses herdr's pane.focus API. Direction hops miss panes that are
+// not a neighbor, so Enter looked like it did nothing.
+func focusPane(paneID string) error {
+	sock := os.Getenv("HERDR_SOCKET_PATH")
+	if sock == "" {
+		return fmt.Errorf("HERDR_SOCKET_PATH unset")
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
 		return err
 	}
-	if _, err := herdr("tab", "focus", pane.TabID); err != nil {
+	defer conn.Close()
+	req, err := json.Marshal(map[string]any{
+		"id":     "recall-focus",
+		"method": "pane.focus",
+		"params": map[string]string{"pane_id": paneID},
+	})
+	if err != nil {
 		return err
 	}
-	for hop := 0; hop < 8; hop++ {
-		s, err := loadSnapshot()
-		if err != nil {
-			return err
-		}
-		if s.FocusedPaneID == paneID {
-			return nil
-		}
-		var cur, dst rect
-		found := false
-		for _, l := range s.Layouts {
-			if l.TabID != pane.TabID {
-				continue
-			}
-			for _, lp := range l.Panes {
-				if lp.PaneID == s.FocusedPaneID {
-					cur = lp.Rect
-					found = true
-				}
-				if lp.PaneID == paneID {
-					dst = lp.Rect
-				}
-			}
-		}
-		if !found {
-			break
-		}
-		if dst == (rect{}) {
-			break
-		}
-		d := dirFor(cur, dst)
-		if _, err := herdr("pane", "focus", "--direction", d, "--pane", s.FocusedPaneID); err != nil {
-			return err
-		}
+	if _, err := conn.Write(append(req, '\n')); err != nil {
+		return err
 	}
-	s, _ := loadSnapshot()
-	if s != nil && s.FocusedPaneID != paneID {
-		return fmt.Errorf("focused %s after hops, wanted %s", s.FocusedPaneID, paneID)
+	var resp struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	dec := json.NewDecoder(conn)
+	if err := dec.Decode(&resp); err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("%s", resp.Error.Message)
 	}
 	return nil
 }
@@ -520,10 +492,14 @@ func collectRows(s *snapshot, st *store) []row {
 	for _, p := range s.Panes {
 		statusOf[p.PaneID] = p.AgentStatus
 	}
+	live := map[string]bool{}
+	for _, p := range s.Panes {
+		live[p.PaneID] = true
+	}
 	seen := map[string]bool{}
 	var ids []string
 	addID := func(id string) {
-		if id == "" || seen[id] {
+		if id == "" || seen[id] || !live[id] {
 			return
 		}
 		seen[id] = true
@@ -1268,11 +1244,11 @@ func runPicker() int {
 			}
 		case key == "G" && !searching:
 			sel = max(0, len(rows)-1) // G jumps to the last row
-		case key == "j" && !searching:
+		case key == "j" || key == "down":
 			if sel < len(rows)-1 {
 				sel++
 			}
-		case key == "k" && !searching:
+		case key == "k" || key == "up":
 			if sel > 0 {
 				sel--
 			}

@@ -15,7 +15,12 @@ func TestTabsStaySeparateAndRecentCapsAt20(t *testing.T) {
 		id := string(rune('a' + i))
 		st.Panes[id] = &paneStat{Visits: int64(i + 1), Last: now - int64(i)*60, Label: id}
 	}
-	snap := &snapshot{}
+	var panes []paneRec
+	panes = append(panes, paneRec{PaneID: "notes"})
+	for i := 0; i < 25; i++ {
+		panes = append(panes, paneRec{PaneID: string(rune('a' + i))})
+	}
+	snap := &snapshot{Panes: panes}
 
 	recent := tabRows(snap, st, tabRecent, sortDefault)
 	if len(recent) != recentMax {
@@ -54,11 +59,13 @@ func TestTabsStaySeparateAndRecentCapsAt20(t *testing.T) {
 
 func TestAllKeepsTheTabBarOnScreen(t *testing.T) {
 	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	var panes []paneRec
 	for i := 0; i < 80; i++ {
 		id := fmt.Sprintf("pane-%02d", i)
 		st.Panes[id] = &paneStat{Visits: int64(i + 1), Last: int64(i), Label: id}
+		panes = append(panes, paneRec{PaneID: id})
 	}
-	rows := tabRows(&snapshot{}, st, tabAll, sortDefault)
+	rows := tabRows(&snapshot{Panes: panes}, st, tabAll, sortDefault)
 	const height = 12
 	frame := renderFrame(rows, 40, "", "", false, 70, height, tabAll, sortDefault)
 	plain := stripANSI(frame)
