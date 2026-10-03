@@ -859,9 +859,9 @@ func renderHelp(width, height int) string {
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	keys := [][2]string{
 		{"h / l", "switch tabs"},
-		{"n", "new custom tab: name, s sort, f favorites only, + limit"},
+		{"n", "new custom tab"},
 		{"e", "edit the current custom tab"},
-		{"x", "delete the current custom tab, then confirm"},
+		{"x", "delete the current custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
 		{"/", "search panes (esc back to the list)"},
 		{"enter", "jump to the selected pane"},
@@ -1067,6 +1067,192 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	return b.String()
 }
 
+func paint(lines []string) string {
+	var b strings.Builder
+	b.WriteString("\x1b[2J\x1b[H")
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteString("\r\n")
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+func formSummary(sort string, limit int, only string) string {
+	which := "panes"
+	if only == "favorites" {
+		which = "favorites"
+	}
+	switch sort {
+	case "times":
+		if limit == 0 {
+			return "Shows every " + which + ", most opened first."
+		}
+		return fmt.Sprintf("Shows the %d %s you opened most often.", limit, which)
+	case "name":
+		if limit == 0 {
+			return "Shows every " + which + ", in name order."
+		}
+		return fmt.Sprintf("Shows %d %s, in name order.", limit, which)
+	default:
+		if limit == 0 {
+			return "Shows every " + which + ", most recent first."
+		}
+		return fmt.Sprintf("Shows the %d %s you opened most recently.", limit, which)
+	}
+}
+
+func choiceLine(labels []string, selected int) string {
+	var b strings.Builder
+	b.WriteString("  ")
+	for i, label := range labels {
+		if i > 0 {
+			b.WriteString("  ")
+		}
+		if i == selected {
+			b.WriteString(keySelectBg + keySelectFg + keyBold + " " + label + " " + keyReset)
+		} else {
+			b.WriteString(keyOverlay + " " + label + " " + keyReset)
+		}
+	}
+	return b.String()
+}
+
+func fieldTitle(label string, focused bool) string {
+	if focused {
+		return keyAccentFg + keyBold + "  " + label + keyReset
+	}
+	return keyOverlay + "  " + label + keyReset
+}
+
+func sortLabels() []string  { return []string{"Last used", "Times opened", "Name"} }
+func limitLabels() []string { return []string{"10", "20", "50", "All"} }
+func onlyLabels() []string  { return []string{"Any pane", "Favorites only"} }
+
+func sortChoice(sort string) int {
+	switch sort {
+	case "times":
+		return 1
+	case "name":
+		return 2
+	default:
+		return 0
+	}
+}
+
+func limitChoice(limit int) int {
+	switch limit {
+	case 10:
+		return 0
+	case 50:
+		return 2
+	case 0:
+		return 3
+	default:
+		return 1
+	}
+}
+
+func onlyChoice(only string) int {
+	if only == "favorites" {
+		return 1
+	}
+	return 0
+}
+
+func cycle(n, i, dir int) int {
+	return (i + dir + n) % n
+}
+
+func stepFormValue(field, dir int, sort string, limit int, only string) (string, int, string) {
+	switch field {
+	case 1:
+		opts := []string{"last", "times", "name"}
+		sort = opts[cycle(len(opts), sortChoice(sort), dir)]
+	case 2:
+		opts := []int{10, 20, 50, 0}
+		limit = opts[cycle(len(opts), limitChoice(limit), dir)]
+	case 3:
+		opts := []string{"", "favorites"}
+		only = opts[cycle(len(opts), onlyChoice(only), dir)]
+	}
+	return sort, limit, only
+}
+
+// renderForm is the criteria editor. Every choice is on screen. j/k moves
+// between fields. h/l changes the highlighted choice. Letters type the name.
+func renderForm(width, height int, names []string, active, field int, editing bool, name, sort string, limit int, only, status string) string {
+	if height < 8 {
+		height = 8
+	}
+	title := "New tab"
+	if editing {
+		title = "Edit tab"
+	}
+	var lines []string
+	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
+	emit(tabBar(names, active))
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit(keyText + keyBold + "  " + title + keyReset)
+	emit(keyOverlay + "  " + formSummary(sort, limit, only) + keyReset)
+	emit("")
+	emit(fieldTitle("Name", field == 0))
+	if field == 0 {
+		shown := name
+		if shown == "" {
+			shown = "type a name"
+			emit(keySelectBg + keyOverlay + "  " + shown + " " + keyReset)
+		} else {
+			emit(keySelectBg + keySelectFg + keyBold + "  " + shown + " " + keyReset)
+		}
+	} else if name == "" {
+		emit(keyOverlay + "  type a name" + keyReset)
+	} else {
+		emit(keyText + "  " + name + keyReset)
+	}
+	emit("")
+	emit(fieldTitle("Sort", field == 1))
+	emit(choiceLine(sortLabels(), sortChoice(sort)))
+	emit("")
+	emit(fieldTitle("How many", field == 2))
+	emit(choiceLine(limitLabels(), limitChoice(limit)))
+	emit("")
+	emit(fieldTitle("Which panes", field == 3))
+	emit(choiceLine(onlyLabels(), onlyChoice(only)))
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit(hintFooter("j/k", "field", "h/l", "choice", "enter", "save", "esc", "cancel"))
+	if status != "" {
+		emit(keySub + status + keyReset)
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return paint(lines)
+}
+
+// renderConfirm asks before a custom tab is removed. Cancel is selected.
+func renderConfirm(width, height int, names []string, active, sel int, name string) string {
+	if height < 8 {
+		height = 8
+	}
+	var lines []string
+	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
+	emit(tabBar(names, active))
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit("")
+	emit(keyText + keyBold + "  Delete " + name + "?" + keyReset)
+	emit(keyOverlay + "  The panes stay. Only this tab is removed." + keyReset)
+	emit("")
+	emit(choiceLine([]string{"Delete", "Cancel"}, sel))
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit(hintFooter("h/l", "choose", "enter", "confirm", "esc", "back"))
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return paint(lines)
+}
+
 // clipTail keeps the distinguishing end of a name: "portal-internal-scheduler"
 // shows its tail, never the "portal-int…" head clip.
 func clipTail(s string, n int) string {
@@ -1239,7 +1425,9 @@ func runPicker() int {
 	creating := false
 	editing := false
 	editIdx := -1
+	formField := 0
 	confirmName := ""
+	confirmSel := 1
 	newName, newSort, newOnly := "", "last", ""
 	newLimit := 20
 	var allRows []row
@@ -1267,35 +1455,18 @@ func runPicker() int {
 		}
 		w, h := termSize(tty)
 		var frame string
-		if showHelp {
+		switch {
+		case showHelp:
 			frame = renderHelp(w, h)
-		} else {
+		case confirmName != "":
+			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
+		case creating:
+			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newLimit, newOnly, status)
+		default:
 			v := views(st)[tab]
 			kind := "both"
 			if v.Kind == "custom" {
 				kind = st.Tabs[v.Idx].Sort
-			}
-			if creating {
-				limit := "all"
-				if newLimit > 0 {
-					limit = fmt.Sprintf("%d", newLimit)
-				}
-				only := "any pane"
-				if newOnly == "favorites" {
-					only = "favorites only"
-				}
-				name := newName
-				if name == "" {
-					name = "(name)"
-				}
-				verb := "new tab"
-				if editing {
-					verb = "edit tab"
-				}
-				status = fmt.Sprintf("%s: %s · %s · %s · %s", verb, name, newSort, limit, only)
-			}
-			if confirmName != "" {
-				status = fmt.Sprintf("Delete %q?  x confirm  esc cancel", confirmName)
 			}
 			frame = renderFrame(rows, sel, query, status, searching, w, h, viewNames(st), tab, kind)
 		}
@@ -1333,19 +1504,24 @@ func runPicker() int {
 		}
 		if confirmName != "" && !showHelp {
 			switch key {
-			case "x", "enter":
-				v := views(st)[tab]
-				if v.Kind == "custom" {
-					st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
-					_ = saveStore(st)
-					tab = 0
-					status = "deleted " + confirmName
-					rebuild()
+			case "left", "h":
+				confirmSel = cycle(2, confirmSel, -1)
+			case "right", "l":
+				confirmSel = cycle(2, confirmSel, 1)
+			case "enter":
+				if confirmSel == 0 {
+					v := views(st)[tab]
+					if v.Kind == "custom" {
+						st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
+						_ = saveStore(st)
+						tab = 0
+						status = "deleted " + confirmName
+						rebuild()
+					}
 				}
 				confirmName = ""
-			default:
+			case "esc":
 				confirmName = ""
-				status = ""
 			}
 			continue
 		}
@@ -1353,11 +1529,13 @@ func runPicker() int {
 			switch key {
 			case "esc":
 				creating = false
+				editing = false
 				status = ""
 			case "enter":
 				name := strings.TrimSpace(newName)
 				if name == "" {
-					status = "type a name first"
+					formField = 0
+					status = "Type a name, then press enter."
 					break
 				}
 				ct := customTab{Name: name, Sort: newSort, Limit: newLimit, Only: newOnly}
@@ -1375,51 +1553,33 @@ func runPicker() int {
 				editing = false
 				sel = 0
 				rebuild()
-			case "s":
-				switch newSort {
-				case "last":
-					newSort = "times"
-				case "times":
-					newSort = "name"
-				default:
-					newSort = "last"
+			case "j", "down":
+				if formField < 3 {
+					formField++
 				}
-			case "f":
-				if newOnly == "favorites" {
-					newOnly = ""
-				} else {
-					newOnly = "favorites"
+				status = ""
+			case "k", "up":
+				if formField > 0 {
+					formField--
 				}
-			case "+", "=":
-				switch newLimit {
-				case 10:
-					newLimit = 20
-				case 20:
-					newLimit = 50
-				case 50:
-					newLimit = 0
-				default:
-					newLimit = 10
-				}
-			case "-":
-				switch newLimit {
-				case 0:
-					newLimit = 50
-				case 50:
-					newLimit = 20
-				case 20:
-					newLimit = 10
-				default:
-					newLimit = 0
-				}
+				status = ""
+			case "h", "left":
+				newSort, newLimit, newOnly = stepFormValue(formField, -1, newSort, newLimit, newOnly)
+				status = ""
+			case "l", "right":
+				newSort, newLimit, newOnly = stepFormValue(formField, 1, newSort, newLimit, newOnly)
+				status = ""
 			case "bs":
-				rs := []rune(newName)
-				if len(rs) > 0 {
-					newName = string(rs[:len(rs)-1])
+				if formField == 0 {
+					rs := []rune(newName)
+					if len(rs) > 0 {
+						newName = string(rs[:len(rs)-1])
+					}
 				}
 			default:
-				if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f && key != "/" {
+				if formField == 0 && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
 					newName += key
+					status = ""
 				}
 			}
 			continue
@@ -1495,8 +1655,9 @@ func runPicker() int {
 			creating = true
 			editing = false
 			editIdx = -1
+			formField = 0
 			newName, newSort, newOnly, newLimit = "", "last", "", 20
-			status = "new tab: type a name, s sort, f favorites only, + limit, enter save"
+			status = ""
 		case key == "e" && !searching && !showHelp:
 			v := views(st)[tab]
 			if v.Kind != "custom" {
@@ -1506,14 +1667,16 @@ func runPicker() int {
 			creating = true
 			editing = true
 			editIdx = v.Idx
+			formField = 1
 			newName, newSort, newOnly, newLimit = ct.Name, ct.Sort, ct.Only, ct.Limit
-			status = "edit tab: s sort, f favorites only, + limit, enter save"
+			status = ""
 		case key == "x" && !searching && !showHelp:
 			v := views(st)[tab]
 			if v.Kind != "custom" {
 				break
 			}
 			confirmName = st.Tabs[v.Idx].Name
+			confirmSel = 1
 		case key == "/" && !searching:
 			// slash enters search mode, the way prefix+k does; it is never a
 			// filter character in browse mode.

@@ -6,6 +6,19 @@ import (
 	"time"
 )
 
+func TestFormShowsEveryChoice(t *testing.T) {
+	frame := stripANSI(renderForm(80, 24, []string{"All", "Favorites", "Recent"}, 2, 1, true, "Recent", "last", 20, "", ""))
+	for _, want := range []string{"Edit tab", "Last used", "Times opened", "Name", "Favorites only", "Shows the 20 panes"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("form missing %q:\n%s", want, frame)
+		}
+	}
+	sort, limit, only := stepFormValue(1, 1, "last", 20, "")
+	if sort != "times" || limit != 20 || only != "" {
+		t.Fatalf("sort step = %s %d %s", sort, limit, only)
+	}
+}
+
 func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 	now := time.Now().Unix()
 	st := &store{Version: 1, Panes: map[string]*paneStat{}, TabsInit: true, Tabs: defaultTabs()}

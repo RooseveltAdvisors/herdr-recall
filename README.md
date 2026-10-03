@@ -5,8 +5,8 @@ you actually use and lets you jump back to any of them from one overlay list.
 
 Press `prefix+shift+l` and a picker opens as a popup. All and Favorites
 are the built-in tabs. Recent and Most used start as tabs you can delete
-with `x` (it asks you to confirm) and recreate with `n`. Press `e` on a
-custom tab to change its name, sort, limit, and favorites filter. `s` sorts only on All and Favorites.
+with `x` (it asks you to confirm) and recreate with `n`. Press `e` to edit a custom tab. The form shows every choice.
+`j` and `k` move between fields. `h` and `l` change the highlighted choice. `s` sorts only on All and Favorites.
 Recent shows when you last opened the pane. Most used shows how many times.
 
 ## Keys
