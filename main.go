@@ -860,7 +860,8 @@ func renderHelp(width, height int) string {
 	keys := [][2]string{
 		{"h / l", "switch tabs"},
 		{"n", "new custom tab: name, s sort, f favorites only, + limit"},
-		{"x", "delete the current custom tab"},
+		{"e", "edit the current custom tab"},
+		{"x", "delete the current custom tab, then confirm"},
 		{"s", "on All and Favorites: cycle sort"},
 		{"/", "search panes (esc back to the list)"},
 		{"enter", "jump to the selected pane"},
@@ -1038,13 +1039,13 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 				extra = "s sort  " + extra
 			}
 			if custom {
-				extra = "x delete  " + extra
+				extra = "e edit  x delete  " + extra
 			}
 			emit(keyOverlay + extra + keyReset)
 		} else if showSort {
 			emit(hintFooter("h/l", "tabs", "s", "sort", "n", "new tab", "f", "pin", "/", "search", "esc", "close"))
 		} else if custom {
-			emit(hintFooter("h/l", "tabs", "x", "delete", "n", "new tab", "j/k", "move", "/", "search", "esc", "close"))
+			emit(hintFooter("h/l", "tabs", "e", "edit", "x", "delete", "n", "new", "/", "search", "esc", "close"))
 		} else {
 			emit(hintFooter("h/l", "tabs", "n", "new tab", "j/k", "move", "/", "search", "esc", "close"))
 		}
@@ -1236,6 +1237,9 @@ func runPicker() int {
 	tab := openTab(st)
 	sortMode := sortDefault
 	creating := false
+	editing := false
+	editIdx := -1
+	confirmName := ""
 	newName, newSort, newOnly := "", "last", ""
 	newLimit := 20
 	var allRows []row
@@ -1284,7 +1288,14 @@ func runPicker() int {
 				if name == "" {
 					name = "(name)"
 				}
-				status = fmt.Sprintf("new tab: %s · %s · %s · %s", name, newSort, limit, only)
+				verb := "new tab"
+				if editing {
+					verb = "edit tab"
+				}
+				status = fmt.Sprintf("%s: %s · %s · %s · %s", verb, name, newSort, limit, only)
+			}
+			if confirmName != "" {
+				status = fmt.Sprintf("Delete %q?  x confirm  esc cancel", confirmName)
 			}
 			frame = renderFrame(rows, sel, query, status, searching, w, h, viewNames(st), tab, kind)
 		}
@@ -1320,6 +1331,24 @@ func runPicker() int {
 			}
 			b, n = b[k:], len(b)-k // mixed read: handle the rest normally
 		}
+		if confirmName != "" && !showHelp {
+			switch key {
+			case "x", "enter":
+				v := views(st)[tab]
+				if v.Kind == "custom" {
+					st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
+					_ = saveStore(st)
+					tab = 0
+					status = "deleted " + confirmName
+					rebuild()
+				}
+				confirmName = ""
+			default:
+				confirmName = ""
+				status = ""
+			}
+			continue
+		}
 		if creating && !showHelp {
 			switch key {
 			case "esc":
@@ -1331,11 +1360,19 @@ func runPicker() int {
 					status = "type a name first"
 					break
 				}
-				st.Tabs = append(st.Tabs, customTab{Name: name, Sort: newSort, Limit: newLimit, Only: newOnly})
+				ct := customTab{Name: name, Sort: newSort, Limit: newLimit, Only: newOnly}
+				if editing && editIdx >= 0 && editIdx < len(st.Tabs) {
+					ct.Fixed = st.Tabs[editIdx].Fixed
+					st.Tabs[editIdx] = ct
+					status = "saved " + name
+				} else {
+					st.Tabs = append(st.Tabs, ct)
+					tab = len(views(st)) - 1
+					status = "created " + name
+				}
 				_ = saveStore(st)
-				tab = len(views(st)) - 1
 				creating = false
-				status = "created " + name
+				editing = false
 				sel = 0
 				rebuild()
 			case "s":
@@ -1456,19 +1493,27 @@ func runPicker() int {
 			rebuild()
 		case key == "n" && !searching && !showHelp:
 			creating = true
+			editing = false
+			editIdx = -1
 			newName, newSort, newOnly, newLimit = "", "last", "", 20
 			status = "new tab: type a name, s sort, f favorites only, + limit, enter save"
+		case key == "e" && !searching && !showHelp:
+			v := views(st)[tab]
+			if v.Kind != "custom" {
+				break
+			}
+			ct := st.Tabs[v.Idx]
+			creating = true
+			editing = true
+			editIdx = v.Idx
+			newName, newSort, newOnly, newLimit = ct.Name, ct.Sort, ct.Only, ct.Limit
+			status = "edit tab: s sort, f favorites only, + limit, enter save"
 		case key == "x" && !searching && !showHelp:
 			v := views(st)[tab]
 			if v.Kind != "custom" {
 				break
 			}
-			name := st.Tabs[v.Idx].Name
-			st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
-			_ = saveStore(st)
-			tab = 0
-			status = "deleted " + name
-			rebuild()
+			confirmName = st.Tabs[v.Idx].Name
 		case key == "/" && !searching:
 			// slash enters search mode, the way prefix+k does; it is never a
 			// filter character in browse mode.
