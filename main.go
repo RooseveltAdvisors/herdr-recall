@@ -26,9 +26,11 @@ const pluginID = "RooseveltAdvisors.herdr-recall"
 const recentMax = 20
 
 const (
-	tabFavorites = 0
+	tabRecent    = 0
 	tabMostUsed  = 1
-	tabRecent    = 2
+	tabFavorites = 2
+	tabAll       = 3
+	tabCount     = 4
 )
 
 const (
@@ -481,12 +483,30 @@ func displayLabel(s *snapshot, id, stored string) string {
 
 func tabTitle(tab int) string {
 	switch tab {
-	case tabFavorites:
-		return "FAVORITES"
 	case tabMostUsed:
-		return "MOST USED"
+		return "Most used"
+	case tabFavorites:
+		return "Favorites"
+	case tabAll:
+		return "All"
 	default:
-		return "RECENTLY USED"
+		return "Recent"
+	}
+}
+
+func tabHint(tab, mode int) string {
+	if mode != sortDefault {
+		return "sorted by " + sortLabel(tab, mode)
+	}
+	switch tab {
+	case tabMostUsed:
+		return "opened most often"
+	case tabFavorites:
+		return "pinned panes"
+	case tabAll:
+		return "every pane"
+	default:
+		return "last 20 you opened"
 	}
 }
 
@@ -561,10 +581,10 @@ func rowLess(a, b row, tab, mode int) bool {
 		switch tab {
 		case tabMostUsed:
 			kind = sortTimes
-		case tabRecent:
-			kind = sortLast
-		default:
+		case tabFavorites:
 			kind = sortName
+		default:
+			kind = sortLast
 		}
 	}
 	switch kind {
@@ -584,61 +604,45 @@ func rowLess(a, b row, tab, mode int) bool {
 
 func tabRows(s *snapshot, st *store, tab, mode int) []row {
 	all := collectRows(s, st)
-	var favs, rest []row
 	favOrder := map[string]int{}
 	for i, id := range st.Favorites {
 		favOrder[id] = i
 	}
-	for _, r := range all {
-		if r.Fav {
-			favs = append(favs, r)
-		} else {
-			rest = append(rest, r)
+	var list []row
+	switch tab {
+	case tabFavorites:
+		for _, r := range all {
+			if r.Fav {
+				list = append(list, r)
+			}
 		}
+	case tabRecent:
+		list = append(list, all...)
+		sort.SliceStable(list, func(i, j int) bool { return list[i].Last > list[j].Last })
+		if len(list) > recentMax {
+			list = list[:recentMax]
+		}
+	case tabMostUsed:
+		list = append(list, all...)
+		sort.SliceStable(list, func(i, j int) bool { return list[i].Visits > list[j].Visits })
+		if len(list) > recentMax {
+			list = list[:recentMax]
+		}
+	default:
+		list = append(list, all...)
 	}
-	sortList := func(list []row) {
-		if mode == sortDefault && tab == tabFavorites {
-			sort.SliceStable(list, func(i, j int) bool {
-				return favOrder[list[i].PaneID] < favOrder[list[j].PaneID]
-			})
-			return
-		}
+	if mode == sortDefault && tab == tabFavorites {
+		sort.SliceStable(list, func(i, j int) bool {
+			return favOrder[list[i].PaneID] < favOrder[list[j].PaneID]
+		})
+		return list
+	}
+	if mode != sortDefault || tab == tabAll {
 		sort.SliceStable(list, func(i, j int) bool {
 			return rowLess(list[i], list[j], tab, mode)
 		})
 	}
-	sortList(favs)
-	// The recent cap is by last-used time, then the chosen sort reorders that set.
-	if tab == tabRecent {
-		sort.SliceStable(rest, func(i, j int) bool { return rest[i].Last > rest[j].Last })
-		if len(rest) > recentMax {
-			rest = rest[:recentMax]
-		}
-	}
-	if tab == tabMostUsed {
-		sort.SliceStable(rest, func(i, j int) bool { return rest[i].Visits > rest[j].Visits })
-		if len(rest) > recentMax {
-			rest = rest[:recentMax]
-		}
-	}
-	sortList(rest)
-	section := tabTitle(tab)
-	if tab == tabFavorites {
-		for i := range favs {
-			favs[i].Section = "FAVORITES"
-		}
-		return favs
-	}
-	var out []row
-	for i := range favs {
-		favs[i].Section = "FAVORITES"
-		out = append(out, favs[i])
-	}
-	for i := range rest {
-		rest[i].Section = section
-		out = append(out, rest[i])
-	}
-	return out
+	return list
 }
 
 func metricText(r row, width int) string {
@@ -788,7 +792,7 @@ func renderHelp(width, height int) string {
 	emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help - esc returns to the list" + keyReset)
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	keys := [][2]string{
-		{"left / right", "switch Favorites, Most used, Recently used"},
+		{"left / right", "switch Recent, Most used, Favorites, All"},
 		{"s", "cycle sort: last used, times opened, name"},
 		{"/", "search panes (esc back to the list)"},
 		{"enter", "jump to the selected pane"},
@@ -825,7 +829,7 @@ func filterRows(rows []row, query string) []row {
 // renderFrame draws one screenful. Exposed via --render so screenshots and
 // tests use the exact bytes a live session would show.
 func tabBar(active int) string {
-	names := []string{"FAVORITES", "MOST USED", "RECENTLY USED"}
+	names := []string{"Recent", "Most used", "Favorites", "All"}
 	var b strings.Builder
 	for i, name := range names {
 		if i == active {
@@ -840,14 +844,14 @@ func tabBar(active int) string {
 	return b.String()
 }
 
-func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height, tab int, sortName string) string {
+func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height, tab, sortMode int) string {
 	var b strings.Builder
 	b.WriteString("\x1b[2J\x1b[H") // clear
 	// Every line is clipped to the pane's real width: one pane, one row, no
 	// wrapping, whatever width the overlay happens to be.
 	emit := func(line string) { b.WriteString(fitLine(line, width) + "\r\n") }
 	emit(tabBar(tab))
-	emit(sectionColor(tabTitle(tab)) + keyBold + "  " + tabTitle(tab) + keyReset + keyOverlay + "  ·  " + sortName + keyReset)
+	emit(keyOverlay + "  " + tabHint(tab, sortMode) + keyReset)
 	if searching {
 		prompt := keyOverlay + "search panes" + keyReset
 		if query != "" {
@@ -937,7 +941,11 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		}
 	}
 	if len(rows) == 0 {
-		emit(keyOverlay + "  No panes in this tab. Press f on a pane to pin it." + keyReset)
+		if tab == tabFavorites {
+			emit(keyOverlay + "  Nothing pinned. Press f on a pane to pin it." + keyReset)
+		} else {
+			emit(keyOverlay + "  No panes in this tab." + keyReset)
+		}
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	if searching {
@@ -1151,7 +1159,7 @@ func runPicker() int {
 		if showHelp {
 			frame = renderHelp(w, h)
 		} else {
-			frame = renderFrame(rows, sel, query, status, searching, w, h, tab, sortLabel(tab, sortMode))
+			frame = renderFrame(rows, sel, query, status, searching, w, h, tab, sortMode)
 		}
 		tty.WriteString(frame)
 
@@ -1233,9 +1241,9 @@ func runPicker() int {
 			showHelp = true
 		case (key == "left" || key == "right") && !showHelp:
 			if key == "left" {
-				tab = (tab + 2) % 3
+				tab = (tab + tabCount - 1) % tabCount
 			} else {
-				tab = (tab + 1) % 3
+				tab = (tab + 1) % tabCount
 			}
 			sel = 0
 			rebuild()
@@ -1374,7 +1382,7 @@ func renderOnce() int {
 			h = n
 		}
 	}
-	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), searching, w, h, tabRecent, sortLabel(tabRecent, sortDefault)))
+	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), searching, w, h, tabRecent, sortDefault))
 	return 0
 }
 

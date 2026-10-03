@@ -4,10 +4,11 @@ A pane recall picker for [Herdr](https://herdr.dev). It remembers which panes
 you actually use and lets you jump back to any of them from one overlay list.
 
 Press `prefix+shift+l` and a picker opens as a popup, in the style of
-Herdr's built-in goto overlay (`prefix+k`). Three tabs sit at the top:
-Favorites, Most used, and Recently used. Left and right arrows switch tabs.
-Favorites stay pinned at the top of the Most used and Recently used tabs.
-Recently used lists at most 20 panes. Press `s` to cycle the sort.
+Herdr's built-in goto overlay (`prefix+k`). Four tabs sit at the top:
+Recent, Most used, Favorites, and All. Left and right arrows switch tabs.
+Each tab is its own list. A star still marks a pinned pane, but the
+Favorites list does not repeat at the top of the other tabs. Recent and
+Most used show 20 panes. All shows every pane. Press `s` to cycle the sort.
 Each row shows how many times you opened the pane and when, not a bare `v`.
 
 ## Keys
@@ -15,7 +16,7 @@ Each row shows how many times you opened the pane and when, not a bare `v`.
 | Key | Action |
 | --- | ------ |
 | `prefix+shift+l` | open the picker |
-| left / right | switch Favorites, Most used, and Recently used |
+| left / right | switch Recent, Most used, Favorites, and All |
 | `s` | cycle sort: last used, times opened, name |
 | `/` or a letter | search. The typed text shows in the search line |
 | `enter` | jump to the selected pane |
