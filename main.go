@@ -38,11 +38,9 @@ const (
 	sortDefault = 0
 	sortLast    = 1
 	sortTimes   = 2
-	sortName    = 3
-	sortOldest  = 4
-	sortRarely  = 5
-	sortNeeds   = 6
-	sortCount   = 7
+	sortOldest  = 3
+	sortRarely  = 4
+	sortCount   = 5
 )
 
 const (
@@ -623,7 +621,7 @@ func rowLess(a, b row, tab, mode int) bool {
 		case tabMostUsed:
 			kind = sortTimes
 		case tabFavorites:
-			kind = sortName
+			kind = sortLast
 		default:
 			kind = sortLast
 		}
@@ -643,21 +641,6 @@ func rowLess(a, b row, tab, mode int) bool {
 	return strings.ToLower(a.Label) < strings.ToLower(b.Label)
 }
 
-func needRank(status string) int {
-	switch statusWord(status) {
-	case "blocked":
-		return 0
-	case "working":
-		return 1
-	case "done":
-		return 2
-	case "idle":
-		return 3
-	default:
-		return 4
-	}
-}
-
 func sortBy(list []row, how string) {
 	sort.SliceStable(list, func(i, j int) bool {
 		switch how {
@@ -672,15 +655,6 @@ func sortBy(list []row, how string) {
 		case "oldest":
 			if list[i].Last != list[j].Last {
 				return list[i].Last < list[j].Last
-			}
-		case "name":
-			return strings.ToLower(list[i].Label) < strings.ToLower(list[j].Label)
-		case "needs":
-			if needRank(list[i].Status) != needRank(list[j].Status) {
-				return needRank(list[i].Status) < needRank(list[j].Status)
-			}
-			if list[i].Last != list[j].Last {
-				return list[i].Last > list[j].Last
 			}
 		default:
 			if list[i].Last != list[j].Last {
@@ -771,14 +745,10 @@ func sortHow(mode int, fallback string) string {
 		return "last"
 	case sortTimes:
 		return "times"
-	case sortName:
-		return "name"
 	case sortOldest:
 		return "oldest"
 	case sortRarely:
 		return "rarely"
-	case sortNeeds:
-		return "needs"
 	default:
 		return fallback
 	}
@@ -798,11 +768,6 @@ func metricText(r row, width int, kind string) string {
 		return when
 	case "times", "rarely":
 		return times
-	case "needs":
-		if w := statusWord(r.Status); w != "" {
-			return w
-		}
-		return when
 	default:
 		if width < 68 {
 			return when
@@ -1196,10 +1161,6 @@ func formSummary(sort string, limit int, only, where, state string) string {
 		order = "most opened first"
 	case "rarely":
 		order = "least opened first"
-	case "name":
-		order = "in name order"
-	case "needs":
-		order = "blocked and working first"
 	}
 	return fmt.Sprintf("Shows %s %s%s%s, %s.", n, which, place, cond, order)
 }
@@ -1253,14 +1214,14 @@ func fieldTitle(label string, focused bool) string {
 }
 
 func sortLabels() []string {
-	return []string{"Last used", "Oldest", "Times opened", "Rarely", "Name", "Needs me"}
+	return []string{"Last used", "Oldest", "Times opened", "Rarely"}
 }
 func limitLabels() []string { return []string{"10", "20", "50", "All"} }
 func onlyLabels() []string  { return []string{"Any", "Favorites", "Not pinned"} }
 func whereLabels() []string { return []string{"Anywhere", "This workspace", "Other workspaces"} }
 func stateLabels() []string { return []string{"Any", "Working", "Blocked", "Idle", "Done"} }
 
-func sortOpts() []string { return []string{"last", "oldest", "times", "rarely", "name", "needs"} }
+func sortOpts() []string { return []string{"last", "oldest", "times", "rarely"} }
 func onlyOpts() []string { return []string{"", "favorites", "unpinned"} }
 func whereOpts() []string {
 	return []string{"", "here", "elsewhere"}

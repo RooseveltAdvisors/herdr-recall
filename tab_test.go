@@ -8,7 +8,7 @@ import (
 
 func TestFormShowsEveryChoice(t *testing.T) {
 	frame := stripANSI(renderForm(80, 28, []string{"All", "Favorites", "Recent"}, 2, 1, true, "Recent", "last", 20, "", "", "", ""))
-	for _, want := range []string{"Edit tab", "Oldest", "Needs me", "Not pinned", "This workspace", "Blocked", "Shows the 20 panes"} {
+	for _, want := range []string{"Edit tab", "Oldest", "Rarely", "Not pinned", "This workspace", "Blocked", "Shows the 20 panes"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("form missing %q:\n%s", want, frame)
 		}
@@ -16,6 +16,9 @@ func TestFormShowsEveryChoice(t *testing.T) {
 	sort, limit, only, where, state := stepFormValue(1, 1, "last", 20, "", "", "")
 	if sort != "oldest" || limit != 20 || only != "" || where != "" || state != "" {
 		t.Fatalf("sort step = %s %d %s %s %s", sort, limit, only, where, state)
+	}
+	if strings.Contains(frame, "Needs me") {
+		t.Fatal("Needs me sort is still offered")
 	}
 }
 
