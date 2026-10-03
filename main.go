@@ -845,11 +845,14 @@ func tabBar(active int) string {
 }
 
 func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height, tab, sortMode int) string {
-	var b strings.Builder
-	b.WriteString("\x1b[2J\x1b[H") // clear
-	// Every line is clipped to the pane's real width: one pane, one row, no
-	// wrapping, whatever width the overlay happens to be.
-	emit := func(line string) { b.WriteString(fitLine(line, width) + "\r\n") }
+	// The tab bar, hint, and search line are painted first and never scroll
+	// away. All is the long list, so a trailing newline on a full frame used
+	// to push those headers off the popup.
+	if height < 6 {
+		height = 6
+	}
+	var lines []string
+	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
 	emit(tabBar(tab))
 	emit(keyOverlay + "  " + tabHint(tab, sortMode) + keyReset)
 	if searching {
@@ -862,11 +865,14 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		emit(keyAccentFg + keyBold + "> " + keyReset + keyOverlay + "type to search" + keyReset)
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	footer := 2
-	// tab bar, title, search line, and separator sit above the scrolling list.
-	visible := height - footer - 4
-	if visible < 3 {
-		visible = 3
+	headerN := len(lines)
+	footerN := 3 // separator plus two hint lines
+	if status != "" {
+		footerN++
+	}
+	visible := height - headerN - footerN
+	if visible < 1 {
+		visible = 1
 	}
 	start := 0
 	if sel >= visible {
@@ -886,19 +892,21 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	if labelW < 4 {
 		labelW = 4
 	}
+	shown := 0
 	for i, r := range rows {
 		if i < start {
 			continue
 		}
-		if i-start >= visible {
+		if shown >= visible {
 			break
 		}
-		if len(rows) == 0 {
-			break
-		}
-		if r.Section != lastSection {
+		if r.Section != "" && r.Section != lastSection {
+			if shown+1 >= visible {
+				break
+			}
 			emit(sectionColor(r.Section) + keyBold + "  " + r.Section + keyReset)
 			lastSection = r.Section
+			shown++
 		}
 		starCell := "  "
 		if r.Fav {
@@ -939,6 +947,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		} else {
 			emit(starCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
 		}
+		shown++
 	}
 	if len(rows) == 0 {
 		if tab == tabFavorites {
@@ -965,6 +974,17 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	}
 	if status != "" {
 		emit(keySub + status + keyReset)
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	var b strings.Builder
+	b.WriteString("\x1b[2J\x1b[H")
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteString("\r\n")
+		}
+		b.WriteString(line)
 	}
 	return b.String()
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -45,5 +46,24 @@ func TestTabsStaySeparateAndRecentCapsAt20(t *testing.T) {
 	}
 	if strings.Contains(plain, "FAVORITES") {
 		t.Fatalf("pinned favorites section still in the recent frame:\n%s", plain)
+	}
+}
+
+func TestAllKeepsTheTabBarOnScreen(t *testing.T) {
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	for i := 0; i < 80; i++ {
+		id := fmt.Sprintf("pane-%02d", i)
+		st.Panes[id] = &paneStat{Visits: int64(i + 1), Last: int64(i), Label: id}
+	}
+	rows := tabRows(&snapshot{}, st, tabAll, sortDefault)
+	const height = 12
+	frame := renderFrame(rows, 40, "", "", false, 70, height, tabAll, sortDefault)
+	plain := stripANSI(frame)
+	lines := strings.Split(plain, "\n")
+	if len(lines) > height {
+		t.Fatalf("all frame has %d lines, popup is %d", len(lines), height)
+	}
+	if !strings.Contains(lines[0], "All") || !strings.Contains(lines[0], "Recent") {
+		t.Fatalf("tab bar scrolled off:\n%s", plain)
 	}
 }
