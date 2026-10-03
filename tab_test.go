@@ -7,32 +7,31 @@ import (
 )
 
 func TestFormShowsEveryChoice(t *testing.T) {
-	frame := stripANSI(renderForm(80, 28, []string{"All", "Favorites", "Recent"}, 2, 1, true, "Recent", "last", 20, "", "", "", ""))
-	for _, want := range []string{"Edit tab", "Oldest", "Rarely", "Not pinned", "This workspace", "Blocked", "Shows the 20 panes"} {
+	frame := stripANSI(renderForm(80, 24, []string{"All", "Favorites", "Recent"}, 2, 1, true, "Recent", "last", 20, "", "", ""))
+	for _, want := range []string{"Edit tab", "Last used", "Times opened", "Favorites", "This workspace", "Shows the 20 panes"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("form missing %q:\n%s", want, frame)
 		}
 	}
-	sort, limit, only, where, state := stepFormValue(1, 1, "last", 20, "", "", "")
-	if sort != "oldest" || limit != 20 || only != "" || where != "" || state != "" {
-		t.Fatalf("sort step = %s %d %s %s %s", sort, limit, only, where, state)
+	for _, gone := range []string{"Oldest", "Rarely", "Not pinned", "Other workspaces", "Blocked", "Needs me"} {
+		if strings.Contains(frame, gone) {
+			t.Fatalf("weak option %q is still offered", gone)
+		}
 	}
-	if strings.Contains(frame, "Needs me") {
-		t.Fatal("Needs me sort is still offered")
+	sort, limit, only, where := stepFormValue(1, 1, "last", 20, "", "")
+	if sort != "times" || limit != 20 || only != "" || where != "" {
+		t.Fatalf("sort step = %s %d %s %s", sort, limit, only, where)
 	}
 }
 
 func TestCustomFilters(t *testing.T) {
 	here := row{PaneID: "a", WorkspaceID: "w1", Fav: true, Status: "blocked"}
 	away := row{PaneID: "b", WorkspaceID: "w2", Status: "idle"}
-	if !rowAllowed(here, customTab{Only: "favorites", Where: "here", State: "blocked"}, "w1") {
+	if !rowAllowed(here, customTab{Only: "favorites", Where: "here"}, "w1") {
 		t.Fatal("matching row was filtered out")
 	}
 	if rowAllowed(away, customTab{Where: "here"}, "w1") {
 		t.Fatal("other workspace was kept")
-	}
-	if rowAllowed(here, customTab{Only: "unpinned"}, "w1") {
-		t.Fatal("pinned row stayed in the unpinned filter")
 	}
 }
 

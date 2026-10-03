@@ -38,9 +38,7 @@ const (
 	sortDefault = 0
 	sortLast    = 1
 	sortTimes   = 2
-	sortOldest  = 3
-	sortRarely  = 4
-	sortCount   = 5
+	sortCount   = 3
 )
 
 const (
@@ -178,7 +176,6 @@ type customTab struct {
 	Limit int    `json:"limit"`
 	Only  string `json:"only,omitempty"`
 	Where string `json:"where,omitempty"`
-	State string `json:"state,omitempty"`
 	Fixed bool   `json:"fixed,omitempty"`
 }
 
@@ -648,14 +645,6 @@ func sortBy(list []row, how string) {
 			if list[i].Visits != list[j].Visits {
 				return list[i].Visits > list[j].Visits
 			}
-		case "rarely":
-			if list[i].Visits != list[j].Visits {
-				return list[i].Visits < list[j].Visits
-			}
-		case "oldest":
-			if list[i].Last != list[j].Last {
-				return list[i].Last < list[j].Last
-			}
 		default:
 			if list[i].Last != list[j].Last {
 				return list[i].Last > list[j].Last
@@ -671,26 +660,9 @@ func rowAllowed(r row, ct customTab, here string) bool {
 		if !r.Fav {
 			return false
 		}
-	case "unpinned":
-		if r.Fav {
-			return false
-		}
 	}
-	switch ct.Where {
-	case "here":
-		if here == "" || r.WorkspaceID != here {
-			return false
-		}
-	case "elsewhere":
-		if here != "" && r.WorkspaceID == here {
-			return false
-		}
-	}
-	switch ct.State {
-	case "working", "blocked", "idle", "done":
-		if statusWord(r.Status) != ct.State {
-			return false
-		}
+	if ct.Where == "here" && (here == "" || r.WorkspaceID != here) {
+		return false
 	}
 	return true
 }
@@ -745,10 +717,6 @@ func sortHow(mode int, fallback string) string {
 		return "last"
 	case sortTimes:
 		return "times"
-	case sortOldest:
-		return "oldest"
-	case sortRarely:
-		return "rarely"
 	default:
 		return fallback
 	}
@@ -764,9 +732,9 @@ func metricText(r row, width int, kind string) string {
 		times = fmt.Sprintf("%d times", r.Visits)
 	}
 	switch kind {
-	case "last", "oldest":
+	case "last":
 		return when
-	case "times", "rarely":
+	case "times":
 		return times
 	default:
 		if width < 68 {
@@ -1129,40 +1097,24 @@ func paint(lines []string) string {
 	return b.String()
 }
 
-func formSummary(sort string, limit int, only, where, state string) string {
+func formSummary(sort string, limit int, only, where string) string {
 	n := "every"
 	if limit > 0 {
 		n = fmt.Sprintf("the %d", limit)
 	}
 	which := "panes"
-	switch only {
-	case "favorites":
+	if only == "favorites" {
 		which = "favorites"
-	case "unpinned":
-		which = "unpinned panes"
 	}
 	place := ""
-	switch where {
-	case "here":
+	if where == "here" {
 		place = " in this workspace"
-	case "elsewhere":
-		place = " in other workspaces"
-	}
-	cond := ""
-	switch state {
-	case "working", "blocked", "idle", "done":
-		cond = " that are " + state
 	}
 	order := "most recent first"
-	switch sort {
-	case "oldest":
-		order = "oldest first"
-	case "times":
+	if sort == "times" {
 		order = "most opened first"
-	case "rarely":
-		order = "least opened first"
 	}
-	return fmt.Sprintf("Shows %s %s%s%s, %s.", n, which, place, cond, order)
+	return fmt.Sprintf("Shows %s %s%s, %s.", n, which, place, order)
 }
 
 func choiceLines(labels []string, selected, width int) []string {
@@ -1213,22 +1165,14 @@ func fieldTitle(label string, focused bool) string {
 	return keyOverlay + "  " + label + keyReset
 }
 
-func sortLabels() []string {
-	return []string{"Last used", "Oldest", "Times opened", "Rarely"}
-}
+func sortLabels() []string  { return []string{"Last used", "Times opened"} }
 func limitLabels() []string { return []string{"10", "20", "50", "All"} }
-func onlyLabels() []string  { return []string{"Any", "Favorites", "Not pinned"} }
-func whereLabels() []string { return []string{"Anywhere", "This workspace", "Other workspaces"} }
-func stateLabels() []string { return []string{"Any", "Working", "Blocked", "Idle", "Done"} }
+func onlyLabels() []string  { return []string{"Any", "Favorites"} }
+func whereLabels() []string { return []string{"Anywhere", "This workspace"} }
 
-func sortOpts() []string { return []string{"last", "oldest", "times", "rarely"} }
-func onlyOpts() []string { return []string{"", "favorites", "unpinned"} }
-func whereOpts() []string {
-	return []string{"", "here", "elsewhere"}
-}
-func stateOpts() []string {
-	return []string{"", "working", "blocked", "idle", "done"}
-}
+func sortOpts() []string  { return []string{"last", "times"} }
+func onlyOpts() []string  { return []string{"", "favorites"} }
+func whereOpts() []string { return []string{"", "here"} }
 
 func indexOf(opts []string, cur string) int {
 	for i, o := range opts {
@@ -1258,13 +1202,12 @@ func limitChoice(limit int) int {
 
 func onlyChoice(only string) int   { return indexOf(onlyOpts(), only) }
 func whereChoice(where string) int { return indexOf(whereOpts(), where) }
-func stateChoice(state string) int { return indexOf(stateOpts(), state) }
 
 func cycle(n, i, dir int) int {
 	return (i + dir + n) % n
 }
 
-func stepFormValue(field, dir int, sort string, limit int, only, where, state string) (string, int, string, string, string) {
+func stepFormValue(field, dir int, sort string, limit int, only, where string) (string, int, string, string) {
 	switch field {
 	case 1:
 		opts := sortOpts()
@@ -1278,16 +1221,13 @@ func stepFormValue(field, dir int, sort string, limit int, only, where, state st
 	case 4:
 		opts := whereOpts()
 		where = opts[cycle(len(opts), whereChoice(where), dir)]
-	case 5:
-		opts := stateOpts()
-		state = opts[cycle(len(opts), stateChoice(state), dir)]
 	}
-	return sort, limit, only, where, state
+	return sort, limit, only, where
 }
 
 // renderForm is the criteria editor. Every choice is on screen. j/k moves
 // between fields. h/l changes the highlighted choice. Letters type the name.
-func renderForm(width, height int, names []string, active, field int, editing bool, name, sort string, limit int, only, where, state, status string) string {
+func renderForm(width, height int, names []string, active, field int, editing bool, name, sort string, limit int, only, where, status string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -1300,7 +1240,7 @@ func renderForm(width, height int, names []string, active, field int, editing bo
 	emit(tabBar(names, active))
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit(keyText + keyBold + "  " + title + keyReset)
-	emit(keyOverlay + "  " + formSummary(sort, limit, only, where, state) + keyReset)
+	emit(keyOverlay + "  " + formSummary(sort, limit, only, where) + keyReset)
 	emit(fieldTitle("Name", field == 0))
 	if field == 0 {
 		shown := name
@@ -1329,10 +1269,6 @@ func renderForm(width, height int, names []string, active, field int, editing bo
 	}
 	emit(fieldTitle("Workspace", field == 4))
 	for _, line := range choiceLines(whereLabels(), whereChoice(where), width) {
-		emit(line)
-	}
-	emit(fieldTitle("Status", field == 5))
-	for _, line := range choiceLines(stateLabels(), stateChoice(state), width) {
 		emit(line)
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
@@ -1545,7 +1481,7 @@ func runPicker() int {
 	formField := 0
 	confirmName := ""
 	confirmSel := 1
-	newName, newSort, newOnly, newWhere, newState := "", "last", "", "", ""
+	newName, newSort, newOnly, newWhere := "", "last", "", ""
 	newLimit := 20
 	var allRows []row
 	rebuild := func() {
@@ -1578,7 +1514,7 @@ func runPicker() int {
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case creating:
-			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newLimit, newOnly, newWhere, newState, status)
+			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newLimit, newOnly, newWhere, status)
 		default:
 			v := views(st)[tab]
 			kind := "both"
@@ -1655,7 +1591,7 @@ func runPicker() int {
 					status = "Type a name, then press enter."
 					break
 				}
-				ct := customTab{Name: name, Sort: newSort, Limit: newLimit, Only: newOnly, Where: newWhere, State: newState}
+				ct := customTab{Name: name, Sort: newSort, Limit: newLimit, Only: newOnly, Where: newWhere}
 				if editing && editIdx >= 0 && editIdx < len(st.Tabs) {
 					ct.Fixed = st.Tabs[editIdx].Fixed
 					st.Tabs[editIdx] = ct
@@ -1671,7 +1607,7 @@ func runPicker() int {
 				sel = 0
 				rebuild()
 			case "j", "down":
-				if formField < 5 {
+				if formField < 4 {
 					formField++
 				}
 				status = ""
@@ -1681,10 +1617,10 @@ func runPicker() int {
 				}
 				status = ""
 			case "h", "left":
-				newSort, newLimit, newOnly, newWhere, newState = stepFormValue(formField, -1, newSort, newLimit, newOnly, newWhere, newState)
+				newSort, newLimit, newOnly, newWhere = stepFormValue(formField, -1, newSort, newLimit, newOnly, newWhere)
 				status = ""
 			case "l", "right":
-				newSort, newLimit, newOnly, newWhere, newState = stepFormValue(formField, 1, newSort, newLimit, newOnly, newWhere, newState)
+				newSort, newLimit, newOnly, newWhere = stepFormValue(formField, 1, newSort, newLimit, newOnly, newWhere)
 				status = ""
 			case "bs":
 				if formField == 0 {
@@ -1773,7 +1709,7 @@ func runPicker() int {
 			editing = false
 			editIdx = -1
 			formField = 0
-			newName, newSort, newOnly, newWhere, newState, newLimit = "", "last", "", "", "", 20
+			newName, newSort, newOnly, newWhere, newLimit = "", "last", "", "", 20
 			status = ""
 		case key == "e" && !searching && !showHelp:
 			v := views(st)[tab]
@@ -1785,7 +1721,7 @@ func runPicker() int {
 			editing = true
 			editIdx = v.Idx
 			formField = 1
-			newName, newSort, newOnly, newWhere, newState, newLimit = ct.Name, ct.Sort, ct.Only, ct.Where, ct.State, ct.Limit
+			newName, newSort, newOnly, newWhere, newLimit = ct.Name, ct.Sort, ct.Only, ct.Where, ct.Limit
 			status = ""
 		case key == "x" && !searching && !showHelp:
 			v := views(st)[tab]

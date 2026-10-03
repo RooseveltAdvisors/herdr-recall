@@ -7,9 +7,8 @@ Press `prefix+shift+l` and a picker opens as a popup. All and Favorites
 are the built-in tabs. Recent and Most used start as tabs you can delete
 with `x` (it asks you to confirm) and recreate with `n`. Press `e` to edit a custom tab. The form shows every choice.
 `j` and `k` move between fields. `h` and `l` change the highlighted choice.
-Sort can be last used, oldest, times opened, or rarely.
-A tab can also keep favorites, unpinned panes, this workspace, other
-workspaces, or one status. `s` sorts only on All and Favorites.
+Sort is last used or times opened. A tab can keep favorites, or
+only the panes in this workspace. `s` sorts only on All and Favorites.
 Recent shows when you last opened the pane. Most used shows how many times.
 
 ## Keys
