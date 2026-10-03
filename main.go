@@ -494,22 +494,6 @@ func tabTitle(tab int) string {
 	}
 }
 
-func tabHint(tab, mode int) string {
-	if mode != sortDefault {
-		return "sorted by " + sortLabel(tab, mode)
-	}
-	switch tab {
-	case tabMostUsed:
-		return "opened most often"
-	case tabFavorites:
-		return "pinned panes"
-	case tabAll:
-		return "every pane"
-	default:
-		return "last 20 you opened"
-	}
-}
-
 func sortLabel(tab, mode int) string {
 	if mode == sortDefault {
 		switch tab {
@@ -854,15 +838,12 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	var lines []string
 	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
 	emit(tabBar(tab))
-	emit(keyOverlay + "  " + tabHint(tab, sortMode) + keyReset)
 	if searching {
 		prompt := keyOverlay + "search panes" + keyReset
 		if query != "" {
 			prompt = keyText + query + keyReset
 		}
 		emit(keyAccentFg + keyBold + " / " + keyReset + prompt)
-	} else {
-		emit(keyAccentFg + keyBold + "> " + keyReset + keyOverlay + "type to search" + keyReset)
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	headerN := len(lines)
@@ -969,7 +950,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 			emit(keyAccentFg + "←/→" + keyReset + keyOverlay + " tabs  s sort  f pin" + keyReset)
 			emit(keyAccentFg + "j/k" + keyReset + keyOverlay + " move  ? help  esc close" + keyReset)
 		} else {
-			emit(hintFooter("left/right", "tabs", "s", "sort", "f", "pin", "j/k", "move", "?", "help", "esc", "close"))
+			emit(hintFooter("h/l", "tabs", "s", "sort", "f", "pin", "j/k", "move", "/", "search", "esc", "close"))
 		}
 	}
 	if status != "" {
@@ -1259,8 +1240,8 @@ func runPicker() int {
 			return 0
 		case key == "?" && !searching:
 			showHelp = true
-		case (key == "left" || key == "right") && !showHelp:
-			if key == "left" {
+		case (key == "left" || key == "right" || (key == "h" || key == "l") && !searching) && !showHelp:
+			if key == "left" || key == "h" {
 				tab = (tab + tabCount - 1) % tabCount
 			} else {
 				tab = (tab + 1) % tabCount
@@ -1329,13 +1310,9 @@ func runPicker() int {
 			}
 		case key == "q" && !searching:
 			return 0
-		case len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f:
-			// Typing a letter starts search and shows the character. Browse mode
-			// used to ignore those keys, so the popup looked like it ate typing.
-			if !searching {
-				searching = true
-				query = ""
-			}
+		case searching && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f:
+			// Letters reach the search box only after /. In browse mode, h/l move
+			// tabs and f/j/k keep their own actions.
 			query += key
 			sel = 0
 		}

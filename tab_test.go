@@ -39,13 +39,16 @@ func TestTabsStaySeparateAndRecentCapsAt20(t *testing.T) {
 
 	frame := renderFrame(recent, 0, "", "", false, 90, 24, tabRecent, sortDefault)
 	plain := stripANSI(frame)
-	for _, want := range []string{"Recent", "Most used", "Favorites", "All", "last 20 you opened"} {
+	for _, want := range []string{"Recent", "Most used", "Favorites", "All"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("frame missing %q\n%s", want, plain)
 		}
 	}
 	if strings.Contains(plain, "FAVORITES") {
 		t.Fatalf("pinned favorites section still in the recent frame:\n%s", plain)
+	}
+	if strings.Contains(plain, "to search") || strings.Contains(plain, "last 20") {
+		t.Fatalf("browse frame still shows a search or tab description:\n%s", plain)
 	}
 }
 
