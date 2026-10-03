@@ -35,12 +35,12 @@ const (
 )
 
 const (
-	sortDefault  = 0
-	sortLast     = 1
-	sortLastAsc  = 2
-	sortTimes    = 3
-	sortTimesAsc = 4
-	sortCount    = 5
+	sortDefault = 0
+	sortNewest  = 1
+	sortOldest  = 2
+	sortMost    = 3
+	sortLeast   = 4
+	sortCount   = 5
 )
 
 const (
@@ -538,27 +538,6 @@ func tabTitle(tab int) string {
 	}
 }
 
-func sortLabel(tab, mode int) string {
-	if mode == sortDefault {
-		switch tab {
-		case tabFavorites:
-			return "starred order"
-		case tabMostUsed:
-			return "times opened"
-		default:
-			return "last used"
-		}
-	}
-	switch mode {
-	case sortLast:
-		return "last used"
-	case sortTimes:
-		return "times opened"
-	default:
-		return "name"
-	}
-}
-
 func collectRows(s *snapshot, st *store) []row {
 	statusOf := map[string]string{}
 	for _, p := range s.Panes {
@@ -614,51 +593,39 @@ func collectRows(s *snapshot, st *store) []row {
 	return out
 }
 
-func rowLess(a, b row, tab, mode int) bool {
-	kind := mode
-	if kind == sortDefault {
-		switch tab {
-		case tabMostUsed:
-			kind = sortTimes
-		case tabFavorites:
-			kind = sortLast
-		default:
-			kind = sortLast
+func canonicalSort(sort, dir string) string {
+	switch sort {
+	case "newest", "oldest", "most", "least":
+		return sort
+	case "times":
+		if dir == "asc" {
+			return "least"
 		}
-	}
-	switch kind {
-	case sortLast:
-		if a.Last != b.Last {
-			return a.Last > b.Last
-		}
-	case sortTimes:
-		if a.Visits != b.Visits {
-			return a.Visits > b.Visits
-		}
+		return "most"
 	default:
-		return strings.ToLower(a.Label) < strings.ToLower(b.Label)
+		if dir == "asc" {
+			return "oldest"
+		}
+		return "newest"
 	}
-	return strings.ToLower(a.Label) < strings.ToLower(b.Label)
 }
 
-func sortBy(list []row, how, dir string) {
-	desc := dir != "asc"
+func sortBy(list []row, how string) {
+	how = canonicalSort(how, "")
+	byTimes := how == "most" || how == "least"
+	desc := how == "newest" || how == "most"
 	sort.SliceStable(list, func(i, j int) bool {
-		switch how {
-		case "times":
-			if list[i].Visits != list[j].Visits {
-				if desc {
-					return list[i].Visits > list[j].Visits
-				}
-				return list[i].Visits < list[j].Visits
+		if byTimes && list[i].Visits != list[j].Visits {
+			if desc {
+				return list[i].Visits > list[j].Visits
 			}
-		default:
-			if list[i].Last != list[j].Last {
-				if desc {
-					return list[i].Last > list[j].Last
-				}
-				return list[i].Last < list[j].Last
+			return list[i].Visits < list[j].Visits
+		}
+		if !byTimes && list[i].Last != list[j].Last {
+			if desc {
+				return list[i].Last > list[j].Last
 			}
+			return list[i].Last < list[j].Last
 		}
 		return strings.ToLower(list[i].Label) < strings.ToLower(list[j].Label)
 	})
@@ -698,7 +665,7 @@ func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 			})
 			return list
 		}
-		sortBy(list, how, sortDir(mode))
+		sortBy(list, how)
 		return list
 	case "custom":
 		ct := st.Tabs[v.Idx]
@@ -709,48 +676,44 @@ func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 			}
 			list = append(list, r)
 		}
-		sortBy(list, ct.Sort, ct.Dir)
+		sortBy(list, canonicalSort(ct.Sort, ct.Dir))
 		if ct.Limit > 0 && len(list) > ct.Limit {
 			list = list[:ct.Limit]
 		}
 		return list
 	default:
 		list := append([]row(nil), all...)
-		sortBy(list, sortHow(mode, "last"), sortDir(mode))
+		sortBy(list, sortHow(mode, "newest"))
 		return list
 	}
 }
 
 func sortHow(mode int, fallback string) string {
 	switch mode {
-	case sortLast, sortLastAsc:
-		return "last"
-	case sortTimes, sortTimesAsc:
-		return "times"
+	case sortNewest:
+		return "newest"
+	case sortOldest:
+		return "oldest"
+	case sortMost:
+		return "most"
+	case sortLeast:
+		return "least"
 	default:
 		return fallback
 	}
 }
 
-func sortDir(mode int) string {
-	switch mode {
-	case sortLastAsc, sortTimesAsc:
-		return "asc"
+func sortLabel(how string) string {
+	switch canonicalSort(how, "") {
+	case "oldest":
+		return "Oldest"
+	case "most":
+		return "Most used"
+	case "least":
+		return "Least used"
 	default:
-		return "desc"
+		return "Newest"
 	}
-}
-
-func sortStatus(mode int) string {
-	how := sortHow(mode, "last")
-	name := "last used"
-	if how == "times" {
-		name = "times opened"
-	}
-	if sortDir(mode) == "asc" {
-		return name + ", ascending"
-	}
-	return name + ", descending"
 }
 
 func metricText(r row, width int, kind string) string {
@@ -763,9 +726,9 @@ func metricText(r row, width int, kind string) string {
 		times = fmt.Sprintf("%d times", r.Visits)
 	}
 	switch kind {
-	case "last":
+	case "newest", "oldest", "last":
 		return when
-	case "times":
+	case "most", "least", "times":
 		return times
 	default:
 		if width < 68 {
@@ -1128,7 +1091,7 @@ func paint(lines []string) string {
 	return b.String()
 }
 
-func formSummary(sort, dir string, limit int, only, where string) string {
+func formSummary(sort string, limit int, only, where string) string {
 	n := "every"
 	if limit > 0 {
 		n = fmt.Sprintf("the %d", limit)
@@ -1141,16 +1104,7 @@ func formSummary(sort, dir string, limit int, only, where string) string {
 	if where == "here" {
 		place = " in this workspace"
 	}
-	order := "most recent first"
-	switch {
-	case sort == "times" && dir == "asc":
-		order = "least opened first"
-	case sort == "times":
-		order = "most opened first"
-	case dir == "asc":
-		order = "oldest first"
-	}
-	return fmt.Sprintf("Shows %s %s%s, %s.", n, which, place, order)
+	return fmt.Sprintf("Shows %s %s%s, %s.", n, which, place, strings.ToLower(sortLabel(canonicalSort(sort, ""))))
 }
 
 func choiceLines(labels []string, selected, width int) []string {
@@ -1201,12 +1155,12 @@ func fieldTitle(label string, focused bool) string {
 	return keyOverlay + "  " + label + keyReset
 }
 
-func sortLabels() []string  { return []string{"Last used", "Times opened"} }
+func sortLabels() []string  { return []string{"Newest", "Oldest", "Most used", "Least used"} }
 func limitLabels() []string { return []string{"10", "20", "50", "All"} }
 func onlyLabels() []string  { return []string{"Any", "Favorites"} }
 func whereLabels() []string { return []string{"Anywhere", "This workspace"} }
 
-func sortOpts() []string  { return []string{"last", "times"} }
+func sortOpts() []string  { return []string{"newest", "oldest", "most", "least"} }
 func onlyOpts() []string  { return []string{"", "favorites"} }
 func whereOpts() []string { return []string{"", "here"} }
 
@@ -1236,15 +1190,6 @@ func limitChoice(limit int) int {
 	}
 }
 
-func dirLabels() []string { return []string{"Descending", "Ascending"} }
-func dirOpts() []string   { return []string{"desc", "asc"} }
-func dirChoice(dir string) int {
-	if dir == "asc" {
-		return 1
-	}
-	return 0
-}
-
 func onlyChoice(only string) int   { return indexOf(onlyOpts(), only) }
 func whereChoice(where string) int { return indexOf(whereOpts(), where) }
 
@@ -1252,30 +1197,27 @@ func cycle(n, i, dir int) int {
 	return (i + dir + n) % n
 }
 
-func stepFormValue(field, dir int, sort, order string, limit int, only, where string) (string, string, int, string, string) {
+func stepFormValue(field, dir int, sort string, limit int, only, where string) (string, int, string, string) {
 	switch field {
 	case 1:
 		opts := sortOpts()
 		sort = opts[cycle(len(opts), sortChoice(sort), dir)]
 	case 2:
-		opts := dirOpts()
-		order = opts[cycle(len(opts), dirChoice(order), dir)]
-	case 3:
 		opts := []int{10, 20, 50, 0}
 		limit = opts[cycle(len(opts), limitChoice(limit), dir)]
-	case 4:
+	case 3:
 		opts := onlyOpts()
 		only = opts[cycle(len(opts), onlyChoice(only), dir)]
-	case 5:
+	case 4:
 		opts := whereOpts()
 		where = opts[cycle(len(opts), whereChoice(where), dir)]
 	}
-	return sort, order, limit, only, where
+	return sort, limit, only, where
 }
 
 // renderForm is the criteria editor. Every choice is on screen. j/k moves
 // between fields. h/l changes the highlighted choice. Letters type the name.
-func renderForm(width, height int, names []string, active, field int, editing bool, name, sort, order string, limit int, only, where, status string) string {
+func renderForm(width, height int, names []string, active, field int, editing bool, name, sort string, limit int, only, where, status string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -1288,7 +1230,7 @@ func renderForm(width, height int, names []string, active, field int, editing bo
 	emit(tabBar(names, active))
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit(keyText + keyBold + "  " + title + keyReset)
-	emit(keyOverlay + "  " + formSummary(sort, order, limit, only, where) + keyReset)
+	emit(keyOverlay + "  " + formSummary(sort, limit, only, where) + keyReset)
 	emit(fieldTitle("Name", field == 0))
 	if field == 0 {
 		shown := name
@@ -1307,19 +1249,15 @@ func renderForm(width, height int, names []string, active, field int, editing bo
 	for _, line := range choiceLines(sortLabels(), sortChoice(sort), width) {
 		emit(line)
 	}
-	emit(fieldTitle("Order", field == 2))
-	for _, line := range choiceLines(dirLabels(), dirChoice(order), width) {
-		emit(line)
-	}
-	emit(fieldTitle("How many", field == 3))
+	emit(fieldTitle("How many", field == 2))
 	for _, line := range choiceLines(limitLabels(), limitChoice(limit), width) {
 		emit(line)
 	}
-	emit(fieldTitle("Pinned", field == 4))
+	emit(fieldTitle("Pinned", field == 3))
 	for _, line := range choiceLines(onlyLabels(), onlyChoice(only), width) {
 		emit(line)
 	}
-	emit(fieldTitle("Workspace", field == 5))
+	emit(fieldTitle("Workspace", field == 4))
 	for _, line := range choiceLines(whereLabels(), whereChoice(where), width) {
 		emit(line)
 	}
@@ -1533,7 +1471,7 @@ func runPicker() int {
 	formField := 0
 	confirmName := ""
 	confirmSel := 1
-	newName, newSort, newDir, newOnly, newWhere := "", "last", "desc", "", ""
+	newName, newSort, newOnly, newWhere := "", "newest", "", ""
 	newLimit := 20
 	var allRows []row
 	rebuild := func() {
@@ -1566,12 +1504,12 @@ func runPicker() int {
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case creating:
-			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newDir, newLimit, newOnly, newWhere, status)
+			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newLimit, newOnly, newWhere, status)
 		default:
 			v := views(st)[tab]
 			kind := "both"
 			if v.Kind == "custom" {
-				kind = st.Tabs[v.Idx].Sort
+				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)
 			}
 			frame = renderFrame(rows, sel, query, status, searching, w, h, viewNames(st), tab, kind)
 		}
@@ -1643,7 +1581,7 @@ func runPicker() int {
 					status = "Type a name, then press enter."
 					break
 				}
-				ct := customTab{Name: name, Sort: newSort, Dir: newDir, Limit: newLimit, Only: newOnly, Where: newWhere}
+				ct := customTab{Name: name, Sort: canonicalSort(newSort, ""), Limit: newLimit, Only: newOnly, Where: newWhere}
 				if editing && editIdx >= 0 && editIdx < len(st.Tabs) {
 					ct.Fixed = st.Tabs[editIdx].Fixed
 					st.Tabs[editIdx] = ct
@@ -1659,7 +1597,7 @@ func runPicker() int {
 				sel = 0
 				rebuild()
 			case "j", "down":
-				if formField < 5 {
+				if formField < 4 {
 					formField++
 				}
 				status = ""
@@ -1669,10 +1607,10 @@ func runPicker() int {
 				}
 				status = ""
 			case "h", "left":
-				newSort, newDir, newLimit, newOnly, newWhere = stepFormValue(formField, -1, newSort, newDir, newLimit, newOnly, newWhere)
+				newSort, newLimit, newOnly, newWhere = stepFormValue(formField, -1, newSort, newLimit, newOnly, newWhere)
 				status = ""
 			case "l", "right":
-				newSort, newDir, newLimit, newOnly, newWhere = stepFormValue(formField, 1, newSort, newDir, newLimit, newOnly, newWhere)
+				newSort, newLimit, newOnly, newWhere = stepFormValue(formField, 1, newSort, newLimit, newOnly, newWhere)
 				status = ""
 			case "bs":
 				if formField == 0 {
@@ -1754,14 +1692,14 @@ func runPicker() int {
 			}
 			sortMode = (sortMode + 1) % sortCount
 			sel = 0
-			status = "sort: " + sortStatus(sortMode)
+			status = "sort: " + sortLabel(sortHow(sortMode, "newest"))
 			rebuild()
 		case key == "n" && !searching && !showHelp:
 			creating = true
 			editing = false
 			editIdx = -1
 			formField = 0
-			newName, newSort, newDir, newOnly, newWhere, newLimit = "", "last", "desc", "", "", 20
+			newName, newSort, newOnly, newWhere, newLimit = "", "newest", "", "", 20
 			status = ""
 		case key == "e" && !searching && !showHelp:
 			v := views(st)[tab]
@@ -1773,11 +1711,7 @@ func runPicker() int {
 			editing = true
 			editIdx = v.Idx
 			formField = 1
-			dir := ct.Dir
-			if dir == "" {
-				dir = "desc"
-			}
-			newName, newSort, newDir, newOnly, newWhere, newLimit = ct.Name, ct.Sort, dir, ct.Only, ct.Where, ct.Limit
+			newName, newSort, newOnly, newWhere, newLimit = ct.Name, canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit
 			status = ""
 		case key == "x" && !searching && !showHelp:
 			v := views(st)[tab]

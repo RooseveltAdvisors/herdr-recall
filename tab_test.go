@@ -7,20 +7,23 @@ import (
 )
 
 func TestFormShowsEveryChoice(t *testing.T) {
-	frame := stripANSI(renderForm(80, 24, []string{"All", "Favorites", "Recent"}, 2, 1, true, "Recent", "last", "desc", 20, "", "", ""))
-	for _, want := range []string{"Edit tab", "Last used", "Times opened", "Descending", "Ascending", "This workspace", "Shows the 20 panes"} {
+	frame := stripANSI(renderForm(80, 24, []string{"All", "Favorites", "Recent"}, 2, 1, true, "Recent", "newest", 20, "", "", ""))
+	for _, want := range []string{"Edit tab", "Newest", "Oldest", "Most used", "Least used", "This workspace"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("form missing %q:\n%s", want, frame)
 		}
 	}
-	for _, gone := range []string{"Oldest", "Rarely", "Not pinned", "Other workspaces", "Blocked", "Needs me"} {
+	for _, gone := range []string{"Descending", "Ascending", "Last used", "Not pinned", "Blocked", "Needs me"} {
 		if strings.Contains(frame, gone) {
 			t.Fatalf("weak option %q is still offered", gone)
 		}
 	}
-	sort, order, limit, only, where := stepFormValue(2, 1, "last", "desc", 20, "", "")
-	if sort != "last" || order != "asc" || limit != 20 || only != "" || where != "" {
-		t.Fatalf("order step = %s %s %d %s %s", sort, order, limit, only, where)
+	sort, limit, only, where := stepFormValue(1, 1, "newest", 20, "", "")
+	if sort != "oldest" || limit != 20 || only != "" || where != "" {
+		t.Fatalf("sort step = %s %d %s %s", sort, limit, only, where)
+	}
+	if canonicalSort("last", "") != "newest" || canonicalSort("times", "asc") != "least" {
+		t.Fatal("old sort values did not map to named sorts")
 	}
 }
 
