@@ -39,6 +39,10 @@ const (
 	sortLast    = 1
 	sortTimes   = 2
 	sortName    = 3
+	sortOldest  = 4
+	sortRarely  = 5
+	sortNeeds   = 6
+	sortCount   = 7
 )
 
 const (
@@ -175,6 +179,8 @@ type customTab struct {
 	Sort  string `json:"sort"`
 	Limit int    `json:"limit"`
 	Only  string `json:"only,omitempty"`
+	Where string `json:"where,omitempty"`
+	State string `json:"state,omitempty"`
 	Fixed bool   `json:"fixed,omitempty"`
 }
 
@@ -451,13 +457,14 @@ func focusPane(paneID string) error {
 // ---------------------------------------------------------------------------
 
 type row struct {
-	PaneID  string
-	Label   string
-	Section string
-	Visits  int64
-	Last    int64
-	Status  string
-	Fav     bool
+	PaneID      string
+	WorkspaceID string
+	Label       string
+	Section     string
+	Visits      int64
+	Last        int64
+	Status      string
+	Fav         bool
 }
 
 // displayLabel builds a recallable name for a pane: agent title, tab label,
@@ -593,8 +600,15 @@ func collectRows(s *snapshot, st *store) []row {
 		if ps != nil {
 			visits, last = ps.Visits, ps.Last
 		}
+		ws := ""
+		for _, p := range s.Panes {
+			if p.PaneID == id {
+				ws = p.WorkspaceID
+				break
+			}
+		}
 		out = append(out, row{
-			PaneID: id, Label: label,
+			PaneID: id, WorkspaceID: ws, Label: label,
 			Visits: visits, Last: last, Status: statusOf[id],
 			Fav: st.isFavorite(id),
 		})
@@ -629,6 +643,21 @@ func rowLess(a, b row, tab, mode int) bool {
 	return strings.ToLower(a.Label) < strings.ToLower(b.Label)
 }
 
+func needRank(status string) int {
+	switch statusWord(status) {
+	case "blocked":
+		return 0
+	case "working":
+		return 1
+	case "done":
+		return 2
+	case "idle":
+		return 3
+	default:
+		return 4
+	}
+}
+
 func sortBy(list []row, how string) {
 	sort.SliceStable(list, func(i, j int) bool {
 		switch how {
@@ -636,8 +665,23 @@ func sortBy(list []row, how string) {
 			if list[i].Visits != list[j].Visits {
 				return list[i].Visits > list[j].Visits
 			}
+		case "rarely":
+			if list[i].Visits != list[j].Visits {
+				return list[i].Visits < list[j].Visits
+			}
+		case "oldest":
+			if list[i].Last != list[j].Last {
+				return list[i].Last < list[j].Last
+			}
 		case "name":
 			return strings.ToLower(list[i].Label) < strings.ToLower(list[j].Label)
+		case "needs":
+			if needRank(list[i].Status) != needRank(list[j].Status) {
+				return needRank(list[i].Status) < needRank(list[j].Status)
+			}
+			if list[i].Last != list[j].Last {
+				return list[i].Last > list[j].Last
+			}
 		default:
 			if list[i].Last != list[j].Last {
 				return list[i].Last > list[j].Last
@@ -645,6 +689,36 @@ func sortBy(list []row, how string) {
 		}
 		return strings.ToLower(list[i].Label) < strings.ToLower(list[j].Label)
 	})
+}
+
+func rowAllowed(r row, ct customTab, here string) bool {
+	switch ct.Only {
+	case "favorites":
+		if !r.Fav {
+			return false
+		}
+	case "unpinned":
+		if r.Fav {
+			return false
+		}
+	}
+	switch ct.Where {
+	case "here":
+		if here == "" || r.WorkspaceID != here {
+			return false
+		}
+	case "elsewhere":
+		if here != "" && r.WorkspaceID == here {
+			return false
+		}
+	}
+	switch ct.State {
+	case "working", "blocked", "idle", "done":
+		if statusWord(r.Status) != ct.State {
+			return false
+		}
+	}
+	return true
 }
 
 func rowsFor(s *snapshot, st *store, v view, mode int) []row {
@@ -674,7 +748,7 @@ func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 		ct := st.Tabs[v.Idx]
 		var list []row
 		for _, r := range all {
-			if ct.Only == "favorites" && !r.Fav {
+			if !rowAllowed(r, ct, s.FocusedWorkspace) {
 				continue
 			}
 			list = append(list, r)
@@ -699,6 +773,12 @@ func sortHow(mode int, fallback string) string {
 		return "times"
 	case sortName:
 		return "name"
+	case sortOldest:
+		return "oldest"
+	case sortRarely:
+		return "rarely"
+	case sortNeeds:
+		return "needs"
 	default:
 		return fallback
 	}
@@ -714,10 +794,15 @@ func metricText(r row, width int, kind string) string {
 		times = fmt.Sprintf("%d times", r.Visits)
 	}
 	switch kind {
-	case "last":
+	case "last", "oldest":
 		return when
-	case "times":
+	case "times", "rarely":
 		return times
+	case "needs":
+		if w := statusWord(r.Status); w != "" {
+			return w
+		}
+		return when
 	default:
 		if width < 68 {
 			return when
@@ -1079,44 +1164,85 @@ func paint(lines []string) string {
 	return b.String()
 }
 
-func formSummary(sort string, limit int, only string) string {
+func formSummary(sort string, limit int, only, where, state string) string {
+	n := "every"
+	if limit > 0 {
+		n = fmt.Sprintf("the %d", limit)
+	}
 	which := "panes"
-	if only == "favorites" {
+	switch only {
+	case "favorites":
 		which = "favorites"
+	case "unpinned":
+		which = "unpinned panes"
 	}
+	place := ""
+	switch where {
+	case "here":
+		place = " in this workspace"
+	case "elsewhere":
+		place = " in other workspaces"
+	}
+	cond := ""
+	switch state {
+	case "working", "blocked", "idle", "done":
+		cond = " that are " + state
+	}
+	order := "most recent first"
 	switch sort {
+	case "oldest":
+		order = "oldest first"
 	case "times":
-		if limit == 0 {
-			return "Shows every " + which + ", most opened first."
-		}
-		return fmt.Sprintf("Shows the %d %s you opened most often.", limit, which)
+		order = "most opened first"
+	case "rarely":
+		order = "least opened first"
 	case "name":
-		if limit == 0 {
-			return "Shows every " + which + ", in name order."
-		}
-		return fmt.Sprintf("Shows %d %s, in name order.", limit, which)
-	default:
-		if limit == 0 {
-			return "Shows every " + which + ", most recent first."
-		}
-		return fmt.Sprintf("Shows the %d %s you opened most recently.", limit, which)
+		order = "in name order"
+	case "needs":
+		order = "blocked and working first"
 	}
+	return fmt.Sprintf("Shows %s %s%s%s, %s.", n, which, place, cond, order)
 }
 
-func choiceLine(labels []string, selected int) string {
+func choiceLines(labels []string, selected, width int) []string {
+	var lines []string
 	var b strings.Builder
-	b.WriteString("  ")
+	used := 2
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		lines = append(lines, b.String())
+		b.Reset()
+		used = 2
+	}
 	for i, label := range labels {
-		if i > 0 {
+		chip := " " + label + " "
+		gap := 0
+		if used > 2 {
+			gap = 2
+		}
+		if used+gap+len(chip) > width-1 && used > 2 {
+			flush()
+		}
+		if used == 2 {
 			b.WriteString("  ")
+		} else {
+			b.WriteString("  ")
+			used += 2
 		}
 		if i == selected {
-			b.WriteString(keySelectBg + keySelectFg + keyBold + " " + label + " " + keyReset)
+			b.WriteString(keySelectBg + keySelectFg + keyBold + chip + keyReset)
 		} else {
-			b.WriteString(keyOverlay + " " + label + " " + keyReset)
+			b.WriteString(keyOverlay + chip + keyReset)
 		}
+		used += len(chip)
 	}
-	return b.String()
+	flush()
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
 }
 
 func fieldTitle(label string, focused bool) string {
@@ -1126,19 +1252,34 @@ func fieldTitle(label string, focused bool) string {
 	return keyOverlay + "  " + label + keyReset
 }
 
-func sortLabels() []string  { return []string{"Last used", "Times opened", "Name"} }
+func sortLabels() []string {
+	return []string{"Last used", "Oldest", "Times opened", "Rarely", "Name", "Needs me"}
+}
 func limitLabels() []string { return []string{"10", "20", "50", "All"} }
-func onlyLabels() []string  { return []string{"Any pane", "Favorites only"} }
+func onlyLabels() []string  { return []string{"Any", "Favorites", "Not pinned"} }
+func whereLabels() []string { return []string{"Anywhere", "This workspace", "Other workspaces"} }
+func stateLabels() []string { return []string{"Any", "Working", "Blocked", "Idle", "Done"} }
+
+func sortOpts() []string { return []string{"last", "oldest", "times", "rarely", "name", "needs"} }
+func onlyOpts() []string { return []string{"", "favorites", "unpinned"} }
+func whereOpts() []string {
+	return []string{"", "here", "elsewhere"}
+}
+func stateOpts() []string {
+	return []string{"", "working", "blocked", "idle", "done"}
+}
+
+func indexOf(opts []string, cur string) int {
+	for i, o := range opts {
+		if o == cur {
+			return i
+		}
+	}
+	return 0
+}
 
 func sortChoice(sort string) int {
-	switch sort {
-	case "times":
-		return 1
-	case "name":
-		return 2
-	default:
-		return 0
-	}
+	return indexOf(sortOpts(), sort)
 }
 
 func limitChoice(limit int) int {
@@ -1154,35 +1295,38 @@ func limitChoice(limit int) int {
 	}
 }
 
-func onlyChoice(only string) int {
-	if only == "favorites" {
-		return 1
-	}
-	return 0
-}
+func onlyChoice(only string) int   { return indexOf(onlyOpts(), only) }
+func whereChoice(where string) int { return indexOf(whereOpts(), where) }
+func stateChoice(state string) int { return indexOf(stateOpts(), state) }
 
 func cycle(n, i, dir int) int {
 	return (i + dir + n) % n
 }
 
-func stepFormValue(field, dir int, sort string, limit int, only string) (string, int, string) {
+func stepFormValue(field, dir int, sort string, limit int, only, where, state string) (string, int, string, string, string) {
 	switch field {
 	case 1:
-		opts := []string{"last", "times", "name"}
+		opts := sortOpts()
 		sort = opts[cycle(len(opts), sortChoice(sort), dir)]
 	case 2:
 		opts := []int{10, 20, 50, 0}
 		limit = opts[cycle(len(opts), limitChoice(limit), dir)]
 	case 3:
-		opts := []string{"", "favorites"}
+		opts := onlyOpts()
 		only = opts[cycle(len(opts), onlyChoice(only), dir)]
+	case 4:
+		opts := whereOpts()
+		where = opts[cycle(len(opts), whereChoice(where), dir)]
+	case 5:
+		opts := stateOpts()
+		state = opts[cycle(len(opts), stateChoice(state), dir)]
 	}
-	return sort, limit, only
+	return sort, limit, only, where, state
 }
 
 // renderForm is the criteria editor. Every choice is on screen. j/k moves
 // between fields. h/l changes the highlighted choice. Letters type the name.
-func renderForm(width, height int, names []string, active, field int, editing bool, name, sort string, limit int, only, status string) string {
+func renderForm(width, height int, names []string, active, field int, editing bool, name, sort string, limit int, only, where, state, status string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -1195,8 +1339,7 @@ func renderForm(width, height int, names []string, active, field int, editing bo
 	emit(tabBar(names, active))
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit(keyText + keyBold + "  " + title + keyReset)
-	emit(keyOverlay + "  " + formSummary(sort, limit, only) + keyReset)
-	emit("")
+	emit(keyOverlay + "  " + formSummary(sort, limit, only, where, state) + keyReset)
 	emit(fieldTitle("Name", field == 0))
 	if field == 0 {
 		shown := name
@@ -1211,15 +1354,26 @@ func renderForm(width, height int, names []string, active, field int, editing bo
 	} else {
 		emit(keyText + "  " + name + keyReset)
 	}
-	emit("")
 	emit(fieldTitle("Sort", field == 1))
-	emit(choiceLine(sortLabels(), sortChoice(sort)))
-	emit("")
+	for _, line := range choiceLines(sortLabels(), sortChoice(sort), width) {
+		emit(line)
+	}
 	emit(fieldTitle("How many", field == 2))
-	emit(choiceLine(limitLabels(), limitChoice(limit)))
-	emit("")
-	emit(fieldTitle("Which panes", field == 3))
-	emit(choiceLine(onlyLabels(), onlyChoice(only)))
+	for _, line := range choiceLines(limitLabels(), limitChoice(limit), width) {
+		emit(line)
+	}
+	emit(fieldTitle("Pinned", field == 3))
+	for _, line := range choiceLines(onlyLabels(), onlyChoice(only), width) {
+		emit(line)
+	}
+	emit(fieldTitle("Workspace", field == 4))
+	for _, line := range choiceLines(whereLabels(), whereChoice(where), width) {
+		emit(line)
+	}
+	emit(fieldTitle("Status", field == 5))
+	for _, line := range choiceLines(stateLabels(), stateChoice(state), width) {
+		emit(line)
+	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit(hintFooter("j/k", "field", "h/l", "choice", "enter", "save", "esc", "cancel"))
 	if status != "" {
@@ -1244,7 +1398,9 @@ func renderConfirm(width, height int, names []string, active, sel int, name stri
 	emit(keyText + keyBold + "  Delete " + name + "?" + keyReset)
 	emit(keyOverlay + "  The panes stay. Only this tab is removed." + keyReset)
 	emit("")
-	emit(choiceLine([]string{"Delete", "Cancel"}, sel))
+	for _, line := range choiceLines([]string{"Delete", "Cancel"}, sel, width) {
+		emit(line)
+	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit(hintFooter("h/l", "choose", "enter", "confirm", "esc", "back"))
 	if len(lines) > height {
@@ -1428,7 +1584,7 @@ func runPicker() int {
 	formField := 0
 	confirmName := ""
 	confirmSel := 1
-	newName, newSort, newOnly := "", "last", ""
+	newName, newSort, newOnly, newWhere, newState := "", "last", "", "", ""
 	newLimit := 20
 	var allRows []row
 	rebuild := func() {
@@ -1461,7 +1617,7 @@ func runPicker() int {
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case creating:
-			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newLimit, newOnly, status)
+			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newLimit, newOnly, newWhere, newState, status)
 		default:
 			v := views(st)[tab]
 			kind := "both"
@@ -1538,7 +1694,7 @@ func runPicker() int {
 					status = "Type a name, then press enter."
 					break
 				}
-				ct := customTab{Name: name, Sort: newSort, Limit: newLimit, Only: newOnly}
+				ct := customTab{Name: name, Sort: newSort, Limit: newLimit, Only: newOnly, Where: newWhere, State: newState}
 				if editing && editIdx >= 0 && editIdx < len(st.Tabs) {
 					ct.Fixed = st.Tabs[editIdx].Fixed
 					st.Tabs[editIdx] = ct
@@ -1554,7 +1710,7 @@ func runPicker() int {
 				sel = 0
 				rebuild()
 			case "j", "down":
-				if formField < 3 {
+				if formField < 5 {
 					formField++
 				}
 				status = ""
@@ -1564,10 +1720,10 @@ func runPicker() int {
 				}
 				status = ""
 			case "h", "left":
-				newSort, newLimit, newOnly = stepFormValue(formField, -1, newSort, newLimit, newOnly)
+				newSort, newLimit, newOnly, newWhere, newState = stepFormValue(formField, -1, newSort, newLimit, newOnly, newWhere, newState)
 				status = ""
 			case "l", "right":
-				newSort, newLimit, newOnly = stepFormValue(formField, 1, newSort, newLimit, newOnly)
+				newSort, newLimit, newOnly, newWhere, newState = stepFormValue(formField, 1, newSort, newLimit, newOnly, newWhere, newState)
 				status = ""
 			case "bs":
 				if formField == 0 {
@@ -1647,7 +1803,7 @@ func runPicker() int {
 			if v.Kind != "all" && v.Kind != "favorites" {
 				break
 			}
-			sortMode = (sortMode + 1) % 4
+			sortMode = (sortMode + 1) % sortCount
 			sel = 0
 			status = "sort: " + sortHow(sortMode, "last")
 			rebuild()
@@ -1656,7 +1812,7 @@ func runPicker() int {
 			editing = false
 			editIdx = -1
 			formField = 0
-			newName, newSort, newOnly, newLimit = "", "last", "", 20
+			newName, newSort, newOnly, newWhere, newState, newLimit = "", "last", "", "", "", 20
 			status = ""
 		case key == "e" && !searching && !showHelp:
 			v := views(st)[tab]
@@ -1668,7 +1824,7 @@ func runPicker() int {
 			editing = true
 			editIdx = v.Idx
 			formField = 1
-			newName, newSort, newOnly, newLimit = ct.Name, ct.Sort, ct.Only, ct.Limit
+			newName, newSort, newOnly, newWhere, newState, newLimit = ct.Name, ct.Sort, ct.Only, ct.Where, ct.State, ct.Limit
 			status = ""
 		case key == "x" && !searching && !showHelp:
 			v := views(st)[tab]
