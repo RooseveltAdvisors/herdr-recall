@@ -3,28 +3,25 @@
 A pane recall picker for [Herdr](https://herdr.dev). It remembers which panes
 you actually use and lets you jump back to any of them from one overlay list.
 
-Press `prefix+shift+l` and a picker opens in the style of Herdr's built-in
-goto overlay (`prefix+k`). It starts in browse mode; press `/` to search.
-Panes are listed in three groups:
-
-- **FAVORITES** - panes you starred, always at the top
-- **RECENT** - most recently focused panes
-- **MOST USED** - panes with the highest visit counts whose last-seen time
-  aged out of the recent list
+Press `prefix+shift+l` and a picker opens as a popup, in the style of
+Herdr's built-in goto overlay (`prefix+k`). Three tabs sit at the top:
+Favorites, Most used, and Recently used. Left and right arrows switch tabs.
+Favorites stay pinned at the top of the Most used and Recently used tabs.
+Recently used lists at most 20 panes. Press `s` to cycle the sort.
+Each row shows how many times you opened the pane and when, not a bare `v`.
 
 ## Keys
 
 | Key | Action |
 | --- | ------ |
 | `prefix+shift+l` | open the picker |
-| `/` | enter search mode (browse mode never treats a key as a filter) |
-| type to filter | search mode only: typed characters filter the list |
-| `ctrl+u` | search mode: clear the query |
+| left / right | switch Favorites, Most used, and Recently used |
+| `s` | cycle sort: last used, times opened, name |
+| `/` or a letter | search. The typed text shows in the search line |
 | `enter` | jump to the selected pane |
-| `f` | browse mode: favorite / unfavorite the selected row |
-| `j` / `k` or arrows | browse mode: move the selection; arrows also move in search mode |
-| `esc` | search mode: leave search and keep the picker open |
-| `esc` | browse mode: close the picker |
+| `f` | pin or unpin the selected row. Pinned rows stay at the top |
+| `j` / `k` | move one row. The list scrolls one row |
+| `esc` | leave search, then close the picker |
 
 The footer shows the keys for the mode you are in: key names in accent,
 hint words dim, the same way `prefix+k` does. Status appears as a coloured

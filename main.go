@@ -22,9 +22,21 @@ import (
 
 const pluginID = "RooseveltAdvisors.herdr-recall"
 
-// recentLimit caps the RECENT section so MOST USED has room to list
-// high-visit panes whose last-seen timestamps aged out of recency.
-const recentLimit = 8
+// recentMax is the most rows the Recently used tab lists under its title.
+const recentMax = 20
+
+const (
+	tabFavorites = 0
+	tabMostUsed  = 1
+	tabRecent    = 2
+)
+
+const (
+	sortDefault = 0
+	sortLast    = 1
+	sortTimes   = 2
+	sortName    = 3
+)
 
 const (
 	keyReset    = "\x1b[0m"
@@ -467,67 +479,181 @@ func displayLabel(s *snapshot, id, stored string) string {
 	return strings.Join(parts, " · ")
 }
 
-func buildRows(s *snapshot, st *store, query string) []row {
-	q := strings.ToLower(strings.TrimSpace(query))
-	match := func(id, label string) bool {
-		if q == "" {
-			return true
-		}
-		return strings.Contains(strings.ToLower(id), q) || strings.Contains(strings.ToLower(label), q)
+func tabTitle(tab int) string {
+	switch tab {
+	case tabFavorites:
+		return "FAVORITES"
+	case tabMostUsed:
+		return "MOST USED"
+	default:
+		return "RECENTLY USED"
 	}
+}
+
+func sortLabel(tab, mode int) string {
+	if mode == sortDefault {
+		switch tab {
+		case tabFavorites:
+			return "starred order"
+		case tabMostUsed:
+			return "times opened"
+		default:
+			return "last used"
+		}
+	}
+	switch mode {
+	case sortLast:
+		return "last used"
+	case sortTimes:
+		return "times opened"
+	default:
+		return "name"
+	}
+}
+
+func collectRows(s *snapshot, st *store) []row {
 	statusOf := map[string]string{}
 	for _, p := range s.Panes {
 		statusOf[p.PaneID] = p.AgentStatus
 	}
 	seen := map[string]bool{}
-	var out []row
-	add := func(id, section string) {
-		if seen[id] {
+	var ids []string
+	addID := func(id string) {
+		if id == "" || seen[id] {
 			return
 		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	for _, id := range st.Favorites {
+		addID(id)
+	}
+	for id := range st.Panes {
+		addID(id)
+	}
+	for _, p := range s.Panes {
+		addID(p.PaneID)
+	}
+	var out []row
+	for _, id := range ids {
 		ps := st.Panes[id]
 		label := ""
 		if ps != nil {
 			label = ps.Label
 		}
 		label = displayLabel(s, id, label)
-		if !match(id, label) {
-			return
-		}
-		seen[id] = true
 		var visits, last int64
 		if ps != nil {
 			visits, last = ps.Visits, ps.Last
 		}
 		out = append(out, row{
-			PaneID: id, Label: label, Section: section,
+			PaneID: id, Label: label,
 			Visits: visits, Last: last, Status: statusOf[id],
 			Fav: st.isFavorite(id),
 		})
 	}
-	// favorites first, then recency, then most used (each pane once).
-	// RECENT is capped so panes with high visit counts but older last-seen
-	// timestamps surface in MOST USED instead of hiding behind it.
-	for _, f := range st.Favorites {
-		add(f, "FAVORITES")
-	}
-	var byLast, byVisits []string
-	for id := range st.Panes {
-		byLast = append(byLast, id)
-		byVisits = append(byVisits, id)
-	}
-	sort.Slice(byLast, func(i, j int) bool { return st.Panes[byLast[i]].Last > st.Panes[byLast[j]].Last })
-	sort.Slice(byVisits, func(i, j int) bool { return st.Panes[byVisits[i]].Visits > st.Panes[byVisits[j]].Visits })
-	for i, id := range byLast {
-		if i >= recentLimit {
-			break
+	return out
+}
+
+func rowLess(a, b row, tab, mode int) bool {
+	kind := mode
+	if kind == sortDefault {
+		switch tab {
+		case tabMostUsed:
+			kind = sortTimes
+		case tabRecent:
+			kind = sortLast
+		default:
+			kind = sortName
 		}
-		add(id, "RECENT")
 	}
-	for _, id := range byVisits {
-		add(id, "MOST USED")
+	switch kind {
+	case sortLast:
+		if a.Last != b.Last {
+			return a.Last > b.Last
+		}
+	case sortTimes:
+		if a.Visits != b.Visits {
+			return a.Visits > b.Visits
+		}
+	default:
+		return strings.ToLower(a.Label) < strings.ToLower(b.Label)
+	}
+	return strings.ToLower(a.Label) < strings.ToLower(b.Label)
+}
+
+func tabRows(s *snapshot, st *store, tab, mode int) []row {
+	all := collectRows(s, st)
+	var favs, rest []row
+	favOrder := map[string]int{}
+	for i, id := range st.Favorites {
+		favOrder[id] = i
+	}
+	for _, r := range all {
+		if r.Fav {
+			favs = append(favs, r)
+		} else {
+			rest = append(rest, r)
+		}
+	}
+	sortList := func(list []row) {
+		if mode == sortDefault && tab == tabFavorites {
+			sort.SliceStable(list, func(i, j int) bool {
+				return favOrder[list[i].PaneID] < favOrder[list[j].PaneID]
+			})
+			return
+		}
+		sort.SliceStable(list, func(i, j int) bool {
+			return rowLess(list[i], list[j], tab, mode)
+		})
+	}
+	sortList(favs)
+	// The recent cap is by last-used time, then the chosen sort reorders that set.
+	if tab == tabRecent {
+		sort.SliceStable(rest, func(i, j int) bool { return rest[i].Last > rest[j].Last })
+		if len(rest) > recentMax {
+			rest = rest[:recentMax]
+		}
+	}
+	if tab == tabMostUsed {
+		sort.SliceStable(rest, func(i, j int) bool { return rest[i].Visits > rest[j].Visits })
+		if len(rest) > recentMax {
+			rest = rest[:recentMax]
+		}
+	}
+	sortList(rest)
+	section := tabTitle(tab)
+	if tab == tabFavorites {
+		for i := range favs {
+			favs[i].Section = "FAVORITES"
+		}
+		return favs
+	}
+	var out []row
+	for i := range favs {
+		favs[i].Section = "FAVORITES"
+		out = append(out, favs[i])
+	}
+	for i := range rest {
+		rest[i].Section = section
+		out = append(out, rest[i])
 	}
 	return out
+}
+
+func metricText(r row, width int) string {
+	when := ago(r.Last)
+	if width < 68 {
+		return when
+	}
+	times := "once"
+	switch {
+	case r.Visits == 0:
+		times = "not opened"
+	case r.Visits > 1:
+		times = fmt.Sprintf("%d times", r.Visits)
+	}
+	return times + " · " + when
 }
 
 func ago(ts int64) string {
@@ -662,6 +788,8 @@ func renderHelp(width, height int) string {
 	emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help - esc returns to the list" + keyReset)
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	keys := [][2]string{
+		{"left / right", "switch Favorites, Most used, Recently used"},
+		{"s", "cycle sort: last used, times opened, name"},
 		{"/", "search panes (esc back to the list)"},
 		{"enter", "jump to the selected pane"},
 		{"j / k", "move one row (list scrolls one row)"},
@@ -696,12 +824,30 @@ func filterRows(rows []row, query string) []row {
 
 // renderFrame draws one screenful. Exposed via --render so screenshots and
 // tests use the exact bytes a live session would show.
-func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height int) string {
+func tabBar(active int) string {
+	names := []string{"FAVORITES", "MOST USED", "RECENTLY USED"}
+	var b strings.Builder
+	for i, name := range names {
+		if i == active {
+			b.WriteString(keySelectBg + keySelectFg + keyBold + " " + name + " " + keyReset)
+		} else {
+			b.WriteString(keyOverlay + " " + name + " " + keyReset)
+		}
+		if i < len(names)-1 {
+			b.WriteString(" ")
+		}
+	}
+	return b.String()
+}
+
+func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height, tab int, sortName string) string {
 	var b strings.Builder
 	b.WriteString("\x1b[2J\x1b[H") // clear
 	// Every line is clipped to the pane's real width: one pane, one row, no
 	// wrapping, whatever width the overlay happens to be.
 	emit := func(line string) { b.WriteString(fitLine(line, width) + "\r\n") }
+	emit(tabBar(tab))
+	emit(sectionColor(tabTitle(tab)) + keyBold + "  " + tabTitle(tab) + keyReset + keyOverlay + "  ·  " + sortName + keyReset)
 	if searching {
 		prompt := keyOverlay + "search panes" + keyReset
 		if query != "" {
@@ -713,7 +859,8 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	footer := 2
-	visible := height - footer - 1
+	// tab bar, title, search line, and separator sit above the scrolling list.
+	visible := height - footer - 4
 	if visible < 3 {
 		visible = 3
 	}
@@ -725,12 +872,11 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
-	starW, statusW, metaW := 2, 12, 8
+	starW, statusW, metaW := 2, 12, 22
 	if narrow {
-		// The name is the point of the picker: a narrow pane keeps only the
-		// coloured dot and a short visit count and gives every remaining
-		// column to the label.
-		statusW, metaW = 2, 6
+		// The name is the point of the picker. A narrow pane keeps the coloured
+		// dot and a short "2m ago", and gives every remaining column to the label.
+		statusW, metaW = 2, 8
 	}
 	labelW := width - starW - statusW - metaW
 	if labelW < 4 {
@@ -741,6 +887,9 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 			continue
 		}
 		if i-start >= visible {
+			break
+		}
+		if len(rows) == 0 {
 			break
 		}
 		if r.Section != lastSection {
@@ -772,9 +921,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		default:
 			statusCell = pad(scol+"● "+word+keyReset, statusW)
 		}
-		// The name gets the columns: visits is a short "3v" either way, and the
-		// status is a dot plus its word, so "pi - wiseman . THE-FM" fits.
-		metaCol := fmt.Sprintf("%dv", r.Visits)
+		metaCol := metricText(r, width)
 		if i == sel {
 			span := keySelectBg + keySelectFg + keyBold
 			line := span
@@ -789,6 +936,9 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 			emit(starCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
 		}
 	}
+	if len(rows) == 0 {
+		emit(keyOverlay + "  No panes in this tab. Press f on a pane to pin it." + keyReset)
+	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	if searching {
 		if narrow {
@@ -799,10 +949,10 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		}
 	} else {
 		if narrow {
-			emit(keyAccentFg + "/" + keyReset + keyOverlay + " search  enter jump  f fav" + keyReset)
-			emit(keyAccentFg + "?" + keyReset + keyOverlay + " help  gg/G first/last  j/k move  esc close" + keyReset)
+			emit(keyAccentFg + "←/→" + keyReset + keyOverlay + " tabs  s sort  f pin" + keyReset)
+			emit(keyAccentFg + "j/k" + keyReset + keyOverlay + " move  ? help  esc close" + keyReset)
 		} else {
-			emit(hintFooter("/", "search", "enter", "jump", "f", "favorite", "?", "help", "j/k", "move", "gg/G", "ends", "esc", "close"))
+			emit(hintFooter("left/right", "tabs", "s", "sort", "f", "pin", "j/k", "move", "?", "help", "esc", "close"))
 		}
 	}
 	if status != "" {
@@ -914,6 +1064,12 @@ func logicalKey(b []byte) string {
 	if strings.Contains(s, "[") && strings.HasSuffix(s, "B") {
 		return "down"
 	}
+	if strings.Contains(s, "[") && strings.HasSuffix(s, "C") {
+		return "right"
+	}
+	if strings.Contains(s, "[") && strings.HasSuffix(s, "D") {
+		return "left"
+	}
 	if i := strings.Index(s, "["); i >= 0 && strings.HasSuffix(s, "u") {
 		code := 0
 		for _, c := range s[i+1:] {
@@ -929,6 +1085,14 @@ func logicalKey(b []byte) string {
 			return "esc"
 		case 127, 8:
 			return "bs"
+		case 57417:
+			return "left"
+		case 57418:
+			return "right"
+		case 57419:
+			return "up"
+		case 57420:
+			return "down"
 		default:
 			if code >= 32 && code < 127 {
 				return string(byte(code))
@@ -958,13 +1122,19 @@ func runPicker() int {
 	searching := false
 	showHelp := false
 	pendingG := false
-	// The row order is frozen when the picker opens: one snapshot, one sort.
-	// Keys never rebuild or re-sort the list; search only narrows it.
+	// The snapshot is frozen when the picker opens so j/k does not reshuffle
+	// rows. Tab and sort changes reorder that frozen set on purpose.
 	frozen, err := loadSnapshot()
 	if err != nil {
 		frozen = &snapshot{}
 	}
-	allRows := buildRows(frozen, st, "")
+	tab := tabRecent
+	sortMode := sortDefault
+	var allRows []row
+	rebuild := func() {
+		allRows = tabRows(frozen, st, tab, sortMode)
+	}
+	rebuild()
 	for {
 		rows := allRows
 		if q := strings.TrimSpace(query); q != "" {
@@ -981,7 +1151,7 @@ func runPicker() int {
 		if showHelp {
 			frame = renderHelp(w, h)
 		} else {
-			frame = renderFrame(rows, sel, query, status, searching, w, h)
+			frame = renderFrame(rows, sel, query, status, searching, w, h, tab, sortLabel(tab, sortMode))
 		}
 		tty.WriteString(frame)
 
@@ -1061,6 +1231,19 @@ func runPicker() int {
 			return 0
 		case key == "?" && !searching:
 			showHelp = true
+		case (key == "left" || key == "right") && !showHelp:
+			if key == "left" {
+				tab = (tab + 2) % 3
+			} else {
+				tab = (tab + 1) % 3
+			}
+			sel = 0
+			rebuild()
+		case key == "s" && !searching && !showHelp:
+			sortMode = (sortMode + 1) % 4
+			sel = 0
+			status = "sort: " + sortLabel(tab, sortMode)
+			rebuild()
 		case key == "/" && !searching:
 			// slash enters search mode, the way prefix+k does; it is never a
 			// filter character in browse mode.
@@ -1093,11 +1276,7 @@ func runPicker() int {
 					status = "unfavorited " + id
 				}
 				_ = saveStore(st)
-				for i := range allRows {
-					if allRows[i].PaneID == id {
-						allRows[i].Fav = st.isFavorite(id)
-					}
-				}
+				rebuild()
 			}
 		case key == "ctrl-u":
 			if searching {
@@ -1174,7 +1353,10 @@ func renderOnce() int {
 	}
 	query := os.Getenv("RECALL_QUERY")
 	searching := os.Getenv("RECALL_SEARCH") == "1"
-	rows := buildRows(snap, st, query)
+	rows := tabRows(snap, st, tabRecent, sortDefault)
+	if query != "" {
+		rows = filterRows(rows, query)
+	}
 	sel := 0
 	if v := os.Getenv("RECALL_SEL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -1192,7 +1374,7 @@ func renderOnce() int {
 			h = n
 		}
 	}
-	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), searching, w, h))
+	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), searching, w, h, tabRecent, sortLabel(tabRecent, sortDefault)))
 	return 0
 }
 
