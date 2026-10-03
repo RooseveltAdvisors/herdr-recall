@@ -15,7 +15,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 )
 
 const pluginID = "RooseveltAdvisors.herdr-recall"
@@ -29,20 +31,20 @@ const (
 	keyDim      = "\x1b[2m"
 	keyBold     = "\x1b[1m"
 	keyAccentFg = "\x1b[38;5;81m"  // accent, used for selected-row bar, key names
-	keySub      = "\x1b[38;5;246m"  // subtext, kept for compatibility
-	keyOverlay  = "\x1b[38;5;244m"  // overlay0: hints and placeholders only
-	keySelectBg = "\x1b[48;5;81m"   // selected row background
-	keySelectFg = "\x1b[38;5;235m"  // contrast text on accent
-	keyText     = "\x1b[38;5;252m"  // readable body text on the panel
-	keySurface  = "\x1b[38;5;238m"  // mid surface colour for separators
-	keyStar     = "\x1b[38;5;221m"  // warm yellow favourite star
-	keySecFav   = "\x1b[38;5;221m"  // FAVORITES header, warm
-	keySecRec   = "\x1b[38;5;81m"   // RECENT header, accent
-	keySecUsed  = "\x1b[38;5;44m"   // MOST USED header, teal
-	keyStBad    = "\x1b[38;5;203m"  // blocked: red
-	keyStBusy   = "\x1b[38;5;221m"  // working: yellow
-	keyStGood   = "\x1b[38;5;44m"   // done: teal
-	keyStFree   = "\x1b[38;5;114m"  // idle: green
+	keySub      = "\x1b[38;5;246m" // subtext, kept for compatibility
+	keyOverlay  = "\x1b[38;5;244m" // overlay0: hints and placeholders only
+	keySelectBg = "\x1b[48;5;81m"  // selected row background
+	keySelectFg = "\x1b[38;5;235m" // contrast text on accent
+	keyText     = "\x1b[38;5;252m" // readable body text on the panel
+	keySurface  = "\x1b[38;5;238m" // mid surface colour for separators
+	keyStar     = "\x1b[38;5;221m" // warm yellow favourite star
+	keySecFav   = "\x1b[38;5;221m" // FAVORITES header, warm
+	keySecRec   = "\x1b[38;5;81m"  // RECENT header, accent
+	keySecUsed  = "\x1b[38;5;44m"  // MOST USED header, teal
+	keyStBad    = "\x1b[38;5;203m" // blocked: red
+	keyStBusy   = "\x1b[38;5;221m" // working: yellow
+	keyStGood   = "\x1b[38;5;44m"  // done: teal
+	keyStFree   = "\x1b[38;5;114m" // idle: green
 )
 
 // ---------------------------------------------------------------------------
@@ -80,11 +82,11 @@ type paneRec struct {
 }
 
 type tabRec struct {
-	TabID         string `json:"tab_id"`
-	WorkspaceID   string `json:"workspace_id"`
-	Label         string `json:"label"`
-	Focused       bool   `json:"focused"`
-	ActivePaneID  string `json:"-"`
+	TabID        string `json:"tab_id"`
+	WorkspaceID  string `json:"workspace_id"`
+	Label        string `json:"label"`
+	Focused      bool   `json:"focused"`
+	ActivePaneID string `json:"-"`
 }
 
 type wsRec struct {
@@ -101,10 +103,10 @@ type layoutPane struct {
 }
 
 type layoutRec struct {
-	TabID          string      `json:"tab_id"`
-	WorkspaceID    string      `json:"workspace_id"`
-	FocusedPaneID  string      `json:"focused_pane_id"`
-	Panes          []layoutPane `json:"panes"`
+	TabID         string       `json:"tab_id"`
+	WorkspaceID   string       `json:"workspace_id"`
+	FocusedPaneID string       `json:"focused_pane_id"`
+	Panes         []layoutPane `json:"panes"`
 }
 
 type snapshot struct {
@@ -154,9 +156,9 @@ type paneStat struct {
 }
 
 type store struct {
-	Version   int                `json:"version"`
+	Version   int                  `json:"version"`
 	Panes     map[string]*paneStat `json:"panes"`
-	Favorites []string           `json:"favorites"`
+	Favorites []string             `json:"favorites"`
 }
 
 func configDir() string {
@@ -707,7 +709,7 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 		}
 		emit(keyAccentFg + keyBold + " / " + keyReset + prompt)
 	} else {
-		emit(keyAccentFg + keyBold + "> " + keyReset + keyOverlay + "/ search panes" + keyReset)
+		emit(keyAccentFg + keyBold + "> " + keyReset + keyOverlay + "type to search" + keyReset)
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	footer := 2
@@ -868,40 +870,78 @@ func max(a, b int) int {
 // tty the picker itself holds, and a failure must never fall back to a wide
 // default: a frame wider than the pane wraps and every row becomes unreadable.
 func termSize(tty *os.File) (int, int) {
-	w, h := 0, 0
-	cmd := exec.Command("stty", "size")
-	cmd.Stdin = tty
-	if out, err := cmd.Output(); err == nil {
-		f := strings.Fields(string(out))
-		if len(f) == 2 {
-			if v, err := strconv.Atoi(f[0]); err == nil && v > 0 {
-				h = v
+	var ws struct {
+		Row, Col, X, Y uint16
+	}
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, tty.Fd(), 0x5413, uintptr(unsafe.Pointer(&ws)))
+	if errno != 0 || ws.Col < 8 || ws.Row < 4 {
+		return 62, 12
+	}
+	return int(ws.Col), int(ws.Row)
+}
+
+// logicalKey turns one keystroke into a name the picker understands.
+// Herdr may deliver a raw byte or a CSI / kitty sequence. Both must work,
+// or the popup looks open and ignores typing.
+func logicalKey(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	if b[0] != 0x1b {
+		switch b[0] {
+		case '\r', '\n':
+			return "enter"
+		case 0x7f, 0x08:
+			return "bs"
+		case 0x15:
+			return "ctrl-u"
+		case 0x04:
+			return "ctrl-d"
+		default:
+			if b[0] >= 0x20 && b[0] < 0x7f {
+				return string(b[0])
 			}
-			if v, err := strconv.Atoi(f[1]); err == nil && v > 0 {
-				w = v
+			return ""
+		}
+	}
+	if len(b) == 1 {
+		return "esc"
+	}
+	s := string(b)
+	if strings.Contains(s, "[") && strings.HasSuffix(s, "A") {
+		return "up"
+	}
+	if strings.Contains(s, "[") && strings.HasSuffix(s, "B") {
+		return "down"
+	}
+	if i := strings.Index(s, "["); i >= 0 && strings.HasSuffix(s, "u") {
+		code := 0
+		for _, c := range s[i+1:] {
+			if c < '0' || c > '9' {
+				break
+			}
+			code = code*10 + int(c-'0')
+		}
+		switch code {
+		case 13:
+			return "enter"
+		case 27:
+			return "esc"
+		case 127, 8:
+			return "bs"
+		default:
+			if code >= 32 && code < 127 {
+				return string(byte(code))
 			}
 		}
 	}
-	if w <= 0 {
-		w = 80 // herdr's own panel width, never 100
-	}
-	if h <= 0 {
-		h = 24
-	}
-	return w, h
+	return "esc"
 }
 
 func runPicker() int {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "recall: no tty: %v\n", err)
-		return 1
-	}
-	defer tty.Close()
-	// Exiting the process dismisses the popup (Esc, q and a jump all return to
-	// the same view); no pane close or tab close is ever issued, so no tab can
-	// be left behind.
-	// raw mode without external dependencies
+	// Herdr writes keystrokes to this process's stdin pty. Read that fd.
+	// A second /dev/tty open, plus stty size on every frame, dropped keys.
+	tty := os.Stdin
 	raw := exec.Command("stty", "raw", "-echo")
 	raw.Stdin = tty
 	_ = raw.Run()
@@ -937,11 +977,6 @@ func runPicker() int {
 			sel = 0
 		}
 		w, h := termSize(tty)
-		// Draw to the larger of the tty and the layout rect: a 45 column pane
-		// must not paint itself 23 wide because the tty read lagged.
-		if rw := paneRectWidth(frozen, frozen.FocusedPaneID); rw > w {
-			w = rw
-		}
 		var frame string
 		if showHelp {
 			frame = renderHelp(w, h)
@@ -950,12 +985,16 @@ func runPicker() int {
 		}
 		tty.WriteString(frame)
 
-		buf := make([]byte, 8)
+		buf := make([]byte, 64)
 		n, err := tty.Read(buf)
 		if err != nil || n == 0 {
 			return 0
 		}
 		b := buf[:n]
+		key := logicalKey(b)
+		if key == "" {
+			continue
+		}
 		// Rapid g presses arrive in one read ("gg"): replay every leading g as
 		// its own press so gg always jumps to the top row.
 		if !searching && !showHelp && n >= 2 && b[0] == 'g' {
@@ -977,12 +1016,12 @@ func runPicker() int {
 			b, n = b[k:], len(b)-k // mixed read: handle the rest normally
 		}
 		// A lone g waits for its second g; any other key discards it.
-		if b[0] != 'g' || n != 1 {
+		if key != "g" {
 			pendingG = false
 		}
 		half := max(1, (h-3)/2)
 		switch {
-		case b[0] == 0x1b && n == 1:
+		case key == "esc":
 			if showHelp {
 				showHelp = false // esc closes help, the row stays
 				continue
@@ -997,22 +1036,18 @@ func runPicker() int {
 			return 0 // esc closes from browse mode
 		case showHelp:
 			// While help is open only esc, ? and q act; the list does not move.
-			switch b[0] {
-			case '?', 'q':
+			if key == "?" || key == "q" {
 				showHelp = false
 			}
-		case b[0] == 0x1b && n > 1 && b[1] == '[':
-			switch {
-			case n > 2 && (b[2] == 'A'):
-				if sel > 0 {
-					sel--
-				}
-			case n > 2 && (b[2] == 'B'):
-				if sel < len(rows)-1 {
-					sel++
-				}
+		case key == "up":
+			if sel > 0 {
+				sel--
 			}
-		case b[0] == '\r' || b[0] == '\n':
+		case key == "down":
+			if sel < len(rows)-1 {
+				sel++
+			}
+		case key == "enter":
 			if len(rows) == 0 {
 				return 0
 			}
@@ -1024,32 +1059,32 @@ func runPicker() int {
 				continue
 			}
 			return 0
-		case b[0] == '?' && !searching:
+		case key == "?" && !searching:
 			showHelp = true
-		case b[0] == '/' && !searching:
+		case key == "/" && !searching:
 			// slash enters search mode, the way prefix+k does; it is never a
 			// filter character in browse mode.
 			searching = true
 			query = ""
 			sel = 0
-		case b[0] == 'g' && !searching && n == 1:
+		case key == "g" && !searching:
 			if pendingG {
 				sel = 0 // gg jumps to the first row
 				pendingG = false
 			} else {
 				pendingG = true
 			}
-		case b[0] == 'G' && !searching:
+		case key == "G" && !searching:
 			sel = max(0, len(rows)-1) // G jumps to the last row
-		case b[0] == 'j' && !searching:
+		case key == "j" && !searching:
 			if sel < len(rows)-1 {
 				sel++
 			}
-		case b[0] == 'k' && !searching:
+		case key == "k" && !searching:
 			if sel > 0 {
 				sel--
 			}
-		case b[0] == 'f' && !searching:
+		case key == "f" && !searching:
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
 				if st.toggleFavorite(id) {
@@ -1064,7 +1099,7 @@ func runPicker() int {
 					}
 				}
 			}
-		case b[0] == 0x15: // ctrl+u
+		case key == "ctrl-u":
 			if searching {
 				query = ""
 				sel = 0
@@ -1073,23 +1108,28 @@ func runPicker() int {
 			} else {
 				sel = 0
 			}
-		case b[0] == 0x04: // ctrl+d
+		case key == "ctrl-d":
 			if sel+half < len(rows) {
 				sel += half // half a page down, in browse and in search
 			}
 			if sel >= len(rows) {
 				sel = max(0, len(rows)-1)
 			}
-		case b[0] == 0x7f || b[0] == 0x08:
+		case key == "bs":
 			if searching && len(query) > 0 {
 				query = query[:len(query)-1]
 				sel = 0
 			}
-		case b[0] == 'q' && !searching:
+		case key == "q" && !searching:
 			return 0
-		case searching && b[0] >= 0x20 && b[0] < 0x7f:
-			// only search mode filters; browse mode ignores typed letters
-			query += string(b[0])
+		case len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f:
+			// Typing a letter starts search and shows the character. Browse mode
+			// used to ignore those keys, so the popup looked like it ate typing.
+			if !searching {
+				searching = true
+				query = ""
+			}
+			query += key
 			sel = 0
 		}
 	}
