@@ -1809,7 +1809,7 @@ func openPicker() int {
 	// and does not change the tab layout. Exiting the process dismisses it, so
 	// no pane close or tab close is ever issued. The CLI help omits popup, but
 	// the 0.9.3 server implements it (width/height are popup-only flags).
-	if _, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "popup", "--width", "80%", "--height", "70%"); err != nil {
+	if _, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "popup", "--width", "95%", "--height", "95%"); err != nil {
 		fmt.Fprintf(os.Stderr, "recall: open picker: %v\n", err)
 		return 1
 	}
