@@ -38,6 +38,21 @@ func TestCustomFilters(t *testing.T) {
 	}
 }
 
+func TestRowTitleIsTabNameOnly(t *testing.T) {
+	snap := &snapshot{
+		Panes: []paneRec{{
+			PaneID: "p1", TabID: "t1", WorkspaceID: "w1",
+			TerminalTitleStrip: "\u03c0 - wiseman", CWD: "/home/jon/git/wiseman",
+		}},
+		Tabs:       []tabRec{{TabID: "t1", Label: "portal-CI"}},
+		Workspaces: []wsRec{{WorkspaceID: "w1", Label: "wiseman"}},
+	}
+	got := displayLabel(snap, "p1", "\u03c0 - wiseman")
+	if got != "portal-CI" {
+		t.Fatalf("label = %q", got)
+	}
+}
+
 func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 	now := time.Now().Unix()
 	st := &store{Version: 1, Panes: map[string]*paneStat{}, TabsInit: true, Tabs: defaultTabs()}

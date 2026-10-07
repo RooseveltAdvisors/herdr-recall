@@ -365,29 +365,7 @@ func recordFocus() (string, error) {
 }
 
 func paneLabel(s *snapshot, id string) string {
-	for _, p := range s.Panes {
-		if p.PaneID != id {
-			continue
-		}
-		title := strings.TrimSpace(p.TerminalTitleStrip)
-		if title == "" {
-			title = strings.TrimSpace(p.TerminalTitle)
-		}
-		if title != "" {
-			return title
-		}
-		for _, t := range s.Tabs {
-			if t.TabID == p.TabID && t.Label != "" {
-				return t.Label
-			}
-		}
-		for _, w := range s.Workspaces {
-			if w.WorkspaceID == p.WorkspaceID && w.Label != "" {
-				return w.Label
-			}
-		}
-	}
-	return id
+	return displayLabel(s, id, "")
 }
 
 // ---------------------------------------------------------------------------
@@ -465,9 +443,8 @@ type row struct {
 	Fav         bool
 }
 
-// displayLabel builds a recallable name for a pane: agent title, tab label,
-// workspace label and cwd basename, de-duplicated. The pane id is used only
-// when nothing else identifies the pane, and never printed twice.
+// displayLabel is the Herdr tab name only, the same label prefix k uses
+// for a tab row. Agent titles, workspace names, and cwd are not part of it.
 func displayLabel(s *snapshot, id, stored string) string {
 	var p *paneRec
 	for i := range s.Panes {
@@ -482,47 +459,14 @@ func displayLabel(s *snapshot, id, stored string) string {
 		}
 		return id
 	}
-	title := strings.TrimSpace(p.TerminalTitleStrip)
-	if title == "" {
-		title = strings.TrimSpace(p.TerminalTitle)
-	}
-	tabLabel, wsLabel := "", ""
 	for _, t := range s.Tabs {
 		if t.TabID == p.TabID {
-			tabLabel = strings.TrimSpace(t.Label)
+			if name := strings.TrimSpace(t.Label); name != "" {
+				return name
+			}
 		}
 	}
-	for _, w := range s.Workspaces {
-		if w.WorkspaceID == p.WorkspaceID {
-			wsLabel = strings.TrimSpace(w.Label)
-		}
-	}
-	cwd := ""
-	if dir := strings.TrimSpace(p.CWD); dir != "" && dir != "/" {
-		cwd = filepath.Base(dir)
-	}
-	var parts []string
-	seen := map[string]bool{}
-	add := func(v string) {
-		if v == "" || v == "." || seen[v] {
-			return
-		}
-		seen[v] = true
-		parts = append(parts, v)
-	}
-	add(title)
-	add(tabLabel)
-	add(wsLabel)
-	if cwd != "" {
-		add("@" + cwd)
-	}
-	if len(parts) == 0 {
-		if stored != "" {
-			return stored
-		}
-		return id
-	}
-	return strings.Join(parts, " · ")
+	return id
 }
 
 func tabTitle(tab int) string {
