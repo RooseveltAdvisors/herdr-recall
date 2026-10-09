@@ -730,7 +730,20 @@ func statusColor(status string) string {
 	case "idle":
 		return keyStFree
 	default:
-		return ""
+		return keyOverlay
+	}
+}
+
+// statusMark is the prefix-k dot: filled for blocked, working, and done,
+// open for idle, and a dim mark when the pane has no status.
+func statusMark(status string) (string, string) {
+	switch statusWord(status) {
+	case "idle":
+		return "○", statusColor(status)
+	case "":
+		return "·", keyOverlay
+	default:
+		return "●", statusColor(status)
 	}
 }
 
@@ -903,13 +916,13 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
-	starW, statusW, metaW := 2, 12, 22
+	starW, dotW, statusW, metaW := 2, 2, 10, 22
 	if narrow {
 		// The name is the point of the picker. A narrow pane keeps the coloured
 		// dot and a short "2m ago", and gives every remaining column to the label.
-		statusW, metaW = 2, 8
+		statusW, metaW = 0, 8
 	}
-	labelW := width - starW - statusW - metaW
+	labelW := width - starW - dotW - statusW - metaW
 	if labelW < 4 {
 		labelW = 4
 	}
@@ -934,25 +947,24 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 			starCell = keyStar + "*" + keyReset + " "
 		}
 		word := statusWord(r.Status)
-		scol := statusColor(r.Status)
-		// One fixed layout for every row, the way prefix+k paints it: star,
-		// a label cell that always ends in a separator space, a status cell at
-		// a stable column, then the counts. The selected row is painted as ONE
-		// span so the accent bar covers label, status and metadata together,
-		// with the dot keeping its colour inside the bar.
+		glyph, scol := statusMark(r.Status)
+		// Prefix k puts the status dot immediately left of the name. The word
+		// stays in its own column.
 		labelCell := pad(clipTail(r.Label, labelW), labelW)
+		dotCell := scol + glyph
+		if i == sel {
+			dotCell += keySelectFg + " "
+		} else {
+			dotCell += keyReset + " "
+		}
 		var statusCell string
 		switch {
-		case word == "":
+		case statusW == 0 || word == "":
 			statusCell = strings.Repeat(" ", statusW)
-		case narrow && i == sel:
-			statusCell = scol + "●" + keySelectFg + " "
-		case narrow:
-			statusCell = scol + "●" + keyReset + " "
 		case i == sel:
-			statusCell = pad(scol+"●"+keySelectFg+" "+word, statusW)
+			statusCell = pad(scol+word+keySelectFg, statusW)
 		default:
-			statusCell = pad(scol+"● "+word+keyReset, statusW)
+			statusCell = pad(scol+word+keyReset, statusW)
 		}
 		metaCol := metricText(r, width, metricKind)
 		if i == sel {
@@ -963,10 +975,10 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 			} else {
 				line += " "
 			}
-			line += " " + labelCell + statusCell + " " + metaCol
+			line += dotCell + labelCell + statusCell + " " + metaCol
 			emit(pad(line, width) + keyReset)
 		} else {
-			emit(starCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
+			emit(starCell + dotCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
 		}
 		shown++
 	}

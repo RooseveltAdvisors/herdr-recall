@@ -38,6 +38,24 @@ func TestCustomFilters(t *testing.T) {
 	}
 }
 
+func TestStatusDotSitsLeftOfTheName(t *testing.T) {
+	rows := []row{{PaneID: "p", Label: "portal-CI", Status: "working", Last: time.Now().Unix()}}
+	plain := stripANSI(renderFrame(rows, 0, "", "", false, 90, 12, []string{"All"}, 0, "last"))
+	line := ""
+	for _, l := range strings.Split(plain, "\n") {
+		if strings.Contains(l, "portal-CI") {
+			line = l
+			break
+		}
+	}
+	dot := strings.Index(line, "●")
+	name := strings.Index(line, "portal-CI")
+	word := strings.Index(line, "working")
+	if dot < 0 || name < 0 || word < 0 || !(dot < name && name < word) {
+		t.Fatalf("dot, name, word order = %d %d %d\n%s", dot, name, word, line)
+	}
+}
+
 func TestRowTitleIsTabNameOnly(t *testing.T) {
 	snap := &snapshot{
 		Panes: []paneRec{{
