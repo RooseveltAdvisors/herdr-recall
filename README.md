@@ -64,10 +64,13 @@ tty, so a row never wraps even in a narrow overlay.
 Needs Go 1.26+ and Herdr 0.8.0 or newer.
 
 ```sh
-git clone https://github.com/RooseveltAdvisors/herdr-recall
-cd herdr-recall
-./install_plugin.sh        # builds bin/herdr-recall and links the plugin
+herdr plugin install RooseveltAdvisors/herdr-recall --ref main --yes
+herdr server reload-config
 ```
+
+Herdr keeps the installed copy in its own plugin folder. Do not clone the
+repo into `~/code` and link that path. A missing checkout makes prefix L
+fail or open an old copy.
 
 Then bind it in `~/.config/herdr/config.toml`:
 
