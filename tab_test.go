@@ -40,7 +40,7 @@ func TestCustomFilters(t *testing.T) {
 
 func TestStatusDotSitsLeftOfTheName(t *testing.T) {
 	rows := []row{{PaneID: "p", Label: "portal-CI", Status: "working", Last: time.Now().Unix()}}
-	plain := stripANSI(renderFrame(rows, 0, "", "", false, 90, 12, []string{"All"}, 0, "last"))
+	plain := stripANSI(renderFrame(rows, 0, "", "", false, 90, 12, []string{"All"}, 0, "last", ""))
 	line := ""
 	for _, l := range strings.Split(plain, "\n") {
 		if strings.Contains(l, "portal-CI") {
@@ -93,13 +93,16 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 			t.Fatal("old favorite was pinned into Recent")
 		}
 	}
-	frame := renderFrame(recent, 0, "", "", false, 90, 16, viewNames(st), 2, "last")
+	frame := renderFrame(recent, 0, "", "", false, 90, 16, viewNames(st), 2, "last", "")
 	plain := stripANSI(frame)
 	if !strings.Contains(strings.Split(plain, "\n")[0], "Recent") {
 		t.Fatalf("tab bar missing:\n%s", plain)
 	}
-	if strings.Contains(plain, "last 20") || strings.Contains(plain, "to search") {
-		t.Fatalf("description or search prompt leaked:\n%s", plain)
+	if strings.Contains(plain, "last 20") {
+		t.Fatalf("description leaked:\n%s", plain)
+	}
+	if !strings.Contains(plain, "search panes") || !strings.Contains(plain, "b/w/i/d/a") {
+		t.Fatalf("prefix-k search line or footer missing:\n%s", plain)
 	}
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
 	if len(all) != 26 {

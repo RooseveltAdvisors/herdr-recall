@@ -7,6 +7,10 @@ Press `prefix+shift+l` and a picker opens as a popup. All and Favorites
 are the built-in tabs. Recent and Most used start as tabs you can delete
 with `x` (it asks you to confirm) and recreate with `n`. Press `e` to edit a custom tab. The form shows every choice.
 `j` and `k` move between fields. `h` and `l` change the highlighted choice.
+
+The list uses the same keys as prefix k: `j`/`k` and the arrows move,
+`g`/`G` jump to the ends, `/` searches, and `b`/`w`/`i`/`d`/`a` filter
+by status. In search, the arrows and `ctrl-n`/`ctrl-p` move. Letters type.
 Sort is Newest, Oldest, Most used, or Least used. The direction is
 in the name. A tab can keep favorites, or only the panes in this workspace. `s` sorts only on All and Favorites.
 Recent shows when you last opened the pane. Most used shows how many times.

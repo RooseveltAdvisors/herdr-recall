@@ -827,19 +827,16 @@ func renderHelp(width, height int) string {
 	emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help - esc returns to the list" + keyReset)
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	keys := [][2]string{
+		{"j / k / arrows", "move one row, same as prefix k"},
+		{"g / G", "first row / last row"},
+		{"b w i d a", "blocked, working, idle, done, all"},
+		{"/", "search. esc leaves search. arrows and ctrl-n/p move"},
+		{"enter", "switch to the selected pane"},
 		{"h / l", "switch tabs"},
-		{"n", "new custom tab"},
-		{"e", "edit the current custom tab"},
-		{"x", "delete the current custom tab"},
+		{"f", "pin or unpin the row"},
+		{"n / e / x", "new, edit, or delete a custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
-		{"/", "search panes (esc back to the list)"},
-		{"enter", "jump to the selected pane"},
-		{"j / k", "move one row (list scrolls one row)"},
-		{"g g", "jump to the first row"},
-		{"G", "jump to the last row"},
-		{"ctrl+u", "half page up (in search: clear query)"},
-		{"ctrl+d", "half page down (in search: page down)"},
-		{"f", "favorite or unfavorite the row"},
+		{"ctrl+u / ctrl+d", "half page, or clear the search"},
 		{"?", "open or close this help"},
 		{"esc", "close help, then close the picker"},
 		{"q", "quit"},
@@ -853,6 +850,19 @@ func renderHelp(width, height int) string {
 }
 
 // filterRows narrows the frozen list to the query without changing its order.
+func filterByState(rows []row, state string) []row {
+	if state == "" {
+		return rows
+	}
+	out := make([]row, 0, len(rows))
+	for _, r := range rows {
+		if statusWord(r.Status) == state {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func filterRows(rows []row, query string) []row {
 	q := strings.ToLower(query)
 	out := make([]row, 0, len(rows))
@@ -881,7 +891,7 @@ func tabBar(names []string, active int) string {
 	return b.String()
 }
 
-func renderFrame(rows []row, sel int, query string, status string, searching bool, width, height int, names []string, active int, metricKind string) string {
+func renderFrame(rows []row, sel int, query, status string, searching bool, width, height int, names []string, active int, metricKind, state string) string {
 	// The tab bar, hint, and search line are painted first and never scroll
 	// away. All is the long list, so a trailing newline on a full frame used
 	// to push those headers off the popup.
@@ -891,13 +901,18 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	var lines []string
 	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
 	emit(tabBar(names, active))
+	slash := keyOverlay + " / " + keyReset
 	if searching {
-		prompt := keyOverlay + "search panes" + keyReset
-		if query != "" {
-			prompt = keyText + query + keyReset
-		}
-		emit(keyAccentFg + keyBold + " / " + keyReset + prompt)
+		slash = keyAccentFg + keyBold + " / " + keyReset
 	}
+	prompt := keyOverlay + "search panes" + keyReset
+	switch {
+	case state != "":
+		prompt = statusColor(state) + "● " + state + keyReset
+	case query != "":
+		prompt = keyText + query + keyReset
+	}
+	emit(slash + prompt)
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	headerN := len(lines)
 	footerN := 3 // separator plus two hint lines
@@ -991,33 +1006,18 @@ func renderFrame(rows []row, sel int, query string, status string, searching boo
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	if searching {
-		if narrow {
-			emit(keyAccentFg + "esc" + keyReset + keyOverlay + " back  enter jump" + keyReset)
-			emit(keyOverlay + "ctrl+u clear  ctrl+d down  type to filter" + keyReset)
-		} else {
-			emit(hintFooter("enter", "jump", "j/k", "move", "ctrl+u", "clear", "ctrl+d", "down", "esc", "back"))
-		}
+		emit(hintFooter("enter", "switch", "↑↓", "move", "ctrl+u", "clear", "esc", "back"))
 	} else {
-		showSort := len(names) > 0 && (names[active] == "All" || names[active] == "Favorites")
-		custom := len(names) > 0 && names[active] != "All" && names[active] != "Favorites"
-		if narrow {
-			emit(keyAccentFg + "h/l" + keyReset + keyOverlay + " tabs  j/k move  / search" + keyReset)
-			extra := "f pin  n new  esc close"
-			if showSort {
-				extra = "s sort  " + extra
-			}
-			if custom {
-				extra = "e edit  x delete  " + extra
-			}
-			emit(keyOverlay + extra + keyReset)
-		} else if showSort {
-			emit(hintFooter("h/l", "tabs", "s", "sort", "n", "new tab", "f", "pin", "/", "search", "esc", "close"))
-		} else if custom {
-			emit(hintFooter("h/l", "tabs", "e", "edit", "x", "delete", "n", "new", "/", "search", "esc", "close"))
-		} else {
-			emit(hintFooter("h/l", "tabs", "n", "new tab", "j/k", "move", "/", "search", "esc", "close"))
-		}
+		emit(hintFooter("enter", "switch", "/", "search", "b/w/i/d/a", "states", "j/k/↑↓", "move", "esc", "close"))
 	}
+	extra := "h/l tabs   f pin   n new"
+	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
+		extra += "   s sort"
+	}
+	if len(names) > 0 && names[active] != "All" && names[active] != "Favorites" {
+		extra += "   e edit   x delete"
+	}
+	emit(keyOverlay + extra + keyReset)
 	if status != "" {
 		emit(keySub + status + keyReset)
 	}
@@ -1336,6 +1336,10 @@ func logicalKey(b []byte) string {
 			return "bs"
 		case 0x15:
 			return "ctrl-u"
+		case 0x0e:
+			return "ctrl-n"
+		case 0x10:
+			return "ctrl-p"
 		case 0x04:
 			return "ctrl-d"
 		default:
@@ -1411,8 +1415,8 @@ func runPicker() int {
 	sel := 0
 	status := ""
 	searching := false
+	stateFilter := ""
 	showHelp := false
-	pendingG := false
 	// The snapshot is frozen when the picker opens so j/k does not reshuffle
 	// rows. Tab and sort changes reorder that frozen set on purpose.
 	frozen, err := loadSnapshot()
@@ -1442,9 +1446,9 @@ func runPicker() int {
 	}
 	rebuild()
 	for {
-		rows := allRows
+		rows := filterByState(allRows, stateFilter)
 		if q := strings.TrimSpace(query); q != "" {
-			rows = filterRows(allRows, q)
+			rows = filterRows(rows, q)
 		}
 		if sel >= len(rows) {
 			sel = len(rows) - 1
@@ -1467,7 +1471,7 @@ func runPicker() int {
 			if v.Kind == "custom" {
 				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)
 			}
-			frame = renderFrame(rows, sel, query, status, searching, w, h, viewNames(st), tab, kind)
+			frame = renderFrame(rows, sel, query, status, searching, w, h, viewNames(st), tab, kind, stateFilter)
 		}
 		tty.WriteString(frame)
 
@@ -1480,26 +1484,6 @@ func runPicker() int {
 		key := logicalKey(b)
 		if key == "" {
 			continue
-		}
-		// Rapid g presses arrive in one read ("gg"): replay every leading g as
-		// its own press so gg always jumps to the top row.
-		if !searching && !showHelp && n >= 2 && b[0] == 'g' {
-			k := 0
-			for k < n && b[k] == 'g' {
-				k++
-			}
-			for i := 0; i < k; i++ {
-				if pendingG {
-					sel = 0
-					pendingG = false
-				} else {
-					pendingG = true
-				}
-			}
-			if k >= n {
-				continue // the whole read was g presses; redraw at the new row
-			}
-			b, n = b[k:], len(b)-k // mixed read: handle the rest normally
 		}
 		if confirmName != "" && !showHelp {
 			switch key {
@@ -1583,10 +1567,6 @@ func runPicker() int {
 			}
 			continue
 		}
-		// A lone g waits for its second g; any other key discards it.
-		if key != "g" {
-			pendingG = false
-		}
 		half := max(1, (h-3)/2)
 		switch {
 		case key == "esc":
@@ -1595,10 +1575,8 @@ func runPicker() int {
 				continue
 			}
 			if searching {
-				// Esc leaves search mode first; a second Esc closes.
+				// Esc leaves search first, the same as prefix k. The query stays.
 				searching = false
-				query = ""
-				sel = 0
 				continue
 			}
 			return 0 // esc closes from browse mode
@@ -1677,28 +1655,37 @@ func runPicker() int {
 			confirmName = st.Tabs[v.Idx].Name
 			confirmSel = 1
 		case key == "/" && !searching:
-			// slash enters search mode, the way prefix+k does; it is never a
-			// filter character in browse mode.
 			searching = true
-			query = ""
+			stateFilter = ""
 			sel = 0
 		case key == "g" && !searching:
-			if pendingG {
-				sel = 0 // gg jumps to the first row
-				pendingG = false
-			} else {
-				pendingG = true
-			}
+			sel = 0
 		case key == "G" && !searching:
-			sel = max(0, len(rows)-1) // G jumps to the last row
-		case key == "j" || key == "down":
+			sel = max(0, len(rows)-1)
+		case (key == "j" || key == "down") && !searching:
 			if sel < len(rows)-1 {
 				sel++
 			}
-		case key == "k" || key == "up":
+		case (key == "k" || key == "up") && !searching:
 			if sel > 0 {
 				sel--
 			}
+		case key == "ctrl-n" || (key == "down" && searching):
+			if sel < len(rows)-1 {
+				sel++
+			}
+		case key == "ctrl-p" || (key == "up" && searching):
+			if sel > 0 {
+				sel--
+			}
+		case !searching && !showHelp && (key == "b" || key == "w" || key == "i" || key == "d"):
+			stateFilter = map[string]string{"b": "blocked", "w": "working", "i": "idle", "d": "done"}[key]
+			query = ""
+			searching = false
+			sel = 0
+		case key == "a" && !searching && !showHelp:
+			stateFilter = ""
+			query = ""
 		case key == "f" && !searching:
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
@@ -1713,29 +1700,35 @@ func runPicker() int {
 		case key == "ctrl-u":
 			if searching {
 				query = ""
+				stateFilter = ""
 				sel = 0
 			} else if sel > half {
-				sel -= half // browse: half a page up
+				sel -= half
 			} else {
 				sel = 0
 			}
-		case key == "ctrl-d":
+		case key == "ctrl-d" && !searching:
 			if sel+half < len(rows) {
-				sel += half // half a page down, in browse and in search
+				sel += half
 			}
 			if sel >= len(rows) {
 				sel = max(0, len(rows)-1)
 			}
 		case key == "bs":
-			if searching && len(query) > 0 {
-				query = query[:len(query)-1]
+			switch {
+			case searching && query != "":
+				rs := []rune(query)
+				query = string(rs[:len(rs)-1])
+				stateFilter = ""
+				sel = 0
+			case !searching && stateFilter != "":
+				stateFilter = ""
 				sel = 0
 			}
 		case key == "q" && !searching:
 			return 0
 		case searching && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f:
-			// Letters reach the search box only after /. In browse mode, h/l move
-			// tabs and f/j/k keep their own actions.
+			stateFilter = ""
 			query += key
 			sel = 0
 		}
@@ -1802,7 +1795,7 @@ func renderOnce() int {
 			h = n
 		}
 	}
-	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), searching, w, h, viewNames(st), 0, "both"))
+	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), searching, w, h, viewNames(st), 0, "both", os.Getenv("RECALL_STATE")))
 	return 0
 }
 
