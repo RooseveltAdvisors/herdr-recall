@@ -56,6 +56,23 @@ func TestStatusDotSitsLeftOfTheName(t *testing.T) {
 	}
 }
 
+func TestMapFoldsLikePrefixK(t *testing.T) {
+	st := &store{Panes: map[string]*paneStat{}}
+	snap := &snapshot{
+		Workspaces: []wsRec{{WorkspaceID: "w1", Label: "wiseman", Focused: true}},
+		Tabs:       []tabRec{{TabID: "t1", WorkspaceID: "w1", Label: "portal-CI"}},
+		Panes:      []paneRec{{PaneID: "p1", TabID: "t1", WorkspaceID: "w1", AgentStatus: "working"}},
+	}
+	open := mapRows(snap, st, map[string]bool{"w1": true}, "", "")
+	if len(open) != 2 || open[0].Kind != "workspace" || open[1].Label != "portal-CI" || open[1].PaneID != "p1" {
+		t.Fatalf("open map = %+v", open)
+	}
+	folded := mapRows(snap, st, map[string]bool{}, "", "")
+	if len(folded) != 1 || folded[0].Kind != "workspace" {
+		t.Fatalf("folded map = %+v", folded)
+	}
+}
+
 func TestRowTitleIsTabNameOnly(t *testing.T) {
 	snap := &snapshot{
 		Panes: []paneRec{{

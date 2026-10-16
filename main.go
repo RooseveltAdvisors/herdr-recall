@@ -238,7 +238,7 @@ func defaultTabs() []customTab {
 }
 
 func views(st *store) []view {
-	out := []view{{Kind: "all"}, {Kind: "favorites"}}
+	out := []view{{Kind: "all"}, {Kind: "favorites"}, {Kind: "map"}}
 	for i := range st.Tabs {
 		out = append(out, view{Kind: "custom", Idx: i})
 	}
@@ -251,6 +251,8 @@ func viewName(st *store, v view) string {
 		return "All"
 	case "favorites":
 		return "Favorites"
+	case "map":
+		return "Map"
 	default:
 		if v.Idx >= 0 && v.Idx < len(st.Tabs) {
 			return st.Tabs[v.Idx].Name
@@ -433,7 +435,9 @@ func focusPane(paneID string) error {
 // ---------------------------------------------------------------------------
 
 type row struct {
+	Kind        string
 	PaneID      string
+	TabID       string
 	WorkspaceID string
 	Label       string
 	Section     string
@@ -441,6 +445,9 @@ type row struct {
 	Last        int64
 	Status      string
 	Fav         bool
+	Depth       int
+	Expanded    bool
+	Current     bool
 }
 
 // displayLabel is the Herdr tab name only, the same label prefix k uses
@@ -467,6 +474,176 @@ func displayLabel(s *snapshot, id, stored string) string {
 		}
 	}
 	return id
+}
+
+func mapRows(s *snapshot, st *store, expanded map[string]bool, query, state string) []row {
+	open := map[string]bool{}
+	for id, on := range expanded {
+		open[id] = on
+	}
+	if strings.TrimSpace(query) != "" || state != "" {
+		for _, w := range s.Workspaces {
+			open[w.WorkspaceID] = true
+		}
+	}
+	full := buildMap(s, st, open)
+	if strings.TrimSpace(query) == "" && state == "" {
+		return full
+	}
+	return keepMapMatches(full, query, state)
+}
+
+func buildMap(s *snapshot, st *store, expanded map[string]bool) []row {
+	panesByTab := map[string][]paneRec{}
+	for _, p := range s.Panes {
+		panesByTab[p.TabID] = append(panesByTab[p.TabID], p)
+	}
+	tabsByWS := map[string][]tabRec{}
+	for _, t := range s.Tabs {
+		tabsByWS[t.WorkspaceID] = append(tabsByWS[t.WorkspaceID], t)
+	}
+	var out []row
+	for _, w := range s.Workspaces {
+		name := strings.TrimSpace(w.Label)
+		if name == "" {
+			name = w.WorkspaceID
+		}
+		tabs := tabsByWS[w.WorkspaceID]
+		n := 0
+		for _, t := range tabs {
+			n += len(panesByTab[t.TabID])
+		}
+		status := ""
+		for _, t := range tabs {
+			for _, p := range panesByTab[t.TabID] {
+				if rank := statusWord(p.AgentStatus); rank == "blocked" || (status == "" && rank != "") {
+					status = p.AgentStatus
+				}
+			}
+		}
+		out = append(out, row{
+			Kind: "workspace", WorkspaceID: w.WorkspaceID,
+			Label: fmt.Sprintf("%s (%d)", name, n), Status: status,
+			Depth: 0, Expanded: expanded[w.WorkspaceID], Current: w.Focused,
+		})
+		if !expanded[w.WorkspaceID] {
+			continue
+		}
+		for _, t := range tabs {
+			label := strings.TrimSpace(t.Label)
+			if label == "" {
+				label = t.TabID
+			}
+			panes := panesByTab[t.TabID]
+			tabStatus := ""
+			if len(panes) > 0 {
+				tabStatus = panes[0].AgentStatus
+			}
+			active := ""
+			if len(panes) == 1 {
+				active = panes[0].PaneID
+			}
+			out = append(out, row{
+				Kind: "tab", TabID: t.TabID, WorkspaceID: w.WorkspaceID, PaneID: active,
+				Label: label, Status: tabStatus, Depth: 1, Current: t.Focused,
+			})
+			if len(panes) < 2 {
+				continue
+			}
+			for i, p := range panes {
+				label := paneBranchLabel(p, name)
+				if label == "" {
+					label = fmt.Sprintf("pane %d", i+1)
+				}
+				out = append(out, row{
+					Kind: "pane", PaneID: p.PaneID, TabID: t.TabID, WorkspaceID: w.WorkspaceID,
+					Label: label, Status: p.AgentStatus, Depth: 2,
+					Fav: st.isFavorite(p.PaneID), Current: p.Focused,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func rowPrefix(r row) string {
+	if r.Kind != "workspace" && r.Kind != "tab" && r.Kind != "pane" {
+		return ""
+	}
+	mark := " "
+	if r.Current {
+		mark = "\u25c6"
+	}
+	caret := "  "
+	if r.Kind == "workspace" {
+		if r.Expanded {
+			caret = "\u25bc "
+		} else {
+			caret = "\u25b6 "
+		}
+	}
+	return strings.Repeat("  ", r.Depth) + mark + caret
+}
+
+func paneBranchLabel(p paneRec, wsLabel string) string {
+	title := strings.TrimSpace(p.TerminalTitleStrip)
+	if title == "" {
+		title = strings.TrimSpace(p.TerminalTitle)
+	}
+	title = strings.TrimPrefix(title, "\u03c0 - ")
+	title = strings.TrimPrefix(title, "pi - ")
+	if title == "" || strings.EqualFold(title, wsLabel) {
+		return ""
+	}
+	return title
+}
+
+func keepMapMatches(rows []row, query, state string) []row {
+	q := strings.ToLower(strings.TrimSpace(query))
+	hit := make([]bool, len(rows))
+	for i := len(rows) - 1; i >= 0; i-- {
+		r := rows[i]
+		textOK := q == "" || strings.Contains(strings.ToLower(r.Label), q)
+		stateOK := state == "" || statusWord(r.Status) == state
+		child := false
+		for j := i + 1; j < len(rows) && rows[j].Depth > r.Depth; j++ {
+			if hit[j] {
+				child = true
+				break
+			}
+		}
+		if r.Kind == "pane" {
+			hit[i] = textOK && stateOK
+		} else {
+			hit[i] = child || (textOK && state == "")
+		}
+	}
+	var out []row
+	for i, r := range rows {
+		if hit[i] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func jumpRow(r row) error {
+	switch r.Kind {
+	case "workspace":
+		_, err := herdr("workspace", "focus", r.WorkspaceID)
+		return err
+	case "tab":
+		if r.PaneID != "" {
+			return focusPane(r.PaneID)
+		}
+		if r.WorkspaceID != "" {
+			_, _ = herdr("workspace", "focus", r.WorkspaceID)
+		}
+		_, err := herdr("tab", "focus", r.TabID)
+		return err
+	default:
+		return focusPane(r.PaneID)
+	}
 }
 
 func tabTitle(tab int) string {
@@ -833,6 +1010,7 @@ func renderHelp(width, height int) string {
 		{"/", "search. esc leaves search. arrows and ctrl-n/p move"},
 		{"enter", "switch to the selected pane"},
 		{"h / l", "switch tabs"},
+		{"space", "on Map: fold or open a workspace"},
 		{"f", "pin or unpin the row"},
 		{"n / e / x", "new, edit, or delete a custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
@@ -965,7 +1143,12 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 		glyph, scol := statusMark(r.Status)
 		// Prefix k puts the status dot immediately left of the name. The word
 		// stays in its own column.
-		labelCell := pad(clipTail(r.Label, labelW), labelW)
+		prefix := rowPrefix(r)
+		nameW := labelW - len([]rune(prefix))
+		if nameW < 4 {
+			nameW = 4
+		}
+		labelCell := pad(prefix+clipTail(r.Label, nameW), labelW)
 		dotCell := scol + glyph
 		if i == sel {
 			dotCell += keySelectFg + " "
@@ -1011,10 +1194,13 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 		emit(hintFooter("enter", "switch", "/", "search", "b/w/i/d/a", "states", "j/k/↑↓", "move", "esc", "close"))
 	}
 	extra := "h/l tabs   f pin   n new"
+	if len(names) > 0 && names[active] == "Map" {
+		extra += "   space fold"
+	}
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
 	}
-	if len(names) > 0 && names[active] != "All" && names[active] != "Favorites" {
+	if len(names) > 0 && names[active] != "All" && names[active] != "Favorites" && names[active] != "Map" {
 		extra += "   e edit   x delete"
 	}
 	emit(keyOverlay + extra + keyReset)
@@ -1425,6 +1611,10 @@ func runPicker() int {
 	}
 	tab := openTab(st)
 	sortMode := sortDefault
+	expanded := map[string]bool{}
+	if frozen != nil && frozen.FocusedWorkspace != "" {
+		expanded[frozen.FocusedWorkspace] = true
+	}
 	creating := false
 	editing := false
 	editIdx := -1
@@ -1446,9 +1636,14 @@ func runPicker() int {
 	}
 	rebuild()
 	for {
-		rows := filterByState(allRows, stateFilter)
-		if q := strings.TrimSpace(query); q != "" {
-			rows = filterRows(rows, q)
+		var rows []row
+		if views(st)[tab].Kind == "map" {
+			rows = mapRows(frozen, st, expanded, query, stateFilter)
+		} else {
+			rows = filterByState(allRows, stateFilter)
+			if q := strings.TrimSpace(query); q != "" {
+				rows = filterRows(rows, q)
+			}
 		}
 		if sel >= len(rows) {
 			sel = len(rows) - 1
@@ -1597,9 +1792,9 @@ func runPicker() int {
 			if len(rows) == 0 {
 				return 0
 			}
-			target := rows[sel].PaneID
+			target := rows[sel]
 			tty.WriteString("\x1b[2J\x1b[H")
-			if err := jumpTo(target); err != nil {
+			if err := jumpRow(target); err != nil {
 				// keep the frame open with the reason instead of failing silently
 				status = "jump: " + err.Error()
 				continue
@@ -1686,6 +1881,11 @@ func runPicker() int {
 		case key == "a" && !searching && !showHelp:
 			stateFilter = ""
 			query = ""
+		case key == " " && !searching && !showHelp:
+			if views(st)[tab].Kind == "map" && len(rows) > 0 && rows[sel].Kind == "workspace" {
+				id := rows[sel].WorkspaceID
+				expanded[id] = !expanded[id]
+			}
 		case key == "f" && !searching:
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
