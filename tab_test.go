@@ -2,13 +2,15 @@ package main
 
 import (
 	"fmt"
+
+	"github.com/RooseveltAdvisors/vimline"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestFormShowsEveryChoice(t *testing.T) {
-	frame := stripANSI(renderForm(80, 24, []string{"All", "Favorites", "Recent"}, 2, 1, true, fieldView{Label: "Name", Text: "Recent", Focused: true}, "newest", 20, "", "", ""))
+	frame := stripANSI(renderForm(80, 24, []string{"All", "Favorites", "Recent"}, 2, 1, true, vimline.View{Label: "Name", Text: "Recent", Focused: true}, "newest", 20, "", "", ""))
 	for _, want := range []string{"Edit tab", "Most recent", "Oldest", "Most used", "Least used", "This workspace"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("form missing %q:\n%s", want, frame)
@@ -44,7 +46,7 @@ func TestStatusDotSitsLeftOfTheName(t *testing.T) {
 		{PaneID: "p1", Label: "notes", Status: "working", Last: time.Now().Unix(), Fav: true},
 		{PaneID: "p2", Label: "build", Status: "blocked", Last: time.Now().Unix()},
 	}
-	plain := stripANSI(renderFrame(rows, 0, fieldView{Label: "/"}, "", 90, 12, []string{"All"}, 0, "last", ""))
+	plain := stripANSI(renderFrame(rows, 0, vimline.View{Label: "/"}, "", 90, 12, []string{"All"}, 0, "last", ""))
 	var r1, r2 string
 	for _, l := range strings.Split(plain, "\n") {
 		if strings.Contains(l, "notes") {
@@ -117,7 +119,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 	}
 
 	// Sticky note is rendered inline and searchable via filterRows; Inbox has no sort pill.
-	plain := stripANSI(renderFrame(inbox, 0, fieldView{Label: "/"}, "", 100, 16, viewNames(st), 1, "both", "", activeSortLabel(st, view{Kind: "inbox"}, sortDefault)))
+	plain := stripANSI(renderFrame(inbox, 0, vimline.View{Label: "/"}, "", 100, 16, viewNames(st), 1, "both", "", activeSortLabel(st, view{Kind: "inbox"}, sortDefault)))
 	if strings.Contains(plain, "[sort:") {
 		t.Fatalf("inbox should not show a sort pill:\n%s", plain)
 	}
@@ -151,7 +153,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 
 	// Snoozed pane renders ~ in All tab, and All shows [sort: Most recent].
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
-	allPlain := stripANSI(renderFrame(all, 0, fieldView{Label: "/"}, "", 100, 18, viewNames(st), 4, "both", ""))
+	allPlain := stripANSI(renderFrame(all, 0, vimline.View{Label: "/"}, "", 100, 18, viewNames(st), 4, "both", ""))
 	if !strings.Contains(allPlain, "~ working") || !strings.Contains(allPlain, "[sort: Most recent]") {
 		t.Fatalf("expected ~ working badge and [sort: Most recent] pill in All:\n%s", allPlain)
 	}
@@ -194,7 +196,7 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 			t.Fatal("old favorite was pinned into Recent")
 		}
 	}
-	frame := renderFrame(recent, 0, fieldView{Label: "/"}, "", 90, 16, viewNames(st), 2, "last", "")
+	frame := renderFrame(recent, 0, vimline.View{Label: "/"}, "", 90, 16, viewNames(st), 2, "last", "")
 	plain := stripANSI(frame)
 	if !strings.Contains(strings.Split(plain, "\n")[0], "Recent") {
 		t.Fatalf("tab bar missing:\n%s", plain)
@@ -209,7 +211,7 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 	if len(all) != 26 {
 		t.Fatalf("all len = %d", len(all))
 	}
-	allFrame := renderFrame(all, 20, fieldView{Label: "/"}, "", 90, 14, viewNames(st), 4, "both", "", activeSortLabel(st, view{Kind: "all"}, sortDefault))
+	allFrame := renderFrame(all, 20, vimline.View{Label: "/"}, "", 90, 14, viewNames(st), 4, "both", "", activeSortLabel(st, view{Kind: "all"}, sortDefault))
 	if strings.Count(allFrame, "\n") >= 14 {
 		t.Fatalf("All tab emitted %d newlines for height 14, which scrolls the tab bar off", strings.Count(allFrame, "\n"))
 	}

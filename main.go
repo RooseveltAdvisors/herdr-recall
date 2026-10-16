@@ -8,7 +8,10 @@ package main
 
 import (
 	"encoding/json"
+
 	"fmt"
+	"github.com/RooseveltAdvisors/vimline"
+	"github.com/RooseveltAdvisors/vimline/duration"
 	"net"
 	"os"
 	"os/exec"
@@ -1017,6 +1020,76 @@ func sectionColor(section string) string {
 	}
 }
 
+// modeChip is the small badge left of the prompt. It carries the same
+// information as vim's -- INSERT -- bar, in one bracketed cell.
+func modeChip(m vimline.Mode, pending rune, count int) string {
+	label := "N"
+	color := keyAccentFg
+	switch {
+	case pending == 'd' || pending == 'c' || pending == 'y':
+		label = strings.ToUpper(string(pending))
+		color = keyStBad
+	case pending == 'f' || pending == 'F' || pending == 't' || pending == 'T':
+		label = string(pending)
+		color = keyStBusy
+	case pending == 'r':
+		label = "r"
+		color = keyStBusy
+	case m == vimline.ModeInsert:
+		label = "I"
+		color = keyStFree
+	case m == vimline.ModeReplace:
+		label = "R"
+		color = keyStBusy
+	}
+	if count > 0 {
+		label += " " + strconv.Itoa(count)
+	}
+	return keySurface + "[" + keyReset + color + keyBold + label + keyReset + keySurface + "]" + keyReset
+}
+
+// renderField paints one editing line with a visible cursor cell. The real
+// terminal cursor is hidden while the picker runs, so the painted cell is the
+// only cursor and it cannot drift or wrap.
+func renderField(fv vimline.View, width int) string {
+	if !fv.Focused {
+		if fv.Text == "" {
+			return keyOverlay + "  " + fv.Label + " " + keyReset + keyOverlay + "search panes" + keyReset
+		}
+		return keyOverlay + "  " + fv.Label + " " + keyReset + keyText + fv.Text + keyReset
+	}
+	var b strings.Builder
+	b.WriteString(modeChip(fv.Mode, fv.Pending, fv.Count))
+	b.WriteString(keyAccentFg + keyBold + "  " + fv.Label + " " + keyReset)
+	runes := []rune(fv.Text)
+	cur := fv.Cursor
+	if cur > len(runes) {
+		cur = len(runes)
+	}
+	for i := 0; i <= len(runes); i++ {
+		ch := ' '
+		if i < len(runes) {
+			ch = runes[i]
+		}
+		if i != cur {
+			b.WriteRune(ch)
+			continue
+		}
+		switch fv.Mode {
+		case vimline.ModeNormal:
+			b.WriteString(keySelectBg + keySelectFg + string(ch) + keyReset)
+		case vimline.ModeReplace:
+			b.WriteString(keyStBusy + "\x1b[4m" + string(ch) + keyReset)
+		default:
+			b.WriteString(keyAccentFg + "\x1b[4m" + string(ch) + keyReset)
+		}
+	}
+	if fv.Pending != 0 {
+		b.WriteString(keyOverlay + "  " + string(fv.Pending) + keyReset)
+	}
+	return b.String()
+}
+
 // hintFooter paints key names in accent and their hint words dim, the way the
 // built-in goto footer does.
 func hintFooter(pairs ...string) string {
@@ -1184,7 +1257,7 @@ func tabBar(names []string, active int) string {
 	return b.String()
 }
 
-func renderFrame(rows []row, sel int, fv fieldView, status string, width, height int, names []string, active int, metricKind, state string, sortOpts ...string) string {
+func renderFrame(rows []row, sel int, fv vimline.View, status string, width, height int, names []string, active int, metricKind, state string, sortOpts ...string) string {
 	sortPill := ""
 	if len(sortOpts) > 0 {
 		sortPill = sortOpts[0]
@@ -1215,7 +1288,7 @@ func renderFrame(rows []row, sel int, fv fieldView, status string, width, height
 	emit(tabBar(names, active))
 	leftSearch := renderField(fv, width)
 	if !fv.Focused && state != "" {
-		leftSearch = renderField(fieldView{Label: "/", Focused: false}, width) +
+		leftSearch = renderField(vimline.View{Label: "/", Focused: false}, width) +
 			keyOverlay + "  " + statusColor(state) + "● " + state + keyReset
 	}
 	if sortPill != "" {
@@ -1502,7 +1575,7 @@ func stepFormValue(field, dir int, sort string, limit int, only, where string) (
 
 // renderForm is the criteria editor. Every choice is on screen. j/k moves
 // between fields. h/l changes the highlighted choice. Letters type the name.
-func renderForm(width, height int, names []string, active, field int, editing bool, fv fieldView, sort string, limit int, only, where, status string) string {
+func renderForm(width, height int, names []string, active, field int, editing bool, fv vimline.View, sort string, limit int, only, where, status string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -1577,7 +1650,7 @@ func remindModeOpts() []string   { return []string{"", "regardless"} }
 // renderRemind is the snooze dialog. The return rule is a contract, so it is a
 // field. The time is typed with the shared vim editor and the resolved
 // absolute time is shown while you type, the way Superhuman does it.
-func renderRemind(width, height int, names []string, active, field, mode, pick int, fv fieldView, label string) string {
+func renderRemind(width, height int, names []string, active, field, mode, pick int, fv vimline.View, label string) string {
 	if height < 14 {
 		height = 14
 	}
@@ -1599,7 +1672,7 @@ func renderRemind(width, height int, names []string, active, field, mode, pick i
 	}
 	emit(fieldTitle("Time", field == 2))
 	emit(renderField(fv, width))
-	switch _, ok, desc := parseReminder(fv.Text, time.Now()); {
+	switch _, ok, desc := duration.Parse(fv.Text, time.Now()); {
 	case ok:
 		emit(keyStGood + "  → " + desc + keyReset)
 	case strings.TrimSpace(fv.Text) == "":
@@ -1615,7 +1688,7 @@ func renderRemind(width, height int, names []string, active, field, mode, pick i
 	return paint(lines)
 }
 
-func renderNote(width, height int, names []string, active int, fv fieldView) string {
+func renderNote(width, height int, names []string, active int, fv vimline.View) string {
 	if height < 8 {
 		height = 8
 	}
@@ -1800,7 +1873,7 @@ func runPicker() int {
 	tty.WriteString("\x1b[?25l")
 
 	st := loadStore()
-	searchEd := newEditor(st.ActiveQuery)
+	searchEd := vimline.New(st.ActiveQuery)
 	sel := 0
 	status := ""
 	searching := false
@@ -1829,13 +1902,13 @@ func runPicker() int {
 	remindField := 2
 	remindMode := 0
 	remindSel := 0
-	remindEd := newEditor("")
+	remindEd := vimline.New("")
 	remindPaneID := ""
 	remindLabel := ""
 	noting := false
-	noteEd := newEditor("")
+	noteEd := vimline.New("")
 	notePaneID := ""
-	formEd := newEditor("")
+	formEd := vimline.New("")
 	newSort, newOnly, newWhere := "newest", "", ""
 	newLimit := 20
 	var allRows []row
@@ -1875,7 +1948,7 @@ func runPicker() int {
 
 	// commitRemind parses the typed time and applies the snooze contract.
 	commitRemind = func() {
-		due, ok, desc := parseReminder(remindEd.String(), time.Now())
+		due, ok, desc := duration.Parse(remindEd.String(), time.Now())
 		if !ok {
 			status = "not a time. Units: min h d w mo y"
 			return
@@ -1908,7 +1981,7 @@ func runPicker() int {
 	}
 
 	// activeEd reports which vim editor owns the next key, if any.
-	activeEd := func() *editor {
+	activeEd := func() *vimline.Editor {
 		if noting {
 			return noteEd
 		}
@@ -2005,18 +2078,18 @@ func runPicker() int {
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
-			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, remindEd.view("at", remindField == 2), remindLabel)
+			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, remindEd.View("at", remindField == 2), remindLabel)
 		case noting:
-			frame = renderNote(w, h, viewNames(st), tab, noteEd.view("note", true))
+			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
 		case creating:
-			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.view("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
+			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.View("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
 		default:
 			v := views(st)[tab]
 			kind := "both"
 			if v.Kind == "custom" {
 				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)
 			}
-			frame = renderFrame(rows, sel, searchEd.view("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
+			frame = renderFrame(rows, sel, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
 		tty.WriteString(frame)
 
@@ -2050,14 +2123,14 @@ func runPicker() int {
 		}
 		if reminding && !showHelp {
 			if remindField == 2 {
-				switch remindEd.feed(key) {
-				case actAccept:
+				switch remindEd.Feed(key) {
+				case vimline.ActAccept:
 					commitRemind()
-				case actUp:
+				case vimline.ActUp:
 					if remindField > 0 {
 						remindField--
 					}
-				case actOut, actCancel:
+				case vimline.ActOut, vimline.ActCancel:
 					reminding = false
 					status = ""
 				}
@@ -2078,14 +2151,14 @@ func runPicker() int {
 					remindMode = cycle(len(remindModeOpts()), remindMode, -1)
 				} else {
 					remindSel = cycle(len(picks), remindSel, -1)
-					remindEd = newEditor(picks[remindSel])
+					remindEd = vimline.New(picks[remindSel])
 				}
 			case "l", "right":
 				if remindField == 0 {
 					remindMode = cycle(len(remindModeOpts()), remindMode, 1)
 				} else {
 					remindSel = cycle(len(picks), remindSel, 1)
-					remindEd = newEditor(picks[remindSel])
+					remindEd = vimline.New(picks[remindSel])
 				}
 			case "enter":
 				commitRemind()
@@ -2097,8 +2170,8 @@ func runPicker() int {
 		}
 		half := max(1, (h-3)/2)
 		if noting && !showHelp {
-			switch noteEd.feed(key) {
-			case actAccept:
+			switch noteEd.Feed(key) {
+			case vimline.ActAccept:
 				ps := st.ensurePane(notePaneID)
 				ps.Note = strings.TrimSpace(noteEd.String())
 				if ps.Note != "" {
@@ -2110,15 +2183,15 @@ func runPicker() int {
 				_ = saveStore(st)
 				noting = false
 				rebuild()
-			case actOut, actCancel:
+			case vimline.ActOut, vimline.ActCancel:
 				noting = false
 				status = ""
 			}
 			continue
 		}
 		if searching && !showHelp {
-			switch searchEd.feed(key) {
-			case actAccept:
+			switch searchEd.Feed(key) {
+			case vimline.ActAccept:
 				if len(rows) > 0 {
 					target := rows[sel].PaneID
 					tty.WriteString("\x1b[2J\x1b[H")
@@ -2128,26 +2201,26 @@ func runPicker() int {
 					}
 					return 0
 				}
-			case actOut:
+			case vimline.ActOut:
 				// Level two of the ladder: leave the field, keep the filter.
 				searching = false
-			case actCancel:
+			case vimline.ActCancel:
 				return 0
-			case actUp:
+			case vimline.ActUp:
 				if sel > 0 {
 					sel--
 				}
-			case actDown:
+			case vimline.ActDown:
 				if sel < len(rows)-1 {
 					sel++
 				}
-			case actFirst:
+			case vimline.ActFirst:
 				sel = 0
-			case actLast:
+			case vimline.ActLast:
 				sel = max(0, len(rows)-1)
-			case actPageUp:
+			case vimline.ActPageUp:
 				sel = max(0, sel-half)
-			case actPageDown:
+			case vimline.ActPageDown:
 				sel = min(sel+half, max(0, len(rows)-1))
 			}
 			continue
@@ -2180,7 +2253,7 @@ func runPicker() int {
 				name := strings.TrimSpace(formEd.String())
 				if name == "" {
 					formField = 0
-					formEd.mode = modeInsert
+					formEd.SetMode(vimline.ModeInsert)
 					status = "Type a name, then press enter."
 					return
 				}
@@ -2201,18 +2274,18 @@ func runPicker() int {
 				rebuild()
 			}
 			if formField == 0 {
-				switch formEd.feed(key) {
-				case actAccept:
+				switch formEd.Feed(key) {
+				case vimline.ActAccept:
 					saveForm()
-				case actOut:
+				case vimline.ActOut:
 					formField = 1
-				case actCancel:
+				case vimline.ActCancel:
 					creating = false
 					editing = false
 					status = ""
-				case actUp:
+				case vimline.ActUp:
 					formField = 0
-				case actDown:
+				case vimline.ActDown:
 					formField = 1
 				}
 				continue
@@ -2254,7 +2327,7 @@ func runPicker() int {
 				editing = false
 				editIdx = -1
 				formField = 0
-				formEd = newEditor("")
+				formEd = vimline.New("")
 				newSort, newOnly, newWhere, newLimit = "newest", "", "", 20
 				status = ""
 			case "r":
@@ -2266,7 +2339,7 @@ func runPicker() int {
 				editing = true
 				editIdx = v.Idx
 				formField = 1
-				formEd = newEditor(ct.Name)
+				formEd = vimline.New(ct.Name)
 				newSort, newOnly, newWhere, newLimit = canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit
 				status = ""
 			case "x":
@@ -2380,7 +2453,7 @@ func runPicker() int {
 			remindField = 2
 			remindMode = 0
 			remindSel = 0
-			remindEd = newEditor("")
+			remindEd = vimline.New("")
 			remindPaneID = rows[sel].PaneID
 			remindLabel = rows[sel].Label
 			status = ""
@@ -2390,7 +2463,7 @@ func runPicker() int {
 			}
 			noting = true
 			notePaneID = rows[sel].PaneID
-			noteEd = newEditor(rows[sel].Note)
+			noteEd = vimline.New(rows[sel].Note)
 			status = ""
 		case key == "!" && !searching && !showHelp:
 			if len(rows) == 0 {
@@ -2413,8 +2486,8 @@ func runPicker() int {
 			status = "tab: c create   r revise   x delete"
 		case key == "/" && !searching:
 			searching = true
-			searchEd.mode = modeInsert
-			searchEd.cursor = len(searchEd.text)
+			searchEd.SetMode(vimline.ModeInsert)
+			searchEd.End()
 			stateFilter = ""
 			sel = 0
 		case key == "g" && !searching:
@@ -2439,12 +2512,12 @@ func runPicker() int {
 			}
 		case !searching && !showHelp && (key == "b" || key == "w" || key == "i" || key == "d"):
 			stateFilter = map[string]string{"b": "blocked", "w": "working", "i": "idle", "d": "done"}[key]
-			searchEd = newEditor("")
+			searchEd = vimline.New("")
 			searching = false
 			sel = 0
 		case key == "a" && !searching && !showHelp:
 			stateFilter = ""
-			searchEd = newEditor("")
+			searchEd = vimline.New("")
 		case key == "m" && !searching:
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
@@ -2517,9 +2590,9 @@ func renderOnce() int {
 		fmt.Fprintf(os.Stderr, "recall: snapshot: %v\n", err)
 		return 1
 	}
-	fv := newEditor(os.Getenv("RECALL_QUERY")).view("/", os.Getenv("RECALL_SEARCH") == "1")
+	fv := vimline.New(os.Getenv("RECALL_QUERY")).View("/", os.Getenv("RECALL_SEARCH") == "1")
 	if os.Getenv("RECALL_SEARCH") != "1" {
-		fv = fieldView{Label: "/", Text: os.Getenv("RECALL_QUERY"), Focused: false}
+		fv = vimline.View{Label: "/", Text: os.Getenv("RECALL_QUERY"), Focused: false}
 	}
 	rows := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
 	if fv.Text != "" {
