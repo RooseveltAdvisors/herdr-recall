@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -217,5 +218,77 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 		if !strings.Contains(firstLine, tabName) {
 			t.Fatalf("All tab top line missing tab %q: %q", tabName, firstLine)
 		}
+	}
+}
+
+func TestDoneReturnsOnlyOnNewAgentActivity(t *testing.T) {
+	// done -> idle is the operator viewing the pane, not new work.
+	if activityChanged("idle", "done") {
+		t.Fatal("viewing a done pane must not return it to Inbox")
+	}
+	// A fresh completion, a start of work, and a block are all new activity.
+	for _, tc := range []struct{ now, base string }{
+		{"done", "idle"}, {"working", "done"}, {"blocked", "done"},
+		{"working", "idle"}, {"blocked", "working"}, {"idle", "working"},
+	} {
+		if !activityChanged(tc.now, tc.base) {
+			t.Fatalf("expected new activity for %q -> %q", tc.base, tc.now)
+		}
+	}
+	if activityChanged("done", "done") || activityChanged("", "done") {
+		t.Fatal("unchanged or unknown state is not new activity")
+	}
+
+	// A pane marked done at "done" stays out after being viewed (idle),
+	// and returns once the agent starts working again.
+	now := time.Now().Unix()
+	ps := &paneStat{Done: true, DoneAt: now, DoneState: "done", Last: now - 5}
+	r := row{PaneID: "p", Label: "notes", Status: "idle", Done: true, DoneState: "done", Last: ps.Last}
+	if inInbox(r, now) {
+		t.Fatal("viewed done pane returned to Inbox")
+	}
+	r.Status = "working"
+	if !inInbox(r, now) {
+		t.Fatal("agent activity did not return the done pane")
+	}
+}
+
+func TestSnoozeIfNoReplyBreaksOnActivity(t *testing.T) {
+	now := time.Now().Unix()
+	snoozed := row{
+		PaneID: "p", Label: "build", Status: "working",
+		RemindAt: now + 600, SnoozeMode: "", SnoozeState: "idle",
+		Done: true, DoneState: "idle", Last: now - 10,
+	}
+	if !inInbox(snoozed, now) {
+		t.Fatal("if no reply snooze did not break on agent activity")
+	}
+	// Regardless keeps the timer even when the agent moves.
+	regardless := snoozed
+	regardless.SnoozeMode = "regardless"
+	if inInbox(regardless, now) {
+		t.Fatal("regardless snooze broke on activity")
+	}
+	// No activity yet: the snooze still hides the thread.
+	quiet := snoozed
+	quiet.Status = "idle"
+	if inInbox(quiet, now) {
+		t.Fatal("quiet snoozed thread should stay hidden")
+	}
+}
+
+func TestPruneKeepsLivePanes(t *testing.T) {
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	for i := 0; i < 260; i++ {
+		id := fmt.Sprintf("p%03d", i)
+		st.Panes[id] = &paneStat{Visits: 1, Last: int64(i)}
+	}
+	live := map[string]bool{"p000": true}
+	st.prune(live, 200)
+	if _, ok := st.Panes["p000"]; !ok {
+		t.Fatal("live pane lost its triage state")
+	}
+	if len(st.Panes) >= 260 {
+		t.Fatalf("closed pane history not pruned: %d rows", len(st.Panes))
 	}
 }

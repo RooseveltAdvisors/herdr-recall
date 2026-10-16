@@ -176,6 +176,8 @@ type paneStat struct {
 	Done          bool   `json:"done,omitempty"`
 	DoneAt        int64  `json:"done_at,omitempty"`
 	DoneState     string `json:"done_state,omitempty"`
+	SnoozeMode    string `json:"snooze_mode,omitempty"`
+	SnoozeState   string `json:"snooze_state,omitempty"`
 	InInbox       bool   `json:"in_inbox,omitempty"`
 }
 
@@ -308,16 +310,18 @@ func saveStore(s *store) error {
 	return os.Rename(tmp, statePath())
 }
 
-func (s *store) prune(keep int) {
-	if len(s.Panes) <= keep {
-		return
-	}
+// prune drops history for panes that are closed. A live pane keeps its triage
+// state no matter how long it sits, so review history never evaporates.
+func (s *store) prune(live map[string]bool, keep int) {
 	type kv struct {
 		id string
 		ts int64
 	}
 	var all []kv
 	for id, st := range s.Panes {
+		if live[id] {
+			continue
+		}
 		all = append(all, kv{id, st.Last})
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ts > all[j].ts })
@@ -385,11 +389,46 @@ func recordFocus() (string, error) {
 	if label != "" {
 		ps.Label = label
 	}
-	if ps.Done && liveStatusWord(snap, id) == "working" {
-		ps.Done = false
+	// Only real work un-Dones a thread. Viewing a pane flips done to idle in
+	// Herdr, and that is the operator reading, not the agent moving.
+	if ps.Done {
+		if w := liveStatusWord(snap, id); w == "working" || w == "blocked" {
+			ps.Done = false
+		}
 	}
-	st.prune(200)
+	st.prune(liveSet(snap), 200)
 	return id, saveStore(st)
+}
+
+func liveSet(s *snapshot) map[string]bool {
+	live := make(map[string]bool, len(s.Panes))
+	for _, p := range s.Panes {
+		live[p.PaneID] = true
+	}
+	return live
+}
+
+// baselineState stores the status word recorded when a thread left Inbox.
+// An empty status becomes "none" so the first real status counts as new work.
+func baselineState(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// activityChanged reports whether the agent did something new since baseline.
+// done -> idle only flips Herdr's seen marker when the operator views a pane,
+// so that pair is the operator reading, not new work. An empty baseline is a
+// legacy row with no record, and it honours whatever the row already says.
+func activityChanged(now, baseline string) bool {
+	if now == "" || baseline == "" || now == baseline {
+		return false
+	}
+	if now == "idle" && baseline == "done" {
+		return false
+	}
+	return true
 }
 
 func liveStatusWord(s *snapshot, id string) string {
@@ -487,6 +526,8 @@ type row struct {
 	Done          bool
 	DoneAt        int64
 	DoneState     string
+	SnoozeMode    string
+	SnoozeState   string
 }
 
 // displayLabel is the Herdr tab name only, the same label prefix k uses
@@ -551,7 +592,7 @@ func collectRows(s *snapshot, st *store) []row {
 		}
 		label = displayLabel(s, id, label)
 		var visits, last, remindAt, doneAt int64
-		var note, doneState string
+		var note, doneState, snoozeMode, snoozeState string
 		var manualBlocked, done bool
 		if ps != nil {
 			visits, last = ps.Visits, ps.Last
@@ -561,6 +602,8 @@ func collectRows(s *snapshot, st *store) []row {
 			done = ps.Done
 			doneAt = ps.DoneAt
 			doneState = ps.DoneState
+			snoozeMode = ps.SnoozeMode
+			snoozeState = ps.SnoozeState
 		}
 		status := statusOf[id]
 		if manualBlocked {
@@ -578,6 +621,7 @@ func collectRows(s *snapshot, st *store) []row {
 			Visits: visits, Last: last, Status: status,
 			Fav: st.isFavorite(id), ManualBlocked: manualBlocked,
 			RemindAt: remindAt, Done: done, DoneAt: doneAt, DoneState: doneState,
+			SnoozeMode: snoozeMode, SnoozeState: snoozeState,
 		})
 	}
 	return out
@@ -639,6 +683,10 @@ func inInbox(r row, now int64) bool {
 		return true
 	}
 	if r.RemindAt > now {
+		// "if no reply" snoozes break early when the agent does something new.
+		if r.SnoozeMode != "regardless" && activityChanged(statusWord(r.Status), r.SnoozeState) {
+			return true
+		}
 		return false
 	}
 	if r.RemindAt > 0 && r.RemindAt <= now {
@@ -648,16 +696,8 @@ func inInbox(r row, now int64) bool {
 	if !r.Done {
 		return r.Last > 0 || r.Note != "" || sw == "blocked" || sw == "done"
 	}
-	if sw == "blocked" && r.DoneState != "blocked" {
-		return true
-	}
-	if sw == "done" && r.DoneState != "done" {
-		return true
-	}
-	if sw == "working" && r.DoneState != "working" && r.DoneState != "" {
-		return true
-	}
-	return false
+	// Done is not mute. New agent activity brings the thread back.
+	return activityChanged(sw, r.DoneState)
 }
 
 func inboxBucket(r row, now int64) int {
@@ -689,8 +729,17 @@ func syncInboxRows(all []row, st *store, now int64) []row {
 		byID[r.PaneID] = r
 		ps := st.ensurePane(r.PaneID)
 		if r.RemindAt > now && !r.ManualBlocked {
-			ps.InInbox = false
-			continue
+			if ps.SnoozeMode != "regardless" && activityChanged(statusWord(r.Status), ps.SnoozeState) {
+				// New agent activity cancels an "if no reply" snooze right away.
+				ps.RemindAt = 0
+				ps.SnoozeMode = ""
+				ps.SnoozeState = ""
+				r.RemindAt = 0
+				byID[r.PaneID] = r
+			} else {
+				ps.InInbox = false
+				continue
+			}
 		}
 		if ps.InInbox {
 			continue
@@ -744,6 +793,20 @@ func (s *store) removeFromInbox(id string) {
 		}
 	}
 	s.InboxOrder = out
+}
+
+// addToInbox puts a pane back into the queue at the end, so a returning thread
+// never displaces the thread the captain is reviewing.
+func (s *store) addToInbox(id string) {
+	for _, existing := range s.InboxOrder {
+		if existing == id {
+			return
+		}
+	}
+	if ps := s.Panes[id]; ps != nil {
+		ps.InInbox = true
+	}
+	s.InboxOrder = append(s.InboxOrder, id)
 }
 
 func rowsFor(s *snapshot, st *store, v view, mode int) []row {
@@ -1008,8 +1071,8 @@ func renderHelp(width, height int) string {
 	keys := [][2]string{
 		{"j / k / arrows", "move one row, same as prefix k"},
 		{"g / G", "first row / last row"},
-		{"e", "mark thread done (in Inbox: clear until next change)"},
-		{"z", "snooze / set a reminder (20m, 1h, 3h, tomorrow, clear)"},
+		{"e", "mark done. New agent activity returns it. e again undoes"},
+		{"z", "snooze: if no reply (default) or regardless"},
 		{"n", "set or edit a sticky note on the selected thread"},
 		{"!", "toggle manual blocked override on the selected thread"},
 		{"m", "mark or unmark favorite (*)"},
@@ -1511,6 +1574,9 @@ func remindLabels() []string {
 	return []string{"20m", "1h", "3h", "Tomorrow 9am", "Clear"}
 }
 
+func remindModeLabels() []string { return []string{"If no reply", "Regardless"} }
+func remindModeOpts() []string   { return []string{"", "regardless"} }
+
 func computeRemindAt(choice int, now time.Time) int64 {
 	switch choice {
 	case 0:
@@ -1527,7 +1593,9 @@ func computeRemindAt(choice int, now time.Time) int64 {
 	}
 }
 
-func renderRemind(width, height int, names []string, active, sel int, label string) string {
+// renderRemind is the snooze dialog. The return rule is a first-class field
+// because "if no reply" and "regardless" are different contracts.
+func renderRemind(width, height int, names []string, active, field, mode, timeSel int, label string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -1537,13 +1605,18 @@ func renderRemind(width, height int, names []string, active, sel int, label stri
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit("")
 	emit(keyText + keyBold + "  Remind me about " + label + keyReset)
-	emit(keyOverlay + "  Hides this thread from Inbox until the reminder is due." + keyReset)
+	emit(keyOverlay + "  Hides this thread from Inbox. New agent activity returns it early." + keyReset)
 	emit("")
-	for _, line := range choiceLines(remindLabels(), sel, width) {
+	emit(fieldTitle("Return to Inbox", field == 0))
+	for _, line := range choiceLines(remindModeLabels(), mode, width) {
+		emit(line)
+	}
+	emit(fieldTitle("Time", field == 1))
+	for _, line := range choiceLines(remindLabels(), timeSel, width) {
 		emit(line)
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit(hintFooter("h/l", "choose", "enter", "set reminder", "esc", "cancel"))
+	emit(hintFooter("j/k", "field", "h/l", "choice", "enter", "set reminder", "esc", "cancel"))
 	if len(lines) > height {
 		lines = lines[:height]
 	}
@@ -1759,6 +1832,8 @@ func runPicker() int {
 	confirmName := ""
 	confirmSel := 1
 	reminding := false
+	remindField := 1
+	remindMode := 0
 	remindSel := 0
 	remindPaneID := ""
 	remindLabel := ""
@@ -1822,7 +1897,7 @@ func runPicker() int {
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
-			frame = renderRemind(w, h, viewNames(st), tab, remindSel, remindLabel)
+			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, remindLabel)
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteLabel, noteText)
 		case creating:
@@ -1848,25 +1923,52 @@ func runPicker() int {
 			continue
 		}
 		if reminding && !showHelp {
-			opts := remindLabels()
 			switch key {
-			case "left", "h", "up", "k":
-				remindSel = cycle(len(opts), remindSel, -1)
-			case "right", "l", "down", "j":
-				remindSel = cycle(len(opts), remindSel, 1)
+			case "j", "down":
+				if remindField < 1 {
+					remindField++
+				}
+			case "k", "up":
+				if remindField > 0 {
+					remindField--
+				}
+			case "h", "left":
+				if remindField == 0 {
+					remindMode = cycle(len(remindModeOpts()), remindMode, -1)
+				} else {
+					remindSel = cycle(len(remindLabels()), remindSel, -1)
+				}
+			case "l", "right":
+				if remindField == 0 {
+					remindMode = cycle(len(remindModeOpts()), remindMode, 1)
+				} else {
+					remindSel = cycle(len(remindLabels()), remindSel, 1)
+				}
 			case "enter":
 				ps := st.ensurePane(remindPaneID)
 				now := time.Now()
 				due := computeRemindAt(remindSel, now)
-				ps.RemindAt = due
 				if due > 0 {
+					state := baselineState(liveStatusWord(frozen, remindPaneID))
+					ps.RemindAt = due
+					ps.SnoozeMode = remindModeOpts()[remindMode]
+					ps.SnoozeState = state
 					ps.Done = true
 					ps.DoneAt = now.Unix()
-					ps.DoneState = liveStatusWord(frozen, remindPaneID)
+					ps.DoneState = state
 					st.removeFromInbox(remindPaneID)
-					status = fmt.Sprintf("reminder set (%s): %s", opts[remindSel], remindLabel)
-				} else {
+					status = fmt.Sprintf("reminder set (%s, %s): %s",
+						remindLabels()[remindSel], strings.ToLower(remindModeLabels()[remindMode]), remindLabel)
+				} else if ps.RemindAt > 0 {
+					// Clear cancels the snooze and returns the thread now.
+					ps.RemindAt = 0
+					ps.SnoozeMode = ""
+					ps.SnoozeState = ""
+					ps.Done = false
+					st.addToInbox(remindPaneID)
 					status = "reminder cleared: " + remindLabel
+				} else {
+					status = "no reminder set: " + remindLabel
 				}
 				_ = saveStore(st)
 				reminding = false
@@ -2068,13 +2170,14 @@ func runPicker() int {
 				ps.DoneAt = now
 				ps.ManualBlocked = false
 				ps.RemindAt = 0
-				ps.DoneState = liveStatusWord(frozen, r.PaneID)
+				ps.SnoozeMode = ""
+				ps.SnoozeState = ""
+				ps.DoneState = baselineState(liveStatusWord(frozen, r.PaneID))
 				st.removeFromInbox(r.PaneID)
-				status = "done: " + r.Label
+				status = "done: " + r.Label + " (press e again to undo)"
 			} else {
 				ps.Done = false
-				ps.InInbox = true
-				st.InboxOrder = append(st.InboxOrder, r.PaneID)
+				st.addToInbox(r.PaneID)
 				status = "moved to inbox: " + r.Label
 			}
 			_ = saveStore(st)
@@ -2084,6 +2187,8 @@ func runPicker() int {
 				break
 			}
 			reminding = true
+			remindField = 1
+			remindMode = 0
 			remindSel = 0
 			remindPaneID = rows[sel].PaneID
 			remindLabel = rows[sel].Label
@@ -2106,7 +2211,7 @@ func runPicker() int {
 			ps.ManualBlocked = !ps.ManualBlocked
 			if ps.ManualBlocked {
 				ps.Done = false
-				ps.InInbox = true
+				st.addToInbox(r.PaneID)
 				status = "marked blocked: " + r.Label
 			} else {
 				status = "cleared manual blocked: " + r.Label

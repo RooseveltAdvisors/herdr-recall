@@ -10,8 +10,11 @@ Tabs from left to right are `Favorites`, `Inbox`, `Recent`, `Most used`, and `Al
 `Recent` and `Most used` start as custom tabs you can delete with `x` (it asks you to confirm), revise with `r`, or create from scratch with `c`.
 
 In `Inbox`, press `e` to mark a thread Done for the current cycle.
-It stays out of `Inbox` until its agent transitions into `blocked` or `done`, starts `working` on a new prompt, or a scheduled reminder fires.
+Done is not mute: any new agent activity brings the thread back to `Inbox`.
+Viewing a pane is you reading, not the agent moving, so it never returns a thread and never moves the pinned queue.
+Press `e` again on that row to undo.
 Press `z` to snooze a thread (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`).
+The snooze carries a return rule: `If no reply` breaks early on new agent activity, `Regardless` keeps the timer.
 Press `n` to leave a one-line sticky note beside the tab name.
 Press `!` to toggle a manual `blocked` override when a thread is waiting on something outside Herdr's detector.
 
@@ -25,8 +28,8 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
 | `h` / `l` / `←` / `→` | switch tabs (`Favorites`, `Inbox`, `Recent`, `Most used`, `All`) |
 | `enter` | focus the selected pane directly via Herdr socket |
-| `e` | mark the selected thread Done (or move an already-done thread back to `Inbox`) |
-| `z` | set or clear a reminder (`20m`, `1h`, `3h`, `Tomorrow 9am`, `Clear`) |
+| `e` | mark done. New agent activity returns it. `e` again undoes |
+| `z` | snooze (`20m`, `1h`, `3h`, `Tomorrow 9am`, `Clear`) with a return rule: `If no reply` (default) or `Regardless` |
 | `n` | set or edit a sticky note on the selected thread |
 | `!` | toggle manual `blocked` override on the selected thread |
 | `m` | mark or unmark the selected thread as a favorite (`*`) |
@@ -64,7 +67,7 @@ Most used view (`[sort: Most used]`):
 
 ![most used](assets/screenshot-most-used.png)
 
-Setting a reminder after pressing `z` on a row:
+Snooze dialog after pressing `z`, with the return rule as a field:
 
 ![reminder modal](assets/screenshot-favorite-toggle.png)
 
@@ -105,7 +108,8 @@ and run `herdr server reload-config`.
 `herdr plugin config-dir RooseveltAdvisors.herdr-recall` prints the directory;
 the state file is `recall.json` inside it. It records, per pane: visit count,
 last-seen time, and the label shown in the list, plus the favorites list.
-Old non-favorite entries are pruned past 200 panes.
+Rows for closed panes are pruned past 200.
+A live pane keeps its triage state no matter how long it sits.
 
 ## How jumping works
 

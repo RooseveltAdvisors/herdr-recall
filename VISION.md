@@ -9,9 +9,13 @@ It owns exactly one thing: the modal recall and triage overlay (`herdr-plugin.to
 The default view is a Superhuman-style Inbox of agent panes that currently require a cycle-back: panes that are blocked, newly done, manually flagged, due from a reminder, or recently touched and not yet cleared.
 Once a pane is in Inbox, its queue position stays pinned while you jump in and review it so the top thread never shifts away until you explicitly press `e` or `z`.
 Closing and reopening the popup restores the active tab, sort order, status filter, search query, and selected pane.
-Pressing `e` marks the selected pane done for the current cycle, removing it from Inbox until its agent transitions into `blocked` or `done`, the pane is focused again, or a scheduled reminder fires.
+Pressing `e` marks the selected pane done for the current cycle and removes it from Inbox.
+Done is never mute: any new agent activity returns the thread to Inbox.
+Viewing a pane is the operator reading, not agent work, so it never returns a thread and never moves the pinned queue.
 Pressing `z` snoozes the selected pane with a quick reminder (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`) and hides it from Inbox until due.
+A snooze carries a return rule: `If no reply` breaks early on new agent activity, `Regardless` keeps the timer.
 Panes with a due reminder render `!` and panes with a pending reminder render `~` beside the status column.
+Triage history for a live pane is never pruned; only closed panes age out.
 
 ## Context Annotations and Manual Overrides
 
