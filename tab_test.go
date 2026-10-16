@@ -39,20 +39,28 @@ func TestCustomFilters(t *testing.T) {
 }
 
 func TestStatusDotSitsLeftOfTheName(t *testing.T) {
-	rows := []row{{PaneID: "p", Label: "portal-CI", Status: "working", Last: time.Now().Unix()}}
+	rows := []row{
+		{PaneID: "p1", Label: "notes", Status: "working", Last: time.Now().Unix(), Fav: true},
+		{PaneID: "p2", Label: "build", Status: "blocked", Last: time.Now().Unix()},
+	}
 	plain := stripANSI(renderFrame(rows, 0, "", "", false, 90, 12, []string{"All"}, 0, "last", ""))
-	line := ""
+	var r1, r2 string
 	for _, l := range strings.Split(plain, "\n") {
-		if strings.Contains(l, "portal-CI") {
-			line = l
-			break
+		if strings.Contains(l, "notes") {
+			r1 = l
+		}
+		if strings.Contains(l, "build") {
+			r2 = l
 		}
 	}
-	dot := strings.Index(line, "●")
-	name := strings.Index(line, "portal-CI")
-	word := strings.Index(line, "working")
+	dot := strings.Index(r1, "●")
+	name := strings.Index(r1, "notes")
+	word := strings.Index(r1, "working")
 	if dot < 0 || name < 0 || word < 0 || !(dot < name && name < word) {
-		t.Fatalf("dot, name, word order = %d %d %d\n%s", dot, name, word, line)
+		t.Fatalf("dot, name, word order = %d %d %d\n%s", dot, name, word, r1)
+	}
+	if strings.Index(r1, "●") != strings.Index(r2, "●") || strings.Index(r1, "working") != strings.Index(r2, "blocked") {
+		t.Fatalf("selected row and unselected row columns misaligned:\n%s\n%s", r1, r2)
 	}
 }
 
@@ -110,12 +118,33 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 		t.Fatalf("inbox rows = %v, want %v", gotIDs, wantIDs)
 	}
 
-	// Sticky note and sort pill are rendered inline and searchable via filterRows.
-	plain := stripANSI(renderFrame(inbox, 0, "", "", false, 100, 16, viewNames(st), 0, "both", ""))
-	for _, want := range []string{"[sort: Triage]", "! idle", "● vendor-reply", "waiting on db migration", "e done", "z remind", "n note"} {
+	// Sticky note is rendered inline and searchable via filterRows; Inbox has no sort pill.
+	plain := stripANSI(renderFrame(inbox, 0, "", "", false, 100, 16, viewNames(st), 0, "both", "", activeSortLabel(st, view{Kind: "inbox"}, sortDefault)))
+	if strings.Contains(plain, "[sort:") {
+		t.Fatalf("inbox should not show a sort pill:\n%s", plain)
+	}
+	for _, want := range []string{"! idle", "● vendor-reply", "waiting on db migration", "e done", "z remind", "n note"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("inbox frame missing %q:\n%s", want, plain)
 		}
+	}
+
+	// Reviewing the top pane (status changes from done/blocked to idle/working and Last updates)
+	// must NOT move the pane off the top position in Inbox.
+	snap.Panes[4].AgentStatus = "idle" // p-due was at index 0
+	st.Panes["p-due"].RemindAt = 0
+	st.Panes["p-work"].Last = now + 100 // another pane gets a newer timestamp
+	inboxAfterReview := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	if len(inboxAfterReview) != 4 || inboxAfterReview[0].PaneID != "p-due" {
+		t.Fatalf("top pane moved after review: got %v, want p-due at index 0", inboxAfterReview)
+	}
+	// Pressing e (removeFromInbox) removes the top pane and advances the next one.
+	st.Panes["p-due"].Done = true
+	st.Panes["p-due"].DoneState = "idle"
+	st.removeFromInbox("p-due")
+	inboxAfterDone := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	if len(inboxAfterDone) != 3 || inboxAfterDone[0].PaneID != "p-manual" {
+		t.Fatalf("inbox after e (done) = %v, want p-manual at index 0", inboxAfterDone)
 	}
 	byNote := filterRows(inbox, "migration")
 	if len(byNote) != 1 || byNote[0].PaneID != "p-work" {
@@ -181,5 +210,15 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
 	if len(all) != 26 {
 		t.Fatalf("all len = %d", len(all))
+	}
+	allFrame := renderFrame(all, 20, "", "", false, 90, 14, viewNames(st), 1, "both", "", activeSortLabel(st, view{Kind: "all"}, sortDefault))
+	if strings.Count(allFrame, "\n") >= 14 {
+		t.Fatalf("All tab emitted %d newlines for height 14, which scrolls the tab bar off", strings.Count(allFrame, "\n"))
+	}
+	firstLine := strings.Split(stripANSI(allFrame), "\n")[0]
+	for _, tabName := range []string{"Inbox", "All", "Favorites", "Recent", "Most used"} {
+		if !strings.Contains(firstLine, tabName) {
+			t.Fatalf("All tab top line missing tab %q: %q", tabName, firstLine)
+		}
 	}
 }

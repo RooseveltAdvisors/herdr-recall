@@ -33,7 +33,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `b` / `w` / `i` / `d` / `a` | filter by status: blocked, working, idle, done, or all |
 | `/` | search tab names and sticky notes (`esc` leaves search, second `esc` closes) |
 | `c` / `r` / `x` | create, revise, or delete a custom tab |
-| `s` | cycle sort (`Most recent`, `Oldest`, `Most used`, `Least used`) on `Inbox`, `All`, and `Favorites` |
+| `s` | cycle sort (`Most recent`, `Oldest`, `Most used`, `Least used`) on `All` and `Favorites` |
 | `?` | open or close help |
 | `esc` / `q` | leave modal/search, then close the picker |
 
@@ -44,28 +44,31 @@ idle), section headers are coloured, and the favourite star is yellow.
 
 ## Screenshots
 
-Favorites view:
+Inbox triage view (default view with pinned queue order, sticky notes, and due `!` reminder badge):
+
+![inbox triage view](assets/screenshot-browse.png)
+
+All view showing all four status colours (red blocked, yellow working, teal done, green idle) and a snoozed `~` reminder badge:
+
+![all view with status colours](assets/screenshot-status-colours.png)
+
+Favorites view (`[sort: Starred]`):
 
 ![favorites](assets/screenshot-favorites.png)
 
-Recency view:
+Recent view (`[sort: Most recent]`):
 
 ![recency](assets/screenshot-recency.png)
 
-Most used view:
+Most used view (`[sort: Most used]`):
 
 ![most used](assets/screenshot-most-used.png)
 
-After pressing `f` on a row:
+Setting a reminder after pressing `z` on a row:
 
-![favorite toggle](assets/screenshot-favorite-toggle.png)
+![reminder modal](assets/screenshot-favorite-toggle.png)
 
-Browse mode (footer shows `/ search`); the four status colours show in the
-same frame (red blocked, yellow working, teal done, green idle):
-
-![browse mode with status colours](assets/screenshot-browse.png)
-
-Search mode after pressing `/` with a typed query:
+Search mode after pressing `/` with a typed query matching a sticky note:
 
 ![search mode](assets/screenshot-search.png)
 
@@ -82,14 +85,14 @@ herdr server reload-config
 ```
 
 Herdr keeps the installed copy in its own plugin folder. Do not clone the
-repo into `~/code` and link that path. A missing checkout makes prefix L
+repo into `~/code` and link that path. A missing checkout makes the keybinding
 fail or open an old copy.
 
 Then bind it in `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
-key = "prefix+shift+l"
+key = "prefix+k"
 type = "plugin_action"
 command = "RooseveltAdvisors.herdr-recall.open-picker"
 description = "recall picker"

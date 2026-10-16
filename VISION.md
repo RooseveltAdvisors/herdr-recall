@@ -7,6 +7,8 @@ It owns exactly one thing: the modal recall and triage overlay (`herdr-plugin.to
 ## Inbox Zero for Live Agent Threads
 
 The default view is a Superhuman-style Inbox of agent panes that currently require a cycle-back: panes that are blocked, newly done, manually flagged, due from a reminder, or recently touched and not yet cleared.
+Once a pane is in Inbox, its queue position stays pinned while you jump in and review it so the top thread never shifts away until you explicitly press `e` or `z`.
+Closing and reopening the popup restores the active tab, sort order, status filter, search query, and selected pane.
 Pressing `e` marks the selected pane done for the current cycle, removing it from Inbox until its agent transitions into `blocked` or `done`, the pane is focused again, or a scheduled reminder fires.
 Pressing `z` snoozes the selected pane with a quick reminder (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`) and hides it from Inbox until due.
 Panes with a due reminder render `!` and panes with a pending reminder render `~` beside the status column.
@@ -31,7 +33,7 @@ Browse mode never types into the search box; `/` enters search, `esc` leaves sea
 Navigation uses `j` and `k` (or arrows) for rows, `g` and `G` for ends, `ctrl-u` and `ctrl-d` for half-pages, `b/w/i/d/a` for status filters, and `h` and `l` to switch between `Inbox`, `All`, `Favorites`, `Recent`, `Most used`, and custom tabs.
 Triage actions stay on single keys in browse mode: `e` marks done, `z` sets a reminder, `n` edits the sticky note, `!` toggles manual blocked, and `m` marks a favorite.
 Custom tab management follows tmux and vim conventions: `c` creates a custom tab via a visible multi-field form, `r` revises the current custom tab's criteria, and `x` deletes it after a confirmation dialog that defaults to Cancel.
-Custom sorts use self-contained directional names (`Most recent`, `Oldest`, `Most used`, `Least used`), display the active sort order as a pill in the header, and refuse invented priority scores or separate ascending/descending rows.
+Custom sorts use self-contained directional names (`Most recent`, `Oldest`, `Most used`, `Least used`), display the active sort order as a pill in the header on sortable tabs (`All`, `Favorites`, and custom tabs), and refuse invented priority scores or separate ascending/descending rows.
 
 ## Scope
 

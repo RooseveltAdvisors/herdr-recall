@@ -176,6 +176,7 @@ type paneStat struct {
 	Done          bool   `json:"done,omitempty"`
 	DoneAt        int64  `json:"done_at,omitempty"`
 	DoneState     string `json:"done_state,omitempty"`
+	InInbox       bool   `json:"in_inbox,omitempty"`
 }
 
 type customTab struct {
@@ -189,11 +190,17 @@ type customTab struct {
 }
 
 type store struct {
-	Version   int                  `json:"version"`
-	Panes     map[string]*paneStat `json:"panes"`
-	Favorites []string             `json:"favorites"`
-	TabsInit  bool                 `json:"tabs_init"`
-	Tabs      []customTab          `json:"tabs,omitempty"`
+	Version      int                  `json:"version"`
+	Panes        map[string]*paneStat `json:"panes"`
+	Favorites    []string             `json:"favorites"`
+	TabsInit     bool                 `json:"tabs_init"`
+	Tabs         []customTab          `json:"tabs,omitempty"`
+	InboxOrder   []string             `json:"inbox_order,omitempty"`
+	ActiveTab    int                  `json:"active_tab,omitempty"`
+	ActiveSort   int                  `json:"active_sort,omitempty"`
+	ActiveState  string               `json:"active_state,omitempty"`
+	ActiveQuery  string               `json:"active_query,omitempty"`
+	ActivePaneID string               `json:"active_pane_id,omitempty"`
 }
 
 type view struct {
@@ -277,6 +284,10 @@ func viewNames(st *store) []string {
 }
 
 func openTab(st *store) int {
+	vs := views(st)
+	if st.ActiveTab >= 0 && st.ActiveTab < len(vs) {
+		return st.ActiveTab
+	}
 	return 0
 }
 
@@ -671,23 +682,75 @@ func sortInbox(list []row, now int64) {
 	})
 }
 
+func syncInboxRows(all []row, st *store, now int64) []row {
+	byID := make(map[string]row, len(all))
+	for _, r := range all {
+		byID[r.PaneID] = r
+		ps := st.ensurePane(r.PaneID)
+		if r.RemindAt > now && !r.ManualBlocked {
+			ps.InInbox = false
+			continue
+		}
+		if ps.InInbox {
+			continue
+		}
+		if inInbox(r, now) {
+			ps.InInbox = true
+			ps.Done = false
+		}
+	}
+	seen := map[string]bool{}
+	var orderedIDs []string
+	for _, id := range st.InboxOrder {
+		if _, ok := byID[id]; !ok || seen[id] {
+			continue
+		}
+		if ps := st.Panes[id]; ps != nil && ps.InInbox {
+			seen[id] = true
+			orderedIDs = append(orderedIDs, id)
+		}
+	}
+	var added []row
+	for _, r := range all {
+		if seen[r.PaneID] {
+			continue
+		}
+		if ps := st.Panes[r.PaneID]; ps != nil && ps.InInbox {
+			seen[r.PaneID] = true
+			added = append(added, r)
+		}
+	}
+	sortInbox(added, now)
+	for _, r := range added {
+		orderedIDs = append(orderedIDs, r.PaneID)
+	}
+	st.InboxOrder = orderedIDs
+	out := make([]row, 0, len(orderedIDs))
+	for _, id := range orderedIDs {
+		out = append(out, byID[id])
+	}
+	return out
+}
+
+func (s *store) removeFromInbox(id string) {
+	if ps := s.Panes[id]; ps != nil {
+		ps.InInbox = false
+	}
+	out := s.InboxOrder[:0]
+	for _, existing := range s.InboxOrder {
+		if existing != id {
+			out = append(out, existing)
+		}
+	}
+	s.InboxOrder = out
+}
+
 func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 	all := collectRows(s, st)
 	now := time.Now().Unix()
 	switch v.Kind {
 	case "inbox":
-		var list []row
-		for _, r := range all {
-			if inInbox(r, now) {
-				list = append(list, r)
-			}
-		}
-		if mode == sortDefault {
-			sortInbox(list, now)
-			return list
-		}
-		sortBy(list, sortHow(mode, "newest"))
-		return list
+		return syncInboxRows(all, st, now)
 	case "favorites":
 		var list []row
 		for _, r := range all {
@@ -758,6 +821,9 @@ func sortLabel(how string) string {
 }
 
 func activeSortLabel(st *store, v view, mode int) string {
+	if v.Kind == "inbox" {
+		return ""
+	}
 	if v.Kind == "custom" && v.Idx >= 0 && v.Idx < len(st.Tabs) {
 		return sortLabel(canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir))
 	}
@@ -765,8 +831,6 @@ func activeSortLabel(st *store, v view, mode int) string {
 		return sortLabel(sortHow(mode, "newest"))
 	}
 	switch v.Kind {
-	case "inbox":
-		return "Triage"
 	case "favorites":
 		return "Starred"
 	default:
@@ -881,7 +945,7 @@ func hintFooter(pairs ...string) string {
 	for i := 0; i+1 < len(pairs); i += 2 {
 		parts = append(parts, keyAccentFg+pairs[i]+keyReset+keyOverlay+" "+pairs[i+1]+keyReset)
 	}
-	return strings.Join(parts, keyOverlay+"   "+keyReset) + "\r\n"
+	return strings.Join(parts, keyOverlay+"   "+keyReset)
 }
 
 // agoShort is the compact age form used when the overlay pane is narrow.
@@ -952,7 +1016,7 @@ func renderHelp(width, height int) string {
 		{"/", "search tab names and sticky notes"},
 		{"h / l", "switch tabs (Inbox, All, Favorites, Recent, ...)"},
 		{"c / r / x", "create, revise, or delete a custom tab"},
-		{"s", "on Inbox, All, and Favorites: cycle sort"},
+		{"s", "on All and Favorites: cycle sort"},
 		{"ctrl+u / ctrl+d", "half page, or clear search/note"},
 		{"?", "open or close this help"},
 		{"esc / q", "leave search/modal, then close the picker"},
@@ -1036,24 +1100,30 @@ func tabBar(names []string, active int) string {
 }
 
 func renderFrame(rows []row, sel int, query, status string, searching bool, width, height int, names []string, active int, metricKind, state string, sortOpts ...string) string {
-	sortPill := "Most recent"
-	if len(sortOpts) > 0 && sortOpts[0] != "" {
+	sortPill := ""
+	if len(sortOpts) > 0 {
 		sortPill = sortOpts[0]
 	} else if active >= 0 && active < len(names) {
 		switch names[active] {
 		case "Inbox":
-			sortPill = "Triage"
+			sortPill = ""
 		case "Favorites":
 			sortPill = "Starred"
 		case "Most used":
 			sortPill = "Most used"
+		default:
+			sortPill = "Most recent"
 		}
 	}
 	// The tab bar, hint, and search line are painted first and never scroll
-	// away. All is the long list, so a trailing newline on a full frame used
-	// to push those headers off the popup.
+	// away. Capping at height-1 keeps the last line from triggering terminal
+	// auto-scroll on long tabs like All.
 	if height < 6 {
 		height = 6
+	}
+	maxLines := height
+	if height > 6 {
+		maxLines = height - 1
 	}
 	var lines []string
 	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
@@ -1088,7 +1158,7 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 	if status != "" {
 		footerN++
 	}
-	visible := height - headerN - footerN
+	visible := maxLines - headerN - footerN
 	if visible < 1 {
 		visible = 1
 	}
@@ -1167,11 +1237,11 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 			span := keySelectBg + keySelectFg + keyBold
 			line := span
 			if r.Fav {
-				line += keyStar + "*" + span
+				line += keyStar + "*" + span + " "
 			} else {
-				line += " "
+				line += "  "
 			}
-			line += dotCell + labelCell + statusCell + " " + metaCol
+			line += dotCell + labelCell + statusCell + metaCol
 			emit(pad(line, width) + keyReset)
 		} else {
 			emit(starCell + dotCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
@@ -1195,7 +1265,7 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 		emit(hintFooter("enter", "switch", "e", "done", "z", "remind", "n", "note", "!", "block", "/", "search"))
 	}
 	extra := "h/l tabs   m mark   b/w/i/d/a states   c new"
-	if len(names) > 0 && (names[active] == "Inbox" || names[active] == "All" || names[active] == "Favorites") {
+	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
 	}
 	if len(names) > 0 && names[active] != "Inbox" && names[active] != "All" && names[active] != "Favorites" {
@@ -1205,8 +1275,8 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 	if status != "" {
 		emit(keySub + status + keyReset)
 	}
-	if len(lines) > height {
-		lines = lines[:height]
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
 	}
 	var b strings.Builder
 	b.WriteString("\x1b[2J\x1b[H")
@@ -1664,11 +1734,11 @@ func runPicker() int {
 	}()
 
 	st := loadStore()
-	query := ""
+	query := st.ActiveQuery
 	sel := 0
 	status := ""
 	searching := false
-	stateFilter := ""
+	stateFilter := st.ActiveState
 	showHelp := false
 	// The snapshot is frozen when the picker opens so j/k does not reshuffle
 	// rows. Tab and sort changes reorder that frozen set on purpose.
@@ -1677,7 +1747,10 @@ func runPicker() int {
 		frozen = &snapshot{}
 	}
 	tab := openTab(st)
-	sortMode := sortDefault
+	sortMode := st.ActiveSort
+	if sortMode < 0 || sortMode >= sortCount {
+		sortMode = sortDefault
+	}
 	creating := false
 	editing := false
 	editIdx := -1
@@ -1706,6 +1779,28 @@ func runPicker() int {
 		allRows = rowsFor(frozen, st, vs[tab], sortMode)
 	}
 	rebuild()
+	if st.ActivePaneID != "" {
+		cur := filterByState(allRows, stateFilter)
+		if q := strings.TrimSpace(query); q != "" {
+			cur = filterRows(cur, q)
+		}
+		for i, r := range cur {
+			if r.PaneID == st.ActivePaneID {
+				sel = i
+				break
+			}
+		}
+	}
+	persistView := func(rows []row) {
+		st.ActiveTab = tab
+		st.ActiveSort = sortMode
+		st.ActiveState = stateFilter
+		st.ActiveQuery = query
+		if sel >= 0 && sel < len(rows) {
+			st.ActivePaneID = rows[sel].PaneID
+		}
+		_ = saveStore(st)
+	}
 	for {
 		rows := filterByState(allRows, stateFilter)
 		if q := strings.TrimSpace(query); q != "" {
@@ -1717,6 +1812,7 @@ func runPicker() int {
 		if sel < 0 {
 			sel = 0
 		}
+		persistView(rows)
 		w, h := termSize(tty)
 		var frame string
 		switch {
@@ -1766,6 +1862,7 @@ func runPicker() int {
 					ps.Done = true
 					ps.DoneAt = now.Unix()
 					ps.DoneState = liveStatusWord(frozen, remindPaneID)
+					st.removeFromInbox(remindPaneID)
 					status = fmt.Sprintf("reminder set (%s): %s", opts[remindSel], remindLabel)
 				} else {
 					status = "reminder cleared: " + remindLabel
@@ -1944,7 +2041,7 @@ func runPicker() int {
 			rebuild()
 		case key == "s" && !searching && !showHelp:
 			v := views(st)[tab]
-			if v.Kind != "inbox" && v.Kind != "all" && v.Kind != "favorites" {
+			if v.Kind != "all" && v.Kind != "favorites" {
 				break
 			}
 			if v.Kind == "all" && sortMode == sortDefault {
@@ -1965,15 +2062,18 @@ func runPicker() int {
 			r := rows[sel]
 			ps := st.ensurePane(r.PaneID)
 			now := time.Now().Unix()
-			if views(st)[tab].Kind == "inbox" || inInbox(r, now) {
+			if views(st)[tab].Kind == "inbox" || ps.InInbox || inInbox(r, now) {
 				ps.Done = true
 				ps.DoneAt = now
 				ps.ManualBlocked = false
 				ps.RemindAt = 0
 				ps.DoneState = liveStatusWord(frozen, r.PaneID)
+				st.removeFromInbox(r.PaneID)
 				status = "done: " + r.Label
 			} else {
 				ps.Done = false
+				ps.InInbox = true
+				st.InboxOrder = append(st.InboxOrder, r.PaneID)
 				status = "moved to inbox: " + r.Label
 			}
 			_ = saveStore(st)
@@ -2005,6 +2105,7 @@ func runPicker() int {
 			ps.ManualBlocked = !ps.ManualBlocked
 			if ps.ManualBlocked {
 				ps.Done = false
+				ps.InInbox = true
 				status = "marked blocked: " + r.Label
 			} else {
 				status = "cleared manual blocked: " + r.Label
