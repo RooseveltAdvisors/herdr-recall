@@ -5,8 +5,8 @@ When you switch across 20 to 30 live agent threads to give quick feedback and un
 
 See [VISION.md](VISION.md) for the project vision and acceptance policy.
 
-Press `prefix+k` and the picker opens as a 95% by 95% popup on `Inbox`.
-`Inbox`, `All`, and `Favorites` are the built-in tabs.
+Press `prefix+k` and the picker opens as a 95% by 95% popup.
+Tabs from left to right are `Favorites`, `Inbox`, `Recent`, `Most used`, and `All`.
 `Recent` and `Most used` start as custom tabs you can delete with `x` (it asks you to confirm), revise with `r`, or create from scratch with `c`.
 
 In `Inbox`, press `e` to mark a thread Done for the current cycle.
@@ -23,7 +23,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `j` / `k` / `↑` / `↓` | move one row (`ctrl-n` / `ctrl-p` and arrows also move while searching) |
 | `g` / `G` | jump to the first / last row |
 | `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
-| `h` / `l` / `←` / `→` | switch tabs (`Inbox`, `All`, `Favorites`, `Recent`, `Most used`, ...) |
+| `h` / `l` / `←` / `→` | switch tabs (`Favorites`, `Inbox`, `Recent`, `Most used`, `All`) |
 | `enter` | focus the selected pane directly via Herdr socket |
 | `e` | mark the selected thread Done (or move an already-done thread back to `Inbox`) |
 | `z` | set or clear a reminder (`20m`, `1h`, `3h`, `Tomorrow 9am`, `Clear`) |

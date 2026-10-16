@@ -79,13 +79,10 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 			"p-manual": {Visits: 1, Last: now - 400, Done: true, DoneAt: now - 400, DoneState: "idle", ManualBlocked: true},
 		},
 	}
-	for _, name := range viewNames(st) {
-		if name == "Map" {
-			t.Fatal("Map tab should be retired")
-		}
-	}
-	if viewNames(st)[openTab(st)] != "Inbox" {
-		t.Fatalf("default open tab = %q, want Inbox", viewNames(st)[openTab(st)])
+	gotOrder := strings.Join(viewNames(st), ",")
+	wantOrder := "Favorites,Inbox,Recent,Most used,All"
+	if gotOrder != wantOrder {
+		t.Fatalf("tab order = %q, want %q", gotOrder, wantOrder)
 	}
 	snap := &snapshot{
 		Tabs: []tabRec{
@@ -119,7 +116,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 	}
 
 	// Sticky note is rendered inline and searchable via filterRows; Inbox has no sort pill.
-	plain := stripANSI(renderFrame(inbox, 0, "", "", false, 100, 16, viewNames(st), 0, "both", "", activeSortLabel(st, view{Kind: "inbox"}, sortDefault)))
+	plain := stripANSI(renderFrame(inbox, 0, "", "", false, 100, 16, viewNames(st), 1, "both", "", activeSortLabel(st, view{Kind: "inbox"}, sortDefault)))
 	if strings.Contains(plain, "[sort:") {
 		t.Fatalf("inbox should not show a sort pill:\n%s", plain)
 	}
@@ -153,7 +150,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 
 	// Snoozed pane renders ~ in All tab, and All shows [sort: Most recent].
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
-	allPlain := stripANSI(renderFrame(all, 0, "", "", false, 100, 18, viewNames(st), 1, "both", ""))
+	allPlain := stripANSI(renderFrame(all, 0, "", "", false, 100, 18, viewNames(st), 4, "both", ""))
 	if !strings.Contains(allPlain, "~ working") || !strings.Contains(allPlain, "[sort: Most recent]") {
 		t.Fatalf("expected ~ working badge and [sort: Most recent] pill in All:\n%s", allPlain)
 	}
@@ -211,7 +208,7 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 	if len(all) != 26 {
 		t.Fatalf("all len = %d", len(all))
 	}
-	allFrame := renderFrame(all, 20, "", "", false, 90, 14, viewNames(st), 1, "both", "", activeSortLabel(st, view{Kind: "all"}, sortDefault))
+	allFrame := renderFrame(all, 20, "", "", false, 90, 14, viewNames(st), 4, "both", "", activeSortLabel(st, view{Kind: "all"}, sortDefault))
 	if strings.Count(allFrame, "\n") >= 14 {
 		t.Fatalf("All tab emitted %d newlines for height 14, which scrolls the tab bar off", strings.Count(allFrame, "\n"))
 	}

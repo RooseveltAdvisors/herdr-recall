@@ -251,10 +251,11 @@ func defaultTabs() []customTab {
 }
 
 func views(st *store) []view {
-	out := []view{{Kind: "inbox"}, {Kind: "all"}, {Kind: "favorites"}}
+	out := []view{{Kind: "favorites"}, {Kind: "inbox"}}
 	for i := range st.Tabs {
 		out = append(out, view{Kind: "custom", Idx: i})
 	}
+	out = append(out, view{Kind: "all"})
 	return out
 }
 
@@ -1948,7 +1949,7 @@ func runPicker() int {
 					status = "saved " + name
 				} else {
 					st.Tabs = append(st.Tabs, ct)
-					tab = len(views(st)) - 1
+					tab = len(views(st)) - 2
 					status = "created " + name
 				}
 				_ = saveStore(st)
