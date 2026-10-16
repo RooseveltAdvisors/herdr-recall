@@ -7,7 +7,7 @@ See [VISION.md](VISION.md) for the project vision and acceptance policy.
 
 Press `prefix+k` and the picker opens as a 95% by 95% popup.
 Tabs from left to right are `Favorites`, `Inbox`, `Recent`, `Most used`, and `All`.
-`Recent` and `Most used` start as custom tabs you can delete with `x` (it asks you to confirm), revise with `r`, or create from scratch with `c`.
+`Recent` and `Most used` start as custom tabs. `t c` creates one, `t r` revises it, and `t x` deletes it after a confirmation.
 
 In `Inbox`, press `e` to mark a thread Done for the current cycle.
 Done is not mute: any new agent activity brings the thread back to `Inbox`.
@@ -35,7 +35,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `m` | mark or unmark the selected thread as a favorite (`*`) |
 | `b` / `w` / `i` / `d` / `a` | filter by status: blocked, working, idle, done, or all |
 | `/` | search tab names and sticky notes, with vim editing |
-| `c` / `r` / `x` | create, revise, or delete a custom tab |
+| `t` then `c` / `r` / `x` | create, revise, or delete a custom tab |
 | `s` | cycle sort (`Most recent`, `Oldest`, `Most used`, `Least used`) on `All` and `Favorites` |
 | `?` | open or close help |
 | `esc` | insert to normal, normal to browse, browse to close |

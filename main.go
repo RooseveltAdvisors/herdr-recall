@@ -324,6 +324,9 @@ func (s *store) prune(live map[string]bool, keep int) {
 		}
 		all = append(all, kv{id, st.Last})
 	}
+	if len(all) <= keep {
+		return
+	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ts > all[j].ts })
 	for _, e := range all[keep:] {
 		ps := s.Panes[e.id]
@@ -1079,7 +1082,7 @@ func renderHelp(width, height int) string {
 		{"b w i d a", "filter status: blocked, working, idle, done, all"},
 		{"/", "search, edited with vim keys"},
 		{"h / l", "switch tabs"},
-		{"c / r / x", "create, revise, or delete a custom tab"},
+		{"t c / t r / t x", "create, revise, or delete a custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
 		{"?", "open or close this help"},
 		{"esc", "insert to normal, normal to browse, browse to close"},
@@ -1326,12 +1329,9 @@ func renderFrame(rows []row, sel int, fv fieldView, status string, width, height
 	} else {
 		emit(hintFooter("enter", "switch", "e", "done", "z", "remind", "n", "note", "!", "block", "/", "search"))
 	}
-	extra := "h/l tabs   m mark   b/w/i/d/a states   c new"
+	extra := "h/l tabs   m mark   b/w/i/d/a states   t c/r/x tab"
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
-	}
-	if len(names) > 0 && names[active] != "Inbox" && names[active] != "All" && names[active] != "Favorites" {
-		extra += "   r revise   x delete"
 	}
 	emit(keyOverlay + extra + keyReset)
 	if status != "" {
@@ -1817,6 +1817,7 @@ func runPicker() int {
 	formField := 0
 	confirmName := ""
 	confirmSel := 1
+	pendingT := false
 	reminding := false
 	remindField := 1
 	remindMode := 0
@@ -2112,6 +2113,43 @@ func runPicker() int {
 			}
 			continue
 		}
+		if pendingT {
+			// Tab mutations live behind a prefix, the way vim gates structure
+			// behind : and tmux gates create behind prefix+c.
+			pendingT = false
+			v := views(st)[tab]
+			switch key {
+			case "c":
+				creating = true
+				editing = false
+				editIdx = -1
+				formField = 0
+				formEd = newEditor("")
+				newSort, newOnly, newWhere, newLimit = "newest", "", "", 20
+				status = ""
+			case "r":
+				if v.Kind != "custom" {
+					break
+				}
+				ct := st.Tabs[v.Idx]
+				creating = true
+				editing = true
+				editIdx = v.Idx
+				formField = 1
+				formEd = newEditor(ct.Name)
+				newSort, newOnly, newWhere, newLimit = canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit
+				status = ""
+			case "x":
+				if v.Kind != "custom" {
+					break
+				}
+				confirmName = st.Tabs[v.Idx].Name
+				confirmSel = 1
+			default:
+				status = ""
+			}
+			continue
+		}
 		switch {
 		case key == "esc":
 			if showHelp {
@@ -2233,34 +2271,9 @@ func runPicker() int {
 			}
 			_ = saveStore(st)
 			rebuild()
-		case key == "c" && !searching && !showHelp:
-			creating = true
-			editing = false
-			editIdx = -1
-			formField = 0
-			formEd = newEditor("")
-			newSort, newOnly, newWhere, newLimit = "newest", "", "", 20
-			status = ""
-		case key == "r" && !searching && !showHelp:
-			v := views(st)[tab]
-			if v.Kind != "custom" {
-				break
-			}
-			ct := st.Tabs[v.Idx]
-			creating = true
-			editing = true
-			editIdx = v.Idx
-			formField = 1
-			formEd = newEditor(ct.Name)
-			newSort, newOnly, newWhere, newLimit = canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit
-			status = ""
-		case key == "x" && !searching && !showHelp:
-			v := views(st)[tab]
-			if v.Kind != "custom" {
-				break
-			}
-			confirmName = st.Tabs[v.Idx].Name
-			confirmSel = 1
+		case key == "t" && !searching && !showHelp:
+			pendingT = true
+			status = "tab: c create   r revise   x delete"
 		case key == "/" && !searching:
 			searching = true
 			searchEd.mode = modeInsert

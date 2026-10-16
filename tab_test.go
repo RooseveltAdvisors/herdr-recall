@@ -292,3 +292,22 @@ func TestPruneKeepsLivePanes(t *testing.T) {
 		t.Fatalf("closed pane history not pruned: %d rows", len(st.Panes))
 	}
 }
+
+func TestPruneDoesNotPanicBelowTheCap(t *testing.T) {
+	// The common case is far fewer closed panes than the cap. Slicing the
+	// overflow without a guard panicked on every prefix+k.
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("p%d", i)
+		st.Panes[id] = &paneStat{Visits: 1, Last: int64(i)}
+	}
+	live := map[string]bool{"p0": true}
+	st.prune(live, 200)
+	if len(st.Panes) != 5 {
+		t.Fatalf("rows = %d, want 5 kept", len(st.Panes))
+	}
+	st.prune(map[string]bool{}, 2)
+	if len(st.Panes) != 2 {
+		t.Fatalf("rows = %d, want 2 after pruning to cap", len(st.Panes))
+	}
+}
