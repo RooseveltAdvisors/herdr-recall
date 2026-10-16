@@ -1170,7 +1170,7 @@ func renderHelp(width, height int) string {
 		{"t c / t r / t x", "create, revise, or delete a custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
 		{"?", "open or close this help"},
-		{"esc", "insert to normal, normal to browse, browse to close"},
+		{"esc", "insert to normal, normal to browse, then clears search, then closes"},
 		{"ctrl+c", "close from anywhere"},
 	}
 	emit(keyAccentFg + keyBold + "  / and n use vim editing" + keyReset)
@@ -1418,6 +1418,9 @@ func renderFrame(rows []row, sel int, fv vimline.View, status string, width, hei
 	extra := "h/l tabs   m mark   b/w/i/d/a states   t c/r/x tab"
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
+	}
+	if !fv.Focused && (strings.TrimSpace(fv.Text) != "" || state != "") {
+		extra += "   esc clear"
 	}
 	emit(keyOverlay + extra + keyReset)
 	if status != "" {
@@ -2357,6 +2360,21 @@ func runPicker() int {
 		case key == "esc":
 			if showHelp {
 				showHelp = false // esc closes help, the row stays
+				continue
+			}
+			// esc unwinds one thing per press, the same ladder the field
+			// uses: the search words go first, then the status filter, then
+			// the picker closes.
+			if strings.TrimSpace(searchEd.Text()) != "" {
+				searchEd = vimline.New("")
+				status = ""
+				sel = 0
+				continue
+			}
+			if stateFilter != "" {
+				stateFilter = ""
+				status = ""
+				sel = 0
 				continue
 			}
 			return 0 // esc closes from browse mode

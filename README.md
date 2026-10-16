@@ -38,7 +38,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `t` then `c` / `r` / `x` | create, revise, or delete a custom tab |
 | `s` | cycle sort (`Most recent`, `Oldest`, `Most used`, `Least used`) on `All` and `Favorites` |
 | `?` | open or close help |
-| `esc` | insert to normal, normal to browse, browse to close |
+| `esc` | insert to normal, normal to browse, then clears the search words, then the status filter, then closes |
 | `ctrl+c` | close from anywhere |
 
 The footer shows the keys for the mode you are in: key names in accent,
@@ -56,6 +56,9 @@ idle), section headers are coloured, and the favourite star is yellow.
 - `p` `P` paste, `u` undo, `ctrl+r` redo, `~` swap case, `.` repeat.
 - Counts work, so `3w`, `2dw`, `5x` all behave.
 - `jj` leaves insert mode, with a 150 ms window before a lone `j` lands.
+- `esc` unwinds one thing per press: insert to normal, normal to browse with
+  the filter kept, then the search words clear, then the status filter, then
+  the picker closes.
 - While a field is focused, `j` `k` and the arrows move the list and `enter` jumps.
 
 A mode chip sits left of the prompt: `N` normal, `I` insert, `R` replace, and
