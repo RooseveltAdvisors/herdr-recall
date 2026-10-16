@@ -29,7 +29,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `h` / `l` / `←` / `→` | switch tabs (`Favorites`, `Inbox`, `Recent`, `Most used`, `All`) |
 | `enter` | focus the selected pane directly via Herdr socket |
 | `e` | mark done. New agent activity returns it. `e` again undoes |
-| `z` | snooze (`20m`, `1h`, `3h`, `Tomorrow 9am`, `Clear`) with a return rule: `If no reply` (default) or `Regardless` |
+| `z` | snooze with a typed time (`3h`, `2w`, `1d12h`, `tomorrow`, `clear`) and a return rule: `If no reply` (default) or `Regardless` |
 | `n` | set or edit a sticky note on the selected thread |
 | `!` | toggle manual `blocked` override on the selected thread |
 | `m` | mark or unmark the selected thread as a favorite (`*`) |
@@ -50,16 +50,40 @@ idle), section headers are coloured, and the favourite star is yellow.
 
 `/` search and `n` sticky note share one vim line editor, so both feel the same.
 
-- `esc` enters normal mode. `i`, `I`, `a`, `A` go back to insert.
+- `esc` or `jj` enters normal mode. `i`, `I`, `a`, `A` go back to insert.
 - Motions: `w` `W` `b` `B` `e` `E`, `0` `^` `$`, `f` `F` `t` `T`, `;` `,`.
 - Edits: `x` `X`, `r{char}`, `s`, `d` `c` `y` with a motion, `D`, `C`, `Y`.
 - `p` `P` paste, `u` undo, `ctrl+r` redo, `~` swap case, `.` repeat.
 - Counts work, so `3w`, `2dw`, `5x` all behave.
+- `jj` leaves insert mode, with a 150 ms window before a lone `j` lands.
 - While a field is focused, `j` `k` and the arrows move the list and `enter` jumps.
 
 A mode chip sits left of the prompt: `N` normal, `I` insert, `R` replace, and
 `d` `c` `y` `f` `r` when a command is waiting on its motion. The cursor is
 painted in the line, so it matches the screenshots exactly.
+
+## Remind times
+
+`z` takes a typed time. Units are `min`, `h`, `d`, `w`, `mo`, `y`, and `m`
+means months to match the `3h 3d 2w 2m` scale, so minutes are always `min`.
+Compound sequences work (`1d12h`), bare units mean one (`h`), `a` and `an`
+mean one, and `tomorrow` is 9 AM. The resolved absolute time is shown while
+you type, so an ambiguous unit is visible before it commits. `clear` removes
+the reminder.
+
+## Jev triage priority
+
+Jev is optional. With no decision proxy on the box and no `HERDR_RECALL_JEV`
+override, the picker behaves exactly as it does without this section.
+
+When Jev is present, each new Inbox arrival is asked one question: should the
+captain triage this thread before the others right now. New arrivals are then
+placed at the front of the queue, most important first. Existing rows keep
+their pinned positions, so reviewing a thread never reshuffles the queue.
+
+Preference is learned locally. Acting on an Inbox row reinforces its features
+(status, note, age, label) and decays the features of the rows skipped above
+it, so the ordering drifts toward what you actually handle first.
 
 ## Screenshots
 

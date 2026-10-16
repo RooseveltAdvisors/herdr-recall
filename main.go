@@ -203,6 +203,7 @@ type store struct {
 	ActiveState  string               `json:"active_state,omitempty"`
 	ActiveQuery  string               `json:"active_query,omitempty"`
 	ActivePaneID string               `json:"active_pane_id,omitempty"`
+	Jev          *jevState            `json:"jev,omitempty"`
 }
 
 type view struct {
@@ -773,9 +774,20 @@ func syncInboxRows(all []row, st *store, now int64) []row {
 			added = append(added, r)
 		}
 	}
-	sortInbox(added, now)
-	for _, r := range added {
-		orderedIDs = append(orderedIDs, r.PaneID)
+	if st.jevOn() {
+		// Jev puts the most important new arrival first. Existing rows keep
+		// their pinned positions, so reviewing never reshuffles the queue.
+		st.jevSortDesc(added, now)
+		front := make([]string, 0, len(added)+len(orderedIDs))
+		for _, r := range added {
+			front = append(front, r.PaneID)
+		}
+		orderedIDs = append(front, orderedIDs...)
+	} else {
+		sortInbox(added, now)
+		for _, r := range added {
+			orderedIDs = append(orderedIDs, r.PaneID)
+		}
 	}
 	st.InboxOrder = orderedIDs
 	out := make([]row, 0, len(orderedIDs))
@@ -1075,7 +1087,7 @@ func renderHelp(width, height int) string {
 		{"j / k / arrows", "move one row"},
 		{"g / G", "first row / last row"},
 		{"e", "mark done. New agent activity returns it. e again undoes"},
-		{"z", "snooze: if no reply (default) or regardless"},
+		{"z", "snooze: type 3h 2w 1d12h tomorrow, or clear"},
 		{"n", "sticky note, edited with vim keys"},
 		{"!", "toggle manual blocked override"},
 		{"m", "mark or unmark favorite (*)"},
@@ -1089,9 +1101,10 @@ func renderHelp(width, height int) string {
 		{"ctrl+c", "close from anywhere"},
 	}
 	emit(keyAccentFg + keyBold + "  / and n use vim editing" + keyReset)
-	emit(keyText + "  esc enters normal mode. i I a A insert. w b e 0 ^ $ move." + keyReset)
+	emit(keyText + "  esc or jj enters normal mode. i I a A insert. w b e 0 ^ $ move." + keyReset)
 	emit(keyText + "  x X r s delete or replace. d c y take a motion, with counts." + keyReset)
 	emit(keyText + "  p P paste. u undo. ctrl+r redo. ~ change case. . repeat." + keyReset)
+	emit(keyText + "  z times: min h d w mo y, compound like 1d12h, tomorrow, clear." + keyReset)
 	emit(keyText + "  j k arrows move the list. enter jumps." + keyReset)
 	for _, kv := range keys {
 		emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
@@ -1556,34 +1569,17 @@ func renderConfirm(width, height int, names []string, active, sel int, name stri
 	return paint(lines)
 }
 
-func remindLabels() []string {
-	return []string{"20m", "1h", "3h", "Tomorrow 9am", "Clear"}
-}
+func remindPicks() []string { return []string{"20min", "1h", "3h", "tomorrow", "clear"} }
 
 func remindModeLabels() []string { return []string{"If no reply", "Regardless"} }
 func remindModeOpts() []string   { return []string{"", "regardless"} }
 
-func computeRemindAt(choice int, now time.Time) int64 {
-	switch choice {
-	case 0:
-		return now.Add(20 * time.Minute).Unix()
-	case 1:
-		return now.Add(time.Hour).Unix()
-	case 2:
-		return now.Add(3 * time.Hour).Unix()
-	case 3:
-		tm := now.AddDate(0, 0, 1)
-		return time.Date(tm.Year(), tm.Month(), tm.Day(), 9, 0, 0, 0, now.Location()).Unix()
-	default:
-		return 0
-	}
-}
-
-// renderRemind is the snooze dialog. The return rule is a first-class field
-// because "if no reply" and "regardless" are different contracts.
-func renderRemind(width, height int, names []string, active, field, mode, timeSel int, label string) string {
-	if height < 8 {
-		height = 8
+// renderRemind is the snooze dialog. The return rule is a contract, so it is a
+// field. The time is typed with the shared vim editor and the resolved
+// absolute time is shown while you type, the way Superhuman does it.
+func renderRemind(width, height int, names []string, active, field, mode, pick int, fv fieldView, label string) string {
+	if height < 14 {
+		height = 14
 	}
 	var lines []string
 	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
@@ -1597,9 +1593,19 @@ func renderRemind(width, height int, names []string, active, field, mode, timeSe
 	for _, line := range choiceLines(remindModeLabels(), mode, width) {
 		emit(line)
 	}
-	emit(fieldTitle("Time", field == 1))
-	for _, line := range choiceLines(remindLabels(), timeSel, width) {
+	emit(fieldTitle("Quick picks", field == 1))
+	for _, line := range choiceLines(remindPicks(), pick, width) {
 		emit(line)
+	}
+	emit(fieldTitle("Time", field == 2))
+	emit(renderField(fv, width))
+	switch _, ok, desc := parseReminder(fv.Text, time.Now()); {
+	case ok:
+		emit(keyStGood + "  → " + desc + keyReset)
+	case strings.TrimSpace(fv.Text) == "":
+		emit(keyOverlay + "  → type a time: 3h 2w 1d12h tomorrow, or clear" + keyReset)
+	default:
+		emit(keyStBad + "  → not a time. Units: min h d w mo y" + keyReset)
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit(hintFooter("j/k", "field", "h/l", "choice", "enter", "set reminder", "esc", "cancel"))
@@ -1818,10 +1824,12 @@ func runPicker() int {
 	confirmName := ""
 	confirmSel := 1
 	pendingT := false
+	var commitRemind func()
 	reminding := false
-	remindField := 1
+	remindField := 2
 	remindMode := 0
 	remindSel := 0
+	remindEd := newEditor("")
 	remindPaneID := ""
 	remindLabel := ""
 	noting := false
@@ -1864,6 +1872,119 @@ func runPicker() int {
 		}
 		_ = saveStore(st)
 	}
+
+	// commitRemind parses the typed time and applies the snooze contract.
+	commitRemind = func() {
+		due, ok, desc := parseReminder(remindEd.String(), time.Now())
+		if !ok {
+			status = "not a time. Units: min h d w mo y"
+			return
+		}
+		ps := st.ensurePane(remindPaneID)
+		if due > 0 {
+			state := baselineState(liveStatusWord(frozen, remindPaneID))
+			ps.RemindAt = due
+			ps.SnoozeMode = remindModeOpts()[remindMode]
+			ps.SnoozeState = state
+			ps.Done = true
+			ps.DoneAt = time.Now().Unix()
+			ps.DoneState = state
+			st.removeFromInbox(remindPaneID)
+			status = "reminder set (" + desc + "): " + remindLabel
+		} else if ps.RemindAt > 0 {
+			// Clear cancels the snooze and returns the thread now.
+			ps.RemindAt = 0
+			ps.SnoozeMode = ""
+			ps.SnoozeState = ""
+			ps.Done = false
+			st.addToInbox(remindPaneID)
+			status = "reminder cleared: " + remindLabel
+		} else {
+			status = "no reminder set: " + remindLabel
+		}
+		_ = saveStore(st)
+		reminding = false
+		rebuild()
+	}
+
+	// activeEd reports which vim editor owns the next key, if any.
+	activeEd := func() *editor {
+		if noting {
+			return noteEd
+		}
+		if searching {
+			return searchEd
+		}
+		if creating && formField == 0 {
+			return formEd
+		}
+		if reminding && remindField == 2 {
+			return remindEd
+		}
+		return nil
+	}
+
+	// Keys arrive through a channel so a held j can wait for its pair without
+	// blocking the rest of the loop.
+	keyCh := make(chan []byte, 16)
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, err := tty.Read(buf)
+			if err != nil || n == 0 {
+				close(keyCh)
+				return
+			}
+			b := make([]byte, n)
+			copy(b, buf[:n])
+			keyCh <- b
+		}
+	}()
+
+	// Jev scores new arrivals in the background. The candidate rows are copied
+	// on this thread, so the goroutine never touches shared state.
+	jevCh := make(chan map[string]jevScore, 1)
+	if jevEnabled() {
+		cand := collectRows(frozen, st)
+		nowJ := time.Now().Unix()
+		var fresh []row
+		for _, r := range cand {
+			if !inInbox(r, nowJ) {
+				continue
+			}
+			if st.Jev != nil && st.Jev.ScoreKey[r.PaneID] == jevRowKey(r) {
+				continue
+			}
+			fresh = append(fresh, r)
+		}
+		if len(fresh) > 0 {
+			go func() {
+				if sc := jevScoreRows(fresh, 2500*time.Millisecond); len(sc) > 0 {
+					jevCh <- sc
+				}
+			}()
+		}
+	}
+	applyJev := func(sc map[string]jevScore) {
+		if len(sc) == 0 {
+			return
+		}
+		st.ensureJev()
+		if st.Jev.Scores == nil {
+			st.Jev.Scores = map[string]float64{}
+		}
+		if st.Jev.ScoreKey == nil {
+			st.Jev.ScoreKey = map[string]string{}
+		}
+		for id, v := range sc {
+			st.Jev.Scores[id] = v.noul
+			st.Jev.ScoreKey[id] = v.key
+		}
+		st.Jev.Proxy = jevProxyBin()
+		_ = saveStore(st)
+		rebuild()
+	}
+
 	for {
 		rows := filterByState(allRows, stateFilter)
 		if q := strings.TrimSpace(searchEd.String()); q != "" {
@@ -1884,7 +2005,7 @@ func runPicker() int {
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
-			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, remindLabel)
+			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, remindEd.view("at", remindField == 2), remindLabel)
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.view("note", true))
 		case creating:
@@ -1899,20 +2020,53 @@ func runPicker() int {
 		}
 		tty.WriteString(frame)
 
-		buf := make([]byte, 64)
-		n, err := tty.Read(buf)
-		if err != nil || n == 0 {
-			return 0
+		var key string
+		if ed := activeEd(); ed != nil && ed.PendingJ() {
+			// One j is held. Give its pair a short window, then let it through.
+			select {
+			case b, ok := <-keyCh:
+				if !ok {
+					return 0
+				}
+				key = logicalKey(b)
+			case <-time.After(150 * time.Millisecond):
+				ed.FlushJ()
+				continue
+			}
+		} else {
+			select {
+			case b, ok := <-keyCh:
+				if !ok {
+					return 0
+				}
+				key = logicalKey(b)
+			case sc := <-jevCh:
+				applyJev(sc)
+				continue
+			}
 		}
-		b := buf[:n]
-		key := logicalKey(b)
 		if key == "" {
 			continue
 		}
 		if reminding && !showHelp {
+			if remindField == 2 {
+				switch remindEd.feed(key) {
+				case actAccept:
+					commitRemind()
+				case actUp:
+					if remindField > 0 {
+						remindField--
+					}
+				case actOut, actCancel:
+					reminding = false
+					status = ""
+				}
+				continue
+			}
+			picks := remindPicks()
 			switch key {
 			case "j", "down":
-				if remindField < 1 {
+				if remindField < 2 {
 					remindField++
 				}
 			case "k", "up":
@@ -1923,45 +2077,21 @@ func runPicker() int {
 				if remindField == 0 {
 					remindMode = cycle(len(remindModeOpts()), remindMode, -1)
 				} else {
-					remindSel = cycle(len(remindLabels()), remindSel, -1)
+					remindSel = cycle(len(picks), remindSel, -1)
+					remindEd = newEditor(picks[remindSel])
 				}
 			case "l", "right":
 				if remindField == 0 {
 					remindMode = cycle(len(remindModeOpts()), remindMode, 1)
 				} else {
-					remindSel = cycle(len(remindLabels()), remindSel, 1)
+					remindSel = cycle(len(picks), remindSel, 1)
+					remindEd = newEditor(picks[remindSel])
 				}
 			case "enter":
-				ps := st.ensurePane(remindPaneID)
-				now := time.Now()
-				due := computeRemindAt(remindSel, now)
-				if due > 0 {
-					state := baselineState(liveStatusWord(frozen, remindPaneID))
-					ps.RemindAt = due
-					ps.SnoozeMode = remindModeOpts()[remindMode]
-					ps.SnoozeState = state
-					ps.Done = true
-					ps.DoneAt = now.Unix()
-					ps.DoneState = state
-					st.removeFromInbox(remindPaneID)
-					status = fmt.Sprintf("reminder set (%s, %s): %s",
-						remindLabels()[remindSel], strings.ToLower(remindModeLabels()[remindMode]), remindLabel)
-				} else if ps.RemindAt > 0 {
-					// Clear cancels the snooze and returns the thread now.
-					ps.RemindAt = 0
-					ps.SnoozeMode = ""
-					ps.SnoozeState = ""
-					ps.Done = false
-					st.addToInbox(remindPaneID)
-					status = "reminder cleared: " + remindLabel
-				} else {
-					status = "no reminder set: " + remindLabel
-				}
-				_ = saveStore(st)
-				reminding = false
-				rebuild()
+				commitRemind()
 			case "esc":
 				reminding = false
+				status = ""
 			}
 			continue
 		}
@@ -2174,6 +2304,9 @@ func runPicker() int {
 			if len(rows) == 0 {
 				return 0
 			}
+			if views(st)[tab].Kind == "inbox" {
+				st.jevLearn(rows[sel], rows[:sel])
+			}
 			target := rows[sel].PaneID
 			tty.WriteString("\x1b[2J\x1b[H")
 			if err := jumpTo(target); err != nil {
@@ -2228,6 +2361,9 @@ func runPicker() int {
 				ps.SnoozeState = ""
 				ps.DoneState = baselineState(liveStatusWord(frozen, r.PaneID))
 				st.removeFromInbox(r.PaneID)
+				if views(st)[tab].Kind == "inbox" {
+					st.jevLearn(r, rows[:sel])
+				}
 				status = "done: " + r.Label + " (press e again to undo)"
 			} else {
 				ps.Done = false
@@ -2241,9 +2377,10 @@ func runPicker() int {
 				break
 			}
 			reminding = true
-			remindField = 1
+			remindField = 2
 			remindMode = 0
 			remindSel = 0
+			remindEd = newEditor("")
 			remindPaneID = rows[sel].PaneID
 			remindLabel = rows[sel].Label
 			status = ""

@@ -52,6 +52,7 @@ type editor struct {
 	pending   rune // 'd', 'c', 'y', 'r', 'f', 'F', 't', 'T'
 	pendingOp rune // operator held while a find motion waits for its char
 	count     int  // numeric prefix
+	pendingJ  bool // insert mode saw one j and may be half of jj
 
 	reg []rune
 
@@ -76,6 +77,18 @@ func newEditor(s string) *editor {
 }
 
 func (e *editor) String() string { return string(e.text) }
+
+// PendingJ reports whether insert mode is holding one j for a possible jj.
+func (e *editor) PendingJ() bool { return e.pendingJ }
+
+// FlushJ inserts a held j when no second j arrived inside the window.
+func (e *editor) FlushJ() {
+	if !e.pendingJ {
+		return
+	}
+	e.pendingJ = false
+	e.insertRunes([]rune{'j'})
+}
 
 func (e *editor) pushUndo() {
 	e.undo = append(e.undo, editSnap{text: append([]rune(nil), e.text...), cursor: e.cursor})
@@ -586,8 +599,18 @@ func (e *editor) feed(key string) editAction {
 }
 
 func (e *editor) feedInsert(key string) editAction {
+	// jj leaves insert mode. The first j is held back so the pair can act as
+	// one key; the caller flushes it on a timeout when no second j arrives.
+	if e.pendingJ {
+		e.pendingJ = false
+		if key == "j" {
+			return e.feedInsert("esc")
+		}
+		e.insertRunes([]rune{'j'})
+	}
 	switch key {
 	case "esc":
+		e.pendingJ = false
 		e.endChange()
 		e.mode = modeNormal
 		if e.cursor > 0 {
@@ -638,6 +661,10 @@ func (e *editor) feedInsert(key string) editAction {
 		if e.cursor < len(e.text) {
 			e.cursor++
 		}
+		return actStay
+	}
+	if key == "j" && e.mode == modeInsert {
+		e.pendingJ = true
 		return actStay
 	}
 	if r, ok := e.printable(key); ok {

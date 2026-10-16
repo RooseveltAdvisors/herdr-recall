@@ -201,3 +201,46 @@ func TestInsertTypesLetters(t *testing.T) {
 		t.Fatalf("typed jk = %q", e.String())
 	}
 }
+
+func TestJJExitsInsert(t *testing.T) {
+	e := newEditor("")
+	typeKeys(e, "ab")
+	if a := typeKeys(e, "j"); a != actStay {
+		t.Fatalf("first j action = %v", a)
+	}
+	if e.String() != "ab" {
+		t.Fatalf("held j leaked into text: %q", e.String())
+	}
+	if !e.PendingJ() {
+		t.Fatal("j was not held")
+	}
+	if a := typeKeys(e, "j"); a != actStay {
+		t.Fatalf("second j action = %v", a)
+	}
+	if e.mode != modeNormal {
+		t.Fatalf("mode after jj = %v, want normal", e.mode)
+	}
+	if e.String() != "ab" {
+		t.Fatalf("jj leaked into text: %q", e.String())
+	}
+}
+
+func TestFlushJInsertsOneJ(t *testing.T) {
+	e := newEditor("")
+	typeKeys(e, "j")
+	e.FlushJ()
+	if e.String() != "j" || e.PendingJ() {
+		t.Fatalf("flush produced %q, held %v", e.String(), e.PendingJ())
+	}
+}
+
+func TestJThenOtherKeyInsertsBoth(t *testing.T) {
+	e := newEditor("")
+	typeKeys(e, "jk")
+	if e.String() != "jk" {
+		t.Fatalf("text = %q, want jk", e.String())
+	}
+	if e.mode != modeInsert {
+		t.Fatalf("mode = %v, want insert", e.mode)
+	}
+}
