@@ -167,9 +167,15 @@ func loadSnapshot() (*snapshot, error) {
 // ---------------------------------------------------------------------------
 
 type paneStat struct {
-	Visits int64  `json:"visits"`
-	Last   int64  `json:"last"`
-	Label  string `json:"label,omitempty"`
+	Visits        int64  `json:"visits"`
+	Last          int64  `json:"last"`
+	Label         string `json:"label,omitempty"`
+	Note          string `json:"note,omitempty"`
+	ManualBlocked bool   `json:"manual_blocked,omitempty"`
+	RemindAt      int64  `json:"remind_at,omitempty"`
+	Done          bool   `json:"done,omitempty"`
+	DoneAt        int64  `json:"done_at,omitempty"`
+	DoneState     string `json:"done_state,omitempty"`
 }
 
 type customTab struct {
@@ -238,7 +244,7 @@ func defaultTabs() []customTab {
 }
 
 func views(st *store) []view {
-	out := []view{{Kind: "all"}, {Kind: "favorites"}, {Kind: "map"}}
+	out := []view{{Kind: "inbox"}, {Kind: "all"}, {Kind: "favorites"}}
 	for i := range st.Tabs {
 		out = append(out, view{Kind: "custom", Idx: i})
 	}
@@ -247,12 +253,12 @@ func views(st *store) []view {
 
 func viewName(st *store, v view) string {
 	switch v.Kind {
+	case "inbox":
+		return "Inbox"
 	case "all":
 		return "All"
 	case "favorites":
 		return "Favorites"
-	case "map":
-		return "Map"
 	default:
 		if v.Idx >= 0 && v.Idx < len(st.Tabs) {
 			return st.Tabs[v.Idx].Name
@@ -271,11 +277,6 @@ func viewNames(st *store) []string {
 }
 
 func openTab(st *store) int {
-	for i, v := range views(st) {
-		if v.Kind == "custom" && st.Tabs[v.Idx].Name == "Recent" {
-			return i
-		}
-	}
 	return 0
 }
 
@@ -309,10 +310,24 @@ func (s *store) prune(keep int) {
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ts > all[j].ts })
 	for _, e := range all[keep:] {
-		if !s.isFavorite(e.id) {
+		ps := s.Panes[e.id]
+		keepPin := ps != nil && (ps.Note != "" || ps.ManualBlocked || ps.RemindAt > 0)
+		if !s.isFavorite(e.id) && !keepPin {
 			delete(s.Panes, e.id)
 		}
 	}
+}
+
+func (s *store) ensurePane(id string) *paneStat {
+	if s.Panes == nil {
+		s.Panes = map[string]*paneStat{}
+	}
+	ps := s.Panes[id]
+	if ps == nil {
+		ps = &paneStat{}
+		s.Panes[id] = ps
+	}
+	return ps
 }
 
 func (s *store) isFavorite(id string) bool {
@@ -352,18 +367,29 @@ func recordFocus() (string, error) {
 	label := paneLabel(snap, id)
 	st := loadStore()
 	now := time.Now().Unix()
-	ps := st.Panes[id]
-	if ps == nil {
-		ps = &paneStat{}
-		st.Panes[id] = ps
-	}
+	ps := st.ensurePane(id)
 	ps.Visits++
 	ps.Last = now
 	if label != "" {
 		ps.Label = label
 	}
+	if ps.Done && liveStatusWord(snap, id) == "working" {
+		ps.Done = false
+	}
 	st.prune(200)
 	return id, saveStore(st)
+}
+
+func liveStatusWord(s *snapshot, id string) string {
+	if s == nil {
+		return ""
+	}
+	for _, p := range s.Panes {
+		if p.PaneID == id {
+			return statusWord(p.AgentStatus)
+		}
+	}
+	return ""
 }
 
 func paneLabel(s *snapshot, id string) string {
@@ -435,19 +461,20 @@ func focusPane(paneID string) error {
 // ---------------------------------------------------------------------------
 
 type row struct {
-	Kind        string
-	PaneID      string
-	TabID       string
-	WorkspaceID string
-	Label       string
-	Section     string
-	Visits      int64
-	Last        int64
-	Status      string
-	Fav         bool
-	Depth       int
-	Expanded    bool
-	Current     bool
+	PaneID        string
+	WorkspaceID   string
+	Label         string
+	Note          string
+	Section       string
+	Visits        int64
+	Last          int64
+	Status        string
+	Fav           bool
+	ManualBlocked bool
+	RemindAt      int64
+	Done          bool
+	DoneAt        int64
+	DoneState     string
 }
 
 // displayLabel is the Herdr tab name only, the same label prefix k uses
@@ -474,189 +501,6 @@ func displayLabel(s *snapshot, id, stored string) string {
 		}
 	}
 	return id
-}
-
-func mapRows(s *snapshot, st *store, expanded map[string]bool, query, state string) []row {
-	open := map[string]bool{}
-	for id, on := range expanded {
-		open[id] = on
-	}
-	if strings.TrimSpace(query) != "" || state != "" {
-		for _, w := range s.Workspaces {
-			open[w.WorkspaceID] = true
-		}
-	}
-	full := buildMap(s, st, open)
-	if strings.TrimSpace(query) == "" && state == "" {
-		return full
-	}
-	return keepMapMatches(full, query, state)
-}
-
-func buildMap(s *snapshot, st *store, expanded map[string]bool) []row {
-	panesByTab := map[string][]paneRec{}
-	for _, p := range s.Panes {
-		panesByTab[p.TabID] = append(panesByTab[p.TabID], p)
-	}
-	tabsByWS := map[string][]tabRec{}
-	for _, t := range s.Tabs {
-		tabsByWS[t.WorkspaceID] = append(tabsByWS[t.WorkspaceID], t)
-	}
-	var out []row
-	for _, w := range s.Workspaces {
-		name := strings.TrimSpace(w.Label)
-		if name == "" {
-			name = w.WorkspaceID
-		}
-		tabs := tabsByWS[w.WorkspaceID]
-		n := 0
-		for _, t := range tabs {
-			n += len(panesByTab[t.TabID])
-		}
-		status := ""
-		for _, t := range tabs {
-			for _, p := range panesByTab[t.TabID] {
-				if rank := statusWord(p.AgentStatus); rank == "blocked" || (status == "" && rank != "") {
-					status = p.AgentStatus
-				}
-			}
-		}
-		out = append(out, row{
-			Kind: "workspace", WorkspaceID: w.WorkspaceID,
-			Label: fmt.Sprintf("%s (%d)", name, n), Status: status,
-			Depth: 0, Expanded: expanded[w.WorkspaceID], Current: w.Focused,
-		})
-		if !expanded[w.WorkspaceID] {
-			continue
-		}
-		for _, t := range tabs {
-			label := strings.TrimSpace(t.Label)
-			if label == "" {
-				label = t.TabID
-			}
-			panes := panesByTab[t.TabID]
-			tabStatus := ""
-			if len(panes) > 0 {
-				tabStatus = panes[0].AgentStatus
-			}
-			active := ""
-			if len(panes) == 1 {
-				active = panes[0].PaneID
-			}
-			out = append(out, row{
-				Kind: "tab", TabID: t.TabID, WorkspaceID: w.WorkspaceID, PaneID: active,
-				Label: label, Status: tabStatus, Depth: 1, Current: t.Focused,
-			})
-			if len(panes) < 2 {
-				continue
-			}
-			for i, p := range panes {
-				label := paneBranchLabel(p, name)
-				if label == "" {
-					label = fmt.Sprintf("pane %d", i+1)
-				}
-				out = append(out, row{
-					Kind: "pane", PaneID: p.PaneID, TabID: t.TabID, WorkspaceID: w.WorkspaceID,
-					Label: label, Status: p.AgentStatus, Depth: 2,
-					Fav: st.isFavorite(p.PaneID), Current: p.Focused,
-				})
-			}
-		}
-	}
-	return out
-}
-
-func rowPrefix(r row) string {
-	if r.Kind != "workspace" && r.Kind != "tab" && r.Kind != "pane" {
-		return ""
-	}
-	mark := " "
-	if r.Current {
-		mark = "\u25c6"
-	}
-	caret := "  "
-	if r.Kind == "workspace" {
-		if r.Expanded {
-			caret = "\u25bc "
-		} else {
-			caret = "\u25b6 "
-		}
-	}
-	return strings.Repeat("  ", r.Depth) + mark + caret
-}
-
-func paneBranchLabel(p paneRec, wsLabel string) string {
-	title := strings.TrimSpace(p.TerminalTitleStrip)
-	if title == "" {
-		title = strings.TrimSpace(p.TerminalTitle)
-	}
-	title = strings.TrimPrefix(title, "\u03c0 - ")
-	title = strings.TrimPrefix(title, "pi - ")
-	if title == "" || strings.EqualFold(title, wsLabel) {
-		return ""
-	}
-	return title
-}
-
-func keepMapMatches(rows []row, query, state string) []row {
-	q := strings.ToLower(strings.TrimSpace(query))
-	hit := make([]bool, len(rows))
-	for i := len(rows) - 1; i >= 0; i-- {
-		r := rows[i]
-		textOK := q == "" || strings.Contains(strings.ToLower(r.Label), q)
-		stateOK := state == "" || statusWord(r.Status) == state
-		child := false
-		for j := i + 1; j < len(rows) && rows[j].Depth > r.Depth; j++ {
-			if hit[j] {
-				child = true
-				break
-			}
-		}
-		if r.Kind == "pane" {
-			hit[i] = textOK && stateOK
-		} else {
-			hit[i] = child || (textOK && state == "")
-		}
-	}
-	var out []row
-	for i, r := range rows {
-		if hit[i] {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-func jumpRow(r row) error {
-	switch r.Kind {
-	case "workspace":
-		_, err := herdr("workspace", "focus", r.WorkspaceID)
-		return err
-	case "tab":
-		if r.PaneID != "" {
-			return focusPane(r.PaneID)
-		}
-		if r.WorkspaceID != "" {
-			_, _ = herdr("workspace", "focus", r.WorkspaceID)
-		}
-		_, err := herdr("tab", "focus", r.TabID)
-		return err
-	default:
-		return focusPane(r.PaneID)
-	}
-}
-
-func tabTitle(tab int) string {
-	switch tab {
-	case tabMostUsed:
-		return "Most used"
-	case tabFavorites:
-		return "Favorites"
-	case tabAll:
-		return "All"
-	default:
-		return "Recent"
-	}
 }
 
 func collectRows(s *snapshot, st *store) []row {
@@ -694,9 +538,21 @@ func collectRows(s *snapshot, st *store) []row {
 			label = ps.Label
 		}
 		label = displayLabel(s, id, label)
-		var visits, last int64
+		var visits, last, remindAt, doneAt int64
+		var note, doneState string
+		var manualBlocked, done bool
 		if ps != nil {
 			visits, last = ps.Visits, ps.Last
+			note = ps.Note
+			manualBlocked = ps.ManualBlocked
+			remindAt = ps.RemindAt
+			done = ps.Done
+			doneAt = ps.DoneAt
+			doneState = ps.DoneState
+		}
+		status := statusOf[id]
+		if manualBlocked {
+			status = "blocked"
 		}
 		ws := ""
 		for _, p := range s.Panes {
@@ -706,9 +562,10 @@ func collectRows(s *snapshot, st *store) []row {
 			}
 		}
 		out = append(out, row{
-			PaneID: id, WorkspaceID: ws, Label: label,
-			Visits: visits, Last: last, Status: statusOf[id],
-			Fav: st.isFavorite(id),
+			PaneID: id, WorkspaceID: ws, Label: label, Note: note,
+			Visits: visits, Last: last, Status: status,
+			Fav: st.isFavorite(id), ManualBlocked: manualBlocked,
+			RemindAt: remindAt, Done: done, DoneAt: doneAt, DoneState: doneState,
 		})
 	}
 	return out
@@ -765,9 +622,72 @@ func rowAllowed(r row, ct customTab, here string) bool {
 	return true
 }
 
+func inInbox(r row, now int64) bool {
+	if r.ManualBlocked {
+		return true
+	}
+	if r.RemindAt > now {
+		return false
+	}
+	if r.RemindAt > 0 && r.RemindAt <= now {
+		return true
+	}
+	sw := statusWord(r.Status)
+	if !r.Done {
+		return r.Last > 0 || r.Note != "" || sw == "blocked" || sw == "done"
+	}
+	if sw == "blocked" && r.DoneState != "blocked" {
+		return true
+	}
+	if sw == "done" && r.DoneState != "done" {
+		return true
+	}
+	if sw == "working" && r.DoneState != "working" && r.DoneState != "" {
+		return true
+	}
+	return false
+}
+
+func inboxBucket(r row, now int64) int {
+	if r.ManualBlocked || (r.RemindAt > 0 && r.RemindAt <= now) || statusWord(r.Status) == "blocked" {
+		return 0
+	}
+	if statusWord(r.Status) == "done" {
+		return 1
+	}
+	return 2
+}
+
+func sortInbox(list []row, now int64) {
+	sort.SliceStable(list, func(i, j int) bool {
+		bi, bj := inboxBucket(list[i], now), inboxBucket(list[j], now)
+		if bi != bj {
+			return bi < bj
+		}
+		if list[i].Last != list[j].Last {
+			return list[i].Last > list[j].Last
+		}
+		return strings.ToLower(list[i].Label) < strings.ToLower(list[j].Label)
+	})
+}
+
 func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 	all := collectRows(s, st)
+	now := time.Now().Unix()
 	switch v.Kind {
+	case "inbox":
+		var list []row
+		for _, r := range all {
+			if inInbox(r, now) {
+				list = append(list, r)
+			}
+		}
+		if mode == sortDefault {
+			sortInbox(list, now)
+			return list
+		}
+		sortBy(list, sortHow(mode, "newest"))
+		return list
 	case "favorites":
 		var list []row
 		for _, r := range all {
@@ -1006,18 +926,19 @@ func renderHelp(width, height int) string {
 	keys := [][2]string{
 		{"j / k / arrows", "move one row, same as prefix k"},
 		{"g / G", "first row / last row"},
-		{"b w i d a", "blocked, working, idle, done, all"},
-		{"/", "search. esc leaves search. arrows and ctrl-n/p move"},
-		{"enter", "switch to the selected pane"},
-		{"h / l", "switch tabs"},
-		{"space", "on Map: fold or open a workspace"},
-		{"f", "pin or unpin the row"},
-		{"n / e / x", "new, edit, or delete a custom tab"},
-		{"s", "on All and Favorites: cycle sort"},
-		{"ctrl+u / ctrl+d", "half page, or clear the search"},
+		{"e", "mark thread done (in Inbox: clear until next change)"},
+		{"z", "snooze / set a reminder (20m, 1h, 3h, tomorrow, clear)"},
+		{"n", "set or edit a sticky note on the selected thread"},
+		{"!", "toggle manual blocked override on the selected thread"},
+		{"m", "mark or unmark favorite (*)"},
+		{"b w i d a", "filter status: blocked, working, idle, done, all"},
+		{"/", "search tab names and sticky notes"},
+		{"h / l", "switch tabs (Inbox, All, Favorites, Recent, ...)"},
+		{"c / r / x", "create, revise, or delete a custom tab"},
+		{"s", "on Inbox, All, and Favorites: cycle sort"},
+		{"ctrl+u / ctrl+d", "half page, or clear search/note"},
 		{"?", "open or close this help"},
-		{"esc", "close help, then close the picker"},
-		{"q", "quit"},
+		{"esc / q", "leave search/modal, then close the picker"},
 	}
 	for _, kv := range keys {
 		emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
@@ -1045,11 +966,39 @@ func filterRows(rows []row, query string) []row {
 	q := strings.ToLower(query)
 	out := make([]row, 0, len(rows))
 	for _, r := range rows {
-		if strings.Contains(strings.ToLower(r.Label), q) {
+		if strings.Contains(strings.ToLower(r.Label), q) || strings.Contains(strings.ToLower(r.Note), q) {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+func formatLabelWithNote(label, note string, labelW int, selected bool) string {
+	if note == "" {
+		return pad(clipTail(label, max(1, labelW-1)), labelW)
+	}
+	maxName := max(4, labelW/2)
+	clippedName := clipTail(label, maxName)
+	nameRunes := len([]rune(clippedName))
+	rem := labelW - nameRunes - 3
+	if rem < 4 {
+		return pad(clipTail(label, max(1, labelW-1)), labelW)
+	}
+	clippedNote := clip(note, rem)
+	if selected {
+		return pad(clippedName+" · "+clippedNote, labelW)
+	}
+	return pad(clippedName+keySub+" · "+clippedNote+keyText, labelW)
+}
+
+func remindBadge(r row, now int64) string {
+	if r.RemindAt <= 0 {
+		return ""
+	}
+	if r.RemindAt <= now {
+		return "!"
+	}
+	return "~"
 }
 
 // renderFrame draws one screenful. Exposed via --render so screenshots and
@@ -1119,6 +1068,7 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 	if labelW < 4 {
 		labelW = 4
 	}
+	now := time.Now().Unix()
 	shown := 0
 	for i, r := range rows {
 		if i < start {
@@ -1140,15 +1090,21 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 			starCell = keyStar + "*" + keyReset + " "
 		}
 		word := statusWord(r.Status)
-		glyph, scol := statusMark(r.Status)
-		// Prefix k puts the status dot immediately left of the name. The word
-		// stays in its own column.
-		prefix := rowPrefix(r)
-		nameW := labelW - len([]rune(prefix))
-		if nameW < 4 {
-			nameW = 4
+		badge := remindBadge(r, now)
+		if badge != "" {
+			if word != "" {
+				word = badge + " " + word
+			} else {
+				word = badge
+			}
 		}
-		labelCell := pad(prefix+clipTail(r.Label, nameW), labelW)
+		glyph, scol := statusMark(r.Status)
+		if badge == "!" && word == "!" {
+			scol = keyStar
+		}
+		// Prefix k puts the status dot immediately left of the name. The word
+		// stays in its own column, and any sticky note sits dim beside the name.
+		labelCell := formatLabelWithNote(r.Label, r.Note, labelW, i == sel)
 		dotCell := scol + glyph
 		if i == sel {
 			dotCell += keySelectFg + " "
@@ -1181,9 +1137,12 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 		shown++
 	}
 	if len(rows) == 0 {
-		if len(names) > 0 && names[active] == "Favorites" {
-			emit(keyOverlay + "  Nothing pinned. Press f on a pane to pin it." + keyReset)
-		} else {
+		switch {
+		case len(names) > 0 && names[active] == "Inbox":
+			emit(keyOverlay + "  Inbox zero. All active threads are triaged." + keyReset)
+		case len(names) > 0 && names[active] == "Favorites":
+			emit(keyOverlay + "  Nothing pinned. Press m on a pane to mark it." + keyReset)
+		default:
 			emit(keyOverlay + "  No panes in this tab." + keyReset)
 		}
 	}
@@ -1191,17 +1150,14 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 	if searching {
 		emit(hintFooter("enter", "switch", "↑↓", "move", "ctrl+u", "clear", "esc", "back"))
 	} else {
-		emit(hintFooter("enter", "switch", "/", "search", "b/w/i/d/a", "states", "j/k/↑↓", "move", "esc", "close"))
+		emit(hintFooter("enter", "switch", "e", "done", "z", "remind", "n", "note", "!", "block", "/", "search"))
 	}
-	extra := "h/l tabs   f pin   n new"
-	if len(names) > 0 && names[active] == "Map" {
-		extra += "   space fold"
-	}
-	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
+	extra := "h/l tabs   m mark   b/w/i/d/a states   c new"
+	if len(names) > 0 && (names[active] == "Inbox" || names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
 	}
-	if len(names) > 0 && names[active] != "All" && names[active] != "Favorites" && names[active] != "Map" {
-		extra += "   e edit   x delete"
+	if len(names) > 0 && names[active] != "Inbox" && names[active] != "All" && names[active] != "Favorites" {
+		extra += "   r revise   x delete"
 	}
 	emit(keyOverlay + extra + keyReset)
 	if status != "" {
@@ -1438,6 +1394,75 @@ func renderConfirm(width, height int, names []string, active, sel int, name stri
 	return paint(lines)
 }
 
+func remindLabels() []string {
+	return []string{"20m", "1h", "3h", "Tomorrow 9am", "Clear"}
+}
+
+func computeRemindAt(choice int, now time.Time) int64 {
+	switch choice {
+	case 0:
+		return now.Add(20 * time.Minute).Unix()
+	case 1:
+		return now.Add(time.Hour).Unix()
+	case 2:
+		return now.Add(3 * time.Hour).Unix()
+	case 3:
+		tm := now.AddDate(0, 0, 1)
+		return time.Date(tm.Year(), tm.Month(), tm.Day(), 9, 0, 0, 0, now.Location()).Unix()
+	default:
+		return 0
+	}
+}
+
+func renderRemind(width, height int, names []string, active, sel int, label string) string {
+	if height < 8 {
+		height = 8
+	}
+	var lines []string
+	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
+	emit(tabBar(names, active))
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit("")
+	emit(keyText + keyBold + "  Remind me about " + label + keyReset)
+	emit(keyOverlay + "  Hides this thread from Inbox until the reminder is due." + keyReset)
+	emit("")
+	for _, line := range choiceLines(remindLabels(), sel, width) {
+		emit(line)
+	}
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit(hintFooter("h/l", "choose", "enter", "set reminder", "esc", "cancel"))
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return paint(lines)
+}
+
+func renderNote(width, height int, names []string, active int, label, note string) string {
+	if height < 8 {
+		height = 8
+	}
+	var lines []string
+	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
+	emit(tabBar(names, active))
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit("")
+	emit(keyText + keyBold + "  Sticky note for " + label + keyReset)
+	emit(keyOverlay + "  Shows beside the tab name so you remember what this thread is waiting on." + keyReset)
+	emit("")
+	if note == "" {
+		emit(keySelectBg + keyOverlay + "  type a sticky note (empty clears) " + keyReset)
+	} else {
+		emit(keySelectBg + keySelectFg + keyBold + "  " + note + " " + keyReset)
+	}
+	emit("")
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit(hintFooter("enter", "save", "ctrl+u", "clear", "esc", "cancel"))
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return paint(lines)
+}
+
 // clipTail keeps the distinguishing end of a name: "portal-internal-scheduler"
 // shows its tail, never the "portal-int…" head clip.
 func clipTail(s string, n int) string {
@@ -1611,16 +1636,20 @@ func runPicker() int {
 	}
 	tab := openTab(st)
 	sortMode := sortDefault
-	expanded := map[string]bool{}
-	if frozen != nil && frozen.FocusedWorkspace != "" {
-		expanded[frozen.FocusedWorkspace] = true
-	}
 	creating := false
 	editing := false
 	editIdx := -1
 	formField := 0
 	confirmName := ""
 	confirmSel := 1
+	reminding := false
+	remindSel := 0
+	remindPaneID := ""
+	remindLabel := ""
+	noting := false
+	notePaneID := ""
+	noteLabel := ""
+	noteText := ""
 	newName, newSort, newOnly, newWhere := "", "newest", "", ""
 	newLimit := 20
 	var allRows []row
@@ -1636,14 +1665,9 @@ func runPicker() int {
 	}
 	rebuild()
 	for {
-		var rows []row
-		if views(st)[tab].Kind == "map" {
-			rows = mapRows(frozen, st, expanded, query, stateFilter)
-		} else {
-			rows = filterByState(allRows, stateFilter)
-			if q := strings.TrimSpace(query); q != "" {
-				rows = filterRows(rows, q)
-			}
+		rows := filterByState(allRows, stateFilter)
+		if q := strings.TrimSpace(query); q != "" {
+			rows = filterRows(rows, q)
 		}
 		if sel >= len(rows) {
 			sel = len(rows) - 1
@@ -1658,6 +1682,10 @@ func runPicker() int {
 			frame = renderHelp(w, h)
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
+		case reminding:
+			frame = renderRemind(w, h, viewNames(st), tab, remindSel, remindLabel)
+		case noting:
+			frame = renderNote(w, h, viewNames(st), tab, noteLabel, noteText)
 		case creating:
 			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newLimit, newOnly, newWhere, status)
 		default:
@@ -1678,6 +1706,64 @@ func runPicker() int {
 		b := buf[:n]
 		key := logicalKey(b)
 		if key == "" {
+			continue
+		}
+		if reminding && !showHelp {
+			opts := remindLabels()
+			switch key {
+			case "left", "h", "up", "k":
+				remindSel = cycle(len(opts), remindSel, -1)
+			case "right", "l", "down", "j":
+				remindSel = cycle(len(opts), remindSel, 1)
+			case "enter":
+				ps := st.ensurePane(remindPaneID)
+				now := time.Now()
+				due := computeRemindAt(remindSel, now)
+				ps.RemindAt = due
+				if due > 0 {
+					ps.Done = true
+					ps.DoneAt = now.Unix()
+					ps.DoneState = liveStatusWord(frozen, remindPaneID)
+					status = fmt.Sprintf("reminder set (%s): %s", opts[remindSel], remindLabel)
+				} else {
+					status = "reminder cleared: " + remindLabel
+				}
+				_ = saveStore(st)
+				reminding = false
+				rebuild()
+			case "esc":
+				reminding = false
+			}
+			continue
+		}
+		if noting && !showHelp {
+			switch key {
+			case "esc":
+				noting = false
+			case "enter":
+				ps := st.ensurePane(notePaneID)
+				ps.Note = strings.TrimSpace(noteText)
+				if ps.Note != "" {
+					ps.Done = false
+					status = "note saved: " + noteLabel
+				} else {
+					status = "note cleared: " + noteLabel
+				}
+				_ = saveStore(st)
+				noting = false
+				rebuild()
+			case "ctrl-u":
+				noteText = ""
+			case "bs":
+				rs := []rune(noteText)
+				if len(rs) > 0 {
+					noteText = string(rs[:len(rs)-1])
+				}
+			default:
+				if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
+					noteText += key
+				}
+			}
 			continue
 		}
 		if confirmName != "" && !showHelp {
@@ -1792,9 +1878,9 @@ func runPicker() int {
 			if len(rows) == 0 {
 				return 0
 			}
-			target := rows[sel]
+			target := rows[sel].PaneID
 			tty.WriteString("\x1b[2J\x1b[H")
-			if err := jumpRow(target); err != nil {
+			if err := jumpTo(target); err != nil {
 				// keep the frame open with the reason instead of failing silently
 				status = "jump: " + err.Error()
 				continue
@@ -1816,21 +1902,74 @@ func runPicker() int {
 			rebuild()
 		case key == "s" && !searching && !showHelp:
 			v := views(st)[tab]
-			if v.Kind != "all" && v.Kind != "favorites" {
+			if v.Kind != "inbox" && v.Kind != "all" && v.Kind != "favorites" {
 				break
 			}
 			sortMode = (sortMode + 1) % sortCount
 			sel = 0
 			status = "sort: " + sortLabel(sortHow(sortMode, "newest"))
 			rebuild()
+		case key == "e" && !searching && !showHelp:
+			if len(rows) == 0 {
+				break
+			}
+			r := rows[sel]
+			ps := st.ensurePane(r.PaneID)
+			now := time.Now().Unix()
+			if views(st)[tab].Kind == "inbox" || inInbox(r, now) {
+				ps.Done = true
+				ps.DoneAt = now
+				ps.ManualBlocked = false
+				ps.RemindAt = 0
+				ps.DoneState = liveStatusWord(frozen, r.PaneID)
+				status = "done: " + r.Label
+			} else {
+				ps.Done = false
+				status = "moved to inbox: " + r.Label
+			}
+			_ = saveStore(st)
+			rebuild()
+		case key == "z" && !searching && !showHelp:
+			if len(rows) == 0 {
+				break
+			}
+			reminding = true
+			remindSel = 0
+			remindPaneID = rows[sel].PaneID
+			remindLabel = rows[sel].Label
+			status = ""
 		case key == "n" && !searching && !showHelp:
+			if len(rows) == 0 {
+				break
+			}
+			noting = true
+			notePaneID = rows[sel].PaneID
+			noteLabel = rows[sel].Label
+			noteText = rows[sel].Note
+			status = ""
+		case key == "!" && !searching && !showHelp:
+			if len(rows) == 0 {
+				break
+			}
+			r := rows[sel]
+			ps := st.ensurePane(r.PaneID)
+			ps.ManualBlocked = !ps.ManualBlocked
+			if ps.ManualBlocked {
+				ps.Done = false
+				status = "marked blocked: " + r.Label
+			} else {
+				status = "cleared manual blocked: " + r.Label
+			}
+			_ = saveStore(st)
+			rebuild()
+		case key == "c" && !searching && !showHelp:
 			creating = true
 			editing = false
 			editIdx = -1
 			formField = 0
 			newName, newSort, newOnly, newWhere, newLimit = "", "newest", "", "", 20
 			status = ""
-		case key == "e" && !searching && !showHelp:
+		case key == "r" && !searching && !showHelp:
 			v := views(st)[tab]
 			if v.Kind != "custom" {
 				break
@@ -1881,18 +2020,13 @@ func runPicker() int {
 		case key == "a" && !searching && !showHelp:
 			stateFilter = ""
 			query = ""
-		case key == " " && !searching && !showHelp:
-			if views(st)[tab].Kind == "map" && len(rows) > 0 && rows[sel].Kind == "workspace" {
-				id := rows[sel].WorkspaceID
-				expanded[id] = !expanded[id]
-			}
-		case key == "f" && !searching:
+		case key == "m" && !searching:
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
 				if st.toggleFavorite(id) {
-					status = "favorited " + id
+					status = "marked favorite: " + rows[sel].Label
 				} else {
-					status = "unfavorited " + id
+					status = "unmarked favorite: " + rows[sel].Label
 				}
 				_ = saveStore(st)
 				rebuild()

@@ -1,34 +1,41 @@
 # herdr-recall
 
-A pane recall picker for [Herdr](https://herdr.dev). It remembers which panes
-you actually use and lets you jump back to any of them from one overlay list.
+A Superhuman-style agent triage inbox and pane recall picker for [Herdr](https://herdr.dev).
+When you switch across 20 to 30 live agent threads to give quick feedback and unblock work, `herdr-recall` keeps track of which threads need a cycle-back, lets you leave sticky notes and reminders, and jumps straight to any pane from `prefix+k`.
 
-Press `prefix+k` and a picker opens as a popup. The Map tab is the
-prefix k tree: workspaces, tabs, and panes. Space folds a workspace.
-Enter switches to a workspace, a tab, or a pane. All and Favorites
-are the built-in tabs. Recent and Most used start as tabs you can delete
-with `x` (it asks you to confirm) and recreate with `n`. Press `e` to edit a custom tab. The form shows every choice.
-`j` and `k` move between fields. `h` and `l` change the highlighted choice.
+See [VISION.md](VISION.md) for the project vision and acceptance policy.
 
-The list uses the same keys as prefix k: `j`/`k` and the arrows move,
-`g`/`G` jump to the ends, `/` searches, and `b`/`w`/`i`/`d`/`a` filter
-by status. In search, the arrows and `ctrl-n`/`ctrl-p` move. Letters type.
-Sort is Newest, Oldest, Most used, or Least used. The direction is
-in the name. A tab can keep favorites, or only the panes in this workspace. `s` sorts only on All and Favorites.
-Recent shows when you last opened the pane. Most used shows how many times.
+Press `prefix+k` and the picker opens as a 95% by 95% popup on `Inbox`.
+`Inbox`, `All`, and `Favorites` are the built-in tabs.
+`Recent` and `Most used` start as custom tabs you can delete with `x` (it asks you to confirm), revise with `r`, or create from scratch with `c`.
+
+In `Inbox`, press `e` to mark a thread Done for the current cycle.
+It stays out of `Inbox` until its agent transitions into `blocked` or `done`, starts `working` on a new prompt, or a scheduled reminder fires.
+Press `z` to snooze a thread (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`).
+Press `n` to leave a one-line sticky note beside the tab name.
+Press `!` to toggle a manual `blocked` override when a thread is waiting on something outside Herdr's detector.
 
 ## Keys
 
 | Key | Action |
 | --- | ------ |
-| `prefix+shift+l` | open the picker |
-| left / right | switch Recent, Most used, Favorites, and All |
-| `s` | cycle sort: last used, times opened, name |
-| `/` or a letter | search. The typed text shows in the search line |
-| `enter` | jump to the selected pane |
-| `f` | pin or unpin the selected row. Pinned rows stay at the top |
-| `j` / `k` | move one row. The list scrolls one row |
-| `esc` | leave search, then close the picker |
+| `prefix+k` | open the recall and triage popup |
+| `j` / `k` / `↑` / `↓` | move one row (`ctrl-n` / `ctrl-p` and arrows also move while searching) |
+| `g` / `G` | jump to the first / last row |
+| `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
+| `h` / `l` / `←` / `→` | switch tabs (`Inbox`, `All`, `Favorites`, `Recent`, `Most used`, ...) |
+| `enter` | focus the selected pane directly via Herdr socket |
+| `e` | mark the selected thread Done (or move an already-done thread back to `Inbox`) |
+| `z` | set or clear a reminder (`20m`, `1h`, `3h`, `Tomorrow 9am`, `Clear`) |
+| `n` | set or edit a sticky note on the selected thread |
+| `!` | toggle manual `blocked` override on the selected thread |
+| `m` | mark or unmark the selected thread as a favorite (`*`) |
+| `b` / `w` / `i` / `d` / `a` | filter by status: blocked, working, idle, done, or all |
+| `/` | search tab names and sticky notes (`esc` leaves search, second `esc` closes) |
+| `c` / `r` / `x` | create, revise, or delete a custom tab |
+| `s` | cycle sort (`Newest`, `Oldest`, `Most used`, `Least used`) on `Inbox`, `All`, and `Favorites` |
+| `?` | open or close help |
+| `esc` / `q` | leave modal/search, then close the picker |
 
 The footer shows the keys for the mode you are in: key names in accent,
 hint words dim, the same way `prefix+k` does. Status appears as a coloured
@@ -99,9 +106,7 @@ Old non-favorite entries are pruned past 200 panes.
 
 ## How jumping works
 
-Enter runs `herdr workspace focus` and `herdr tab focus` for the target pane,
-then walks `herdr pane focus` hops (choosing the direction from the geometry
-in `herdr api snapshot`) until the target pane is the focused pane.
+Enter sends `pane.focus` directly over `HERDR_SOCKET_PATH` for the selected live pane.
 
 ## Companion CLI
 

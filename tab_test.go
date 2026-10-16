@@ -56,20 +56,77 @@ func TestStatusDotSitsLeftOfTheName(t *testing.T) {
 	}
 }
 
-func TestMapFoldsLikePrefixK(t *testing.T) {
-	st := &store{Panes: map[string]*paneStat{}}
+func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{
+		Version:  1,
+		TabsInit: true,
+		Tabs:     defaultTabs(),
+		Panes: map[string]*paneStat{
+			"p-work":   {Visits: 3, Last: now - 30, Note: "waiting on db migration"},
+			"p-done":   {Visits: 2, Last: now - 60, Done: true, DoneAt: now - 50, DoneState: "working"},
+			"p-clear":  {Visits: 2, Last: now - 60, Done: true, DoneAt: now - 50, DoneState: "idle"},
+			"p-snooze": {Visits: 4, Last: now - 10, Done: true, DoneAt: now - 10, DoneState: "working", RemindAt: now + 600},
+			"p-due":    {Visits: 1, Last: now - 300, Done: true, DoneAt: now - 300, DoneState: "idle", RemindAt: now - 5},
+			"p-manual": {Visits: 1, Last: now - 400, Done: true, DoneAt: now - 400, DoneState: "idle", ManualBlocked: true},
+		},
+	}
+	for _, name := range viewNames(st) {
+		if name == "Map" {
+			t.Fatal("Map tab should be retired")
+		}
+	}
+	if viewNames(st)[openTab(st)] != "Inbox" {
+		t.Fatalf("default open tab = %q, want Inbox", viewNames(st)[openTab(st)])
+	}
 	snap := &snapshot{
-		Workspaces: []wsRec{{WorkspaceID: "w1", Label: "wiseman", Focused: true}},
-		Tabs:       []tabRec{{TabID: "t1", WorkspaceID: "w1", Label: "portal-CI"}},
-		Panes:      []paneRec{{PaneID: "p1", TabID: "t1", WorkspaceID: "w1", AgentStatus: "working"}},
+		Tabs: []tabRec{
+			{TabID: "t-work", Label: "api-migration"},
+			{TabID: "t-done", Label: "auth-fix"},
+			{TabID: "t-clear", Label: "docs-clean"},
+			{TabID: "t-snooze", Label: "billing-sync"},
+			{TabID: "t-due", Label: "qa-followup"},
+			{TabID: "t-manual", Label: "vendor-reply"},
+		},
+		Panes: []paneRec{
+			{PaneID: "p-work", TabID: "t-work", AgentStatus: "working"},
+			{PaneID: "p-done", TabID: "t-done", AgentStatus: "done"},
+			{PaneID: "p-clear", TabID: "t-clear", AgentStatus: "idle"},
+			{PaneID: "p-snooze", TabID: "t-snooze", AgentStatus: "working"},
+			{PaneID: "p-due", TabID: "t-due", AgentStatus: "idle"},
+			{PaneID: "p-manual", TabID: "t-manual", AgentStatus: "idle"},
+		},
 	}
-	open := mapRows(snap, st, map[string]bool{"w1": true}, "", "")
-	if len(open) != 2 || open[0].Kind != "workspace" || open[1].Label != "portal-CI" || open[1].PaneID != "p1" {
-		t.Fatalf("open map = %+v", open)
+
+	inbox := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	gotIDs := make([]string, len(inbox))
+	for i, r := range inbox {
+		gotIDs[i] = r.PaneID
 	}
-	folded := mapRows(snap, st, map[string]bool{}, "", "")
-	if len(folded) != 1 || folded[0].Kind != "workspace" {
-		t.Fatalf("folded map = %+v", folded)
+	// p-clear is Done with unchanged idle state, and p-snooze is snoozed in the future.
+	// p-due (due reminder) and p-manual (manual blocked) must sit in bucket 0, then p-done (newly done), then p-work.
+	wantIDs := []string{"p-due", "p-manual", "p-done", "p-work"}
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("inbox rows = %v, want %v", gotIDs, wantIDs)
+	}
+
+	// Sticky note is rendered inline and searchable via filterRows.
+	plain := stripANSI(renderFrame(inbox, 0, "", "", false, 100, 16, viewNames(st), 0, "both", ""))
+	for _, want := range []string{"! idle", "● vendor-reply", "waiting on db migration", "e done", "z remind", "n note"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("inbox frame missing %q:\n%s", want, plain)
+		}
+	}
+	byNote := filterRows(inbox, "migration")
+	if len(byNote) != 1 || byNote[0].PaneID != "p-work" {
+		t.Fatalf("filterRows by sticky note = %+v", byNote)
+	}
+
+	// Snoozed pane renders ~ in All tab.
+	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
+	allPlain := stripANSI(renderFrame(all, 0, "", "", false, 100, 18, viewNames(st), 1, "both", ""))
+	if !strings.Contains(allPlain, "~ working") {
+		t.Fatalf("expected ~ working badge for snoozed pane in All:\n%s", allPlain)
 	}
 }
 
