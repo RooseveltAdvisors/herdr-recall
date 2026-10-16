@@ -34,16 +34,32 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `!` | toggle manual `blocked` override on the selected thread |
 | `m` | mark or unmark the selected thread as a favorite (`*`) |
 | `b` / `w` / `i` / `d` / `a` | filter by status: blocked, working, idle, done, or all |
-| `/` | search tab names and sticky notes (`esc` leaves search, second `esc` closes) |
+| `/` | search tab names and sticky notes, with vim editing |
 | `c` / `r` / `x` | create, revise, or delete a custom tab |
 | `s` | cycle sort (`Most recent`, `Oldest`, `Most used`, `Least used`) on `All` and `Favorites` |
 | `?` | open or close help |
-| `esc` / `q` | leave modal/search, then close the picker |
+| `esc` | insert to normal, normal to browse, browse to close |
+| `ctrl+c` | close from anywhere |
 
 The footer shows the keys for the mode you are in: key names in accent,
 hint words dim, the same way `prefix+k` does. Status appears as a coloured
 dot plus a coloured word (red blocked, yellow working, teal done, green
 idle), section headers are coloured, and the favourite star is yellow.
+
+## Vim editing
+
+`/` search and `n` sticky note share one vim line editor, so both feel the same.
+
+- `esc` enters normal mode. `i`, `I`, `a`, `A` go back to insert.
+- Motions: `w` `W` `b` `B` `e` `E`, `0` `^` `$`, `f` `F` `t` `T`, `;` `,`.
+- Edits: `x` `X`, `r{char}`, `s`, `d` `c` `y` with a motion, `D`, `C`, `Y`.
+- `p` `P` paste, `u` undo, `ctrl+r` redo, `~` swap case, `.` repeat.
+- Counts work, so `3w`, `2dw`, `5x` all behave.
+- While a field is focused, `j` `k` and the arrows move the list and `enter` jumps.
+
+A mode chip sits left of the prompt: `N` normal, `I` insert, `R` replace, and
+`d` `c` `y` `f` `r` when a command is waiting on its motion. The cursor is
+painted in the line, so it matches the screenshots exactly.
 
 ## Screenshots
 
@@ -71,7 +87,7 @@ Snooze dialog after pressing `z`, with the return rule as a field:
 
 ![reminder modal](assets/screenshot-favorite-toggle.png)
 
-Search mode after pressing `/` with a typed query matching a sticky note:
+Search with the shared vim editor. The chip shows the mode and the cursor is painted in the line:
 
 ![search mode](assets/screenshot-search.png)
 

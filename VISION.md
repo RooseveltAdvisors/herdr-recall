@@ -33,7 +33,8 @@ Closed panes are filtered out against the live snapshot on every open, and press
 
 ## Vim, Tmux, and Superhuman Keyboard Grammar
 
-Browse mode never types into the search box; `/` enters search, `esc` leaves search while keeping the filter, and a second `esc` closes the popup.
+Browse mode never types into the search box; `/` enters search and `n` opens a sticky note, and both drive one shared vim line editor with normal and insert modes, motions, operators, counts, and undo.
+`esc` walks one level at a time, from insert to normal to browse with the filter kept, and a further `esc` closes the popup.
 Navigation uses `j` and `k` (or arrows) for rows, `g` and `G` for ends, `ctrl-u` and `ctrl-d` for half-pages, `b/w/i/d/a` for status filters, and `h` and `l` to switch between `Favorites`, `Inbox`, `Recent`, `Most used`, custom tabs, and `All`.
 Triage actions stay on single keys in browse mode: `e` marks done, `z` sets a reminder, `n` edits the sticky note, `!` toggles manual blocked, and `m` marks a favorite.
 Custom tab management follows tmux and vim conventions: `c` creates a custom tab via a visible multi-field form, `r` revises the current custom tab's criteria, and `x` deletes it after a confirmation dialog that defaults to Cancel.

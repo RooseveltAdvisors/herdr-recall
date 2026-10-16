@@ -1069,22 +1069,27 @@ func renderHelp(width, height int) string {
 	emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help - esc returns to the list" + keyReset)
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	keys := [][2]string{
-		{"j / k / arrows", "move one row, same as prefix k"},
+		{"j / k / arrows", "move one row"},
 		{"g / G", "first row / last row"},
 		{"e", "mark done. New agent activity returns it. e again undoes"},
 		{"z", "snooze: if no reply (default) or regardless"},
-		{"n", "set or edit a sticky note on the selected thread"},
-		{"!", "toggle manual blocked override on the selected thread"},
+		{"n", "sticky note, edited with vim keys"},
+		{"!", "toggle manual blocked override"},
 		{"m", "mark or unmark favorite (*)"},
 		{"b w i d a", "filter status: blocked, working, idle, done, all"},
-		{"/", "search tab names and sticky notes"},
-		{"h / l", "switch tabs (Inbox, All, Favorites, Recent, ...)"},
+		{"/", "search, edited with vim keys"},
+		{"h / l", "switch tabs"},
 		{"c / r / x", "create, revise, or delete a custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
-		{"ctrl+u / ctrl+d", "half page, or clear search/note"},
 		{"?", "open or close this help"},
-		{"esc / q", "leave search/modal, then close the picker"},
+		{"esc", "insert to normal, normal to browse, browse to close"},
+		{"ctrl+c", "close from anywhere"},
 	}
+	emit(keyAccentFg + keyBold + "  / and n use vim editing" + keyReset)
+	emit(keyText + "  esc enters normal mode. i I a A insert. w b e 0 ^ $ move." + keyReset)
+	emit(keyText + "  x X r s delete or replace. d c y take a motion, with counts." + keyReset)
+	emit(keyText + "  p P paste. u undo. ctrl+r redo. ~ change case. . repeat." + keyReset)
+	emit(keyText + "  j k arrows move the list. enter jumps." + keyReset)
 	for _, kv := range keys {
 		emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
 	}
@@ -1163,7 +1168,7 @@ func tabBar(names []string, active int) string {
 	return b.String()
 }
 
-func renderFrame(rows []row, sel int, query, status string, searching bool, width, height int, names []string, active int, metricKind, state string, sortOpts ...string) string {
+func renderFrame(rows []row, sel int, fv fieldView, status string, width, height int, names []string, active int, metricKind, state string, sortOpts ...string) string {
 	sortPill := ""
 	if len(sortOpts) > 0 {
 		sortPill = sortOpts[0]
@@ -1192,18 +1197,11 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 	var lines []string
 	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
 	emit(tabBar(names, active))
-	slash := keyOverlay + " / " + keyReset
-	if searching {
-		slash = keyAccentFg + keyBold + " / " + keyReset
+	leftSearch := renderField(fv, width)
+	if !fv.Focused && state != "" {
+		leftSearch = renderField(fieldView{Label: "/", Focused: false}, width) +
+			keyOverlay + "  " + statusColor(state) + "● " + state + keyReset
 	}
-	prompt := keyOverlay + "search panes" + keyReset
-	switch {
-	case state != "":
-		prompt = statusColor(state) + "● " + state + keyReset
-	case query != "":
-		prompt = keyText + query + keyReset
-	}
-	leftSearch := slash + prompt
 	if sortPill != "" {
 		pillPlain := " sort: " + sortPill + " "
 		pillStyled := keySurface + "[" + keyReset + keyOverlay + "sort: " + keyAccentFg + keyBold + sortPill + keyReset + keySurface + "]" + keyReset
@@ -1323,8 +1321,8 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 		}
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	if searching {
-		emit(hintFooter("enter", "switch", "↑↓", "move", "ctrl+u", "clear", "esc", "back"))
+	if fv.Focused {
+		emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "esc", "browse", "ctrl+c", "close"))
 	} else {
 		emit(hintFooter("enter", "switch", "e", "done", "z", "remind", "n", "note", "!", "block", "/", "search"))
 	}
@@ -1491,7 +1489,7 @@ func stepFormValue(field, dir int, sort string, limit int, only, where string) (
 
 // renderForm is the criteria editor. Every choice is on screen. j/k moves
 // between fields. h/l changes the highlighted choice. Letters type the name.
-func renderForm(width, height int, names []string, active, field int, editing bool, name, sort string, limit int, only, where, status string) string {
+func renderForm(width, height int, names []string, active, field int, editing bool, fv fieldView, sort string, limit int, only, where, status string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -1506,19 +1504,7 @@ func renderForm(width, height int, names []string, active, field int, editing bo
 	emit(keyText + keyBold + "  " + title + keyReset)
 	emit(keyOverlay + "  " + formSummary(sort, limit, only, where) + keyReset)
 	emit(fieldTitle("Name", field == 0))
-	if field == 0 {
-		shown := name
-		if shown == "" {
-			shown = "type a name"
-			emit(keySelectBg + keyOverlay + "  " + shown + " " + keyReset)
-		} else {
-			emit(keySelectBg + keySelectFg + keyBold + "  " + shown + " " + keyReset)
-		}
-	} else if name == "" {
-		emit(keyOverlay + "  type a name" + keyReset)
-	} else {
-		emit(keyText + "  " + name + keyReset)
-	}
+	emit(renderField(fv, width))
 	emit(fieldTitle("Sort", field == 1))
 	for _, line := range choiceLines(sortLabels(), sortChoice(sort), width) {
 		emit(line)
@@ -1623,7 +1609,7 @@ func renderRemind(width, height int, names []string, active, field, mode, timeSe
 	return paint(lines)
 }
 
-func renderNote(width, height int, names []string, active int, label, note string) string {
+func renderNote(width, height int, names []string, active int, fv fieldView) string {
 	if height < 8 {
 		height = 8
 	}
@@ -1632,14 +1618,10 @@ func renderNote(width, height int, names []string, active int, label, note strin
 	emit(tabBar(names, active))
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit("")
-	emit(keyText + keyBold + "  Sticky note for " + label + keyReset)
+	emit(keyText + keyBold + "  Sticky note" + keyReset)
 	emit(keyOverlay + "  Shows beside the tab name so you remember what this thread is waiting on." + keyReset)
 	emit("")
-	if note == "" {
-		emit(keySelectBg + keyOverlay + "  type a sticky note (empty clears) " + keyReset)
-	} else {
-		emit(keySelectBg + keySelectFg + keyBold + "  " + note + " " + keyReset)
-	}
+	emit(renderField(fv, width))
 	emit("")
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit(hintFooter("enter", "save", "ctrl+u", "clear", "esc", "cancel"))
@@ -1805,10 +1787,14 @@ func runPicker() int {
 		c := exec.Command("stty", "sane")
 		c.Stdin = tty
 		_ = c.Run()
+		tty.WriteString("\x1b[?25h")
 	}()
+	// The fields paint their own cursor cell, so the terminal cursor is hidden
+	// for the whole session. It cannot drift and the frame is screenshot-exact.
+	tty.WriteString("\x1b[?25l")
 
 	st := loadStore()
-	query := st.ActiveQuery
+	searchEd := newEditor(st.ActiveQuery)
 	sel := 0
 	status := ""
 	searching := false
@@ -1838,10 +1824,10 @@ func runPicker() int {
 	remindPaneID := ""
 	remindLabel := ""
 	noting := false
+	noteEd := newEditor("")
 	notePaneID := ""
-	noteLabel := ""
-	noteText := ""
-	newName, newSort, newOnly, newWhere := "", "newest", "", ""
+	formEd := newEditor("")
+	newSort, newOnly, newWhere := "newest", "", ""
 	newLimit := 20
 	var allRows []row
 	rebuild := func() {
@@ -1857,7 +1843,7 @@ func runPicker() int {
 	rebuild()
 	if st.ActivePaneID != "" {
 		cur := filterByState(allRows, stateFilter)
-		if q := strings.TrimSpace(query); q != "" {
+		if q := strings.TrimSpace(searchEd.String()); q != "" {
 			cur = filterRows(cur, q)
 		}
 		for i, r := range cur {
@@ -1871,7 +1857,7 @@ func runPicker() int {
 		st.ActiveTab = tab
 		st.ActiveSort = sortMode
 		st.ActiveState = stateFilter
-		st.ActiveQuery = query
+		st.ActiveQuery = searchEd.String()
 		if sel >= 0 && sel < len(rows) {
 			st.ActivePaneID = rows[sel].PaneID
 		}
@@ -1879,7 +1865,7 @@ func runPicker() int {
 	}
 	for {
 		rows := filterByState(allRows, stateFilter)
-		if q := strings.TrimSpace(query); q != "" {
+		if q := strings.TrimSpace(searchEd.String()); q != "" {
 			rows = filterRows(rows, q)
 		}
 		if sel >= len(rows) {
@@ -1899,16 +1885,16 @@ func runPicker() int {
 		case reminding:
 			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, remindLabel)
 		case noting:
-			frame = renderNote(w, h, viewNames(st), tab, noteLabel, noteText)
+			frame = renderNote(w, h, viewNames(st), tab, noteEd.view("note", true))
 		case creating:
-			frame = renderForm(w, h, viewNames(st), tab, formField, editing, newName, newSort, newLimit, newOnly, newWhere, status)
+			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.view("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
 		default:
 			v := views(st)[tab]
 			kind := "both"
 			if v.Kind == "custom" {
 				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)
 			}
-			frame = renderFrame(rows, sel, query, status, searching, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
+			frame = renderFrame(rows, sel, searchEd.view("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
 		tty.WriteString(frame)
 
@@ -1978,33 +1964,60 @@ func runPicker() int {
 			}
 			continue
 		}
+		half := max(1, (h-3)/2)
 		if noting && !showHelp {
-			switch key {
-			case "esc":
-				noting = false
-			case "enter":
+			switch noteEd.feed(key) {
+			case actAccept:
 				ps := st.ensurePane(notePaneID)
-				ps.Note = strings.TrimSpace(noteText)
+				ps.Note = strings.TrimSpace(noteEd.String())
 				if ps.Note != "" {
 					ps.Done = false
-					status = "note saved: " + noteLabel
+					status = "note saved: " + rows[sel].Label
 				} else {
-					status = "note cleared: " + noteLabel
+					status = "note cleared: " + rows[sel].Label
 				}
 				_ = saveStore(st)
 				noting = false
 				rebuild()
-			case "ctrl-u":
-				noteText = ""
-			case "bs":
-				rs := []rune(noteText)
-				if len(rs) > 0 {
-					noteText = string(rs[:len(rs)-1])
+			case actOut, actCancel:
+				noting = false
+				status = ""
+			}
+			continue
+		}
+		if searching && !showHelp {
+			switch searchEd.feed(key) {
+			case actAccept:
+				if len(rows) > 0 {
+					target := rows[sel].PaneID
+					tty.WriteString("\x1b[2J\x1b[H")
+					if err := jumpTo(target); err != nil {
+						status = "jump: " + err.Error()
+						continue
+					}
+					return 0
 				}
-			default:
-				if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-					noteText += key
+			case actOut:
+				// Level two of the ladder: leave the field, keep the filter.
+				searching = false
+			case actCancel:
+				return 0
+			case actUp:
+				if sel > 0 {
+					sel--
 				}
+			case actDown:
+				if sel < len(rows)-1 {
+					sel++
+				}
+			case actFirst:
+				sel = 0
+			case actLast:
+				sel = max(0, len(rows)-1)
+			case actPageUp:
+				sel = max(0, sel-half)
+			case actPageDown:
+				sel = min(sel+half, max(0, len(rows)-1))
 			}
 			continue
 		}
@@ -2032,17 +2045,13 @@ func runPicker() int {
 			continue
 		}
 		if creating && !showHelp {
-			switch key {
-			case "esc":
-				creating = false
-				editing = false
-				status = ""
-			case "enter":
-				name := strings.TrimSpace(newName)
+			saveForm := func() {
+				name := strings.TrimSpace(formEd.String())
 				if name == "" {
 					formField = 0
+					formEd.mode = modeInsert
 					status = "Type a name, then press enter."
-					break
+					return
 				}
 				ct := customTab{Name: name, Sort: canonicalSort(newSort, ""), Limit: newLimit, Only: newOnly, Where: newWhere}
 				if editing && editIdx >= 0 && editIdx < len(st.Tabs) {
@@ -2059,6 +2068,31 @@ func runPicker() int {
 				editing = false
 				sel = 0
 				rebuild()
+			}
+			if formField == 0 {
+				switch formEd.feed(key) {
+				case actAccept:
+					saveForm()
+				case actOut:
+					formField = 1
+				case actCancel:
+					creating = false
+					editing = false
+					status = ""
+				case actUp:
+					formField = 0
+				case actDown:
+					formField = 1
+				}
+				continue
+			}
+			switch key {
+			case "esc":
+				creating = false
+				editing = false
+				status = ""
+			case "enter":
+				saveForm()
 			case "j", "down":
 				if formField < 4 {
 					formField++
@@ -2075,31 +2109,13 @@ func runPicker() int {
 			case "l", "right":
 				newSort, newLimit, newOnly, newWhere = stepFormValue(formField, 1, newSort, newLimit, newOnly, newWhere)
 				status = ""
-			case "bs":
-				if formField == 0 {
-					rs := []rune(newName)
-					if len(rs) > 0 {
-						newName = string(rs[:len(rs)-1])
-					}
-				}
-			default:
-				if formField == 0 && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-					newName += key
-					status = ""
-				}
 			}
 			continue
 		}
-		half := max(1, (h-3)/2)
 		switch {
 		case key == "esc":
 			if showHelp {
 				showHelp = false // esc closes help, the row stays
-				continue
-			}
-			if searching {
-				// Esc leaves search first, the same as prefix k. The query stays.
-				searching = false
 				continue
 			}
 			return 0 // esc closes from browse mode
@@ -2199,8 +2215,7 @@ func runPicker() int {
 			}
 			noting = true
 			notePaneID = rows[sel].PaneID
-			noteLabel = rows[sel].Label
-			noteText = rows[sel].Note
+			noteEd = newEditor(rows[sel].Note)
 			status = ""
 		case key == "!" && !searching && !showHelp:
 			if len(rows) == 0 {
@@ -2223,7 +2238,8 @@ func runPicker() int {
 			editing = false
 			editIdx = -1
 			formField = 0
-			newName, newSort, newOnly, newWhere, newLimit = "", "newest", "", "", 20
+			formEd = newEditor("")
+			newSort, newOnly, newWhere, newLimit = "newest", "", "", 20
 			status = ""
 		case key == "r" && !searching && !showHelp:
 			v := views(st)[tab]
@@ -2235,7 +2251,8 @@ func runPicker() int {
 			editing = true
 			editIdx = v.Idx
 			formField = 1
-			newName, newSort, newOnly, newWhere, newLimit = ct.Name, canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit
+			formEd = newEditor(ct.Name)
+			newSort, newOnly, newWhere, newLimit = canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit
 			status = ""
 		case key == "x" && !searching && !showHelp:
 			v := views(st)[tab]
@@ -2246,6 +2263,8 @@ func runPicker() int {
 			confirmSel = 1
 		case key == "/" && !searching:
 			searching = true
+			searchEd.mode = modeInsert
+			searchEd.cursor = len(searchEd.text)
 			stateFilter = ""
 			sel = 0
 		case key == "g" && !searching:
@@ -2270,12 +2289,12 @@ func runPicker() int {
 			}
 		case !searching && !showHelp && (key == "b" || key == "w" || key == "i" || key == "d"):
 			stateFilter = map[string]string{"b": "blocked", "w": "working", "i": "idle", "d": "done"}[key]
-			query = ""
+			searchEd = newEditor("")
 			searching = false
 			sel = 0
 		case key == "a" && !searching && !showHelp:
 			stateFilter = ""
-			query = ""
+			searchEd = newEditor("")
 		case key == "m" && !searching:
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
@@ -2288,11 +2307,7 @@ func runPicker() int {
 				rebuild()
 			}
 		case key == "ctrl-u":
-			if searching {
-				query = ""
-				stateFilter = ""
-				sel = 0
-			} else if sel > half {
+			if sel > half {
 				sel -= half
 			} else {
 				sel = 0
@@ -2305,22 +2320,12 @@ func runPicker() int {
 				sel = max(0, len(rows)-1)
 			}
 		case key == "bs":
-			switch {
-			case searching && query != "":
-				rs := []rune(query)
-				query = string(rs[:len(rs)-1])
-				stateFilter = ""
-				sel = 0
-			case !searching && stateFilter != "":
+			if stateFilter != "" {
 				stateFilter = ""
 				sel = 0
 			}
-		case key == "q" && !searching:
+		case key == "q":
 			return 0
-		case searching && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f:
-			stateFilter = ""
-			query += key
-			sel = 0
 		}
 	}
 }
@@ -2362,11 +2367,13 @@ func renderOnce() int {
 		fmt.Fprintf(os.Stderr, "recall: snapshot: %v\n", err)
 		return 1
 	}
-	query := os.Getenv("RECALL_QUERY")
-	searching := os.Getenv("RECALL_SEARCH") == "1"
+	fv := newEditor(os.Getenv("RECALL_QUERY")).view("/", os.Getenv("RECALL_SEARCH") == "1")
+	if os.Getenv("RECALL_SEARCH") != "1" {
+		fv = fieldView{Label: "/", Text: os.Getenv("RECALL_QUERY"), Focused: false}
+	}
 	rows := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
-	if query != "" {
-		rows = filterRows(rows, query)
+	if fv.Text != "" {
+		rows = filterRows(rows, fv.Text)
 	}
 	sel := 0
 	if v := os.Getenv("RECALL_SEL"); v != "" {
@@ -2385,7 +2392,7 @@ func renderOnce() int {
 			h = n
 		}
 	}
-	os.Stdout.WriteString(renderFrame(rows, sel, query, os.Getenv("RECALL_STATUS"), searching, w, h, viewNames(st), 0, "both", os.Getenv("RECALL_STATE")))
+	os.Stdout.WriteString(renderFrame(rows, sel, fv, os.Getenv("RECALL_STATUS"), w, h, viewNames(st), 0, "both", os.Getenv("RECALL_STATE")))
 	return 0
 }
 
