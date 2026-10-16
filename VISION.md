@@ -31,7 +31,7 @@ Browse mode never types into the search box; `/` enters search, `esc` leaves sea
 Navigation uses `j` and `k` (or arrows) for rows, `g` and `G` for ends, `ctrl-u` and `ctrl-d` for half-pages, `b/w/i/d/a` for status filters, and `h` and `l` to switch between `Inbox`, `All`, `Favorites`, `Recent`, `Most used`, and custom tabs.
 Triage actions stay on single keys in browse mode: `e` marks done, `z` sets a reminder, `n` edits the sticky note, `!` toggles manual blocked, and `m` marks a favorite.
 Custom tab management follows tmux and vim conventions: `c` creates a custom tab via a visible multi-field form, `r` revises the current custom tab's criteria, and `x` deletes it after a confirmation dialog that defaults to Cancel.
-Custom sorts use self-contained directional names (`Newest`, `Oldest`, `Most used`, `Least used`) and refuse invented priority scores or separate ascending/descending rows.
+Custom sorts use self-contained directional names (`Most recent`, `Oldest`, `Most used`, `Least used`), display the active sort order as a pill in the header, and refuse invented priority scores or separate ascending/descending rows.
 
 ## Scope
 

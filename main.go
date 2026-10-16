@@ -753,7 +753,24 @@ func sortLabel(how string) string {
 	case "least":
 		return "Least used"
 	default:
-		return "Newest"
+		return "Most recent"
+	}
+}
+
+func activeSortLabel(st *store, v view, mode int) string {
+	if v.Kind == "custom" && v.Idx >= 0 && v.Idx < len(st.Tabs) {
+		return sortLabel(canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir))
+	}
+	if mode != sortDefault {
+		return sortLabel(sortHow(mode, "newest"))
+	}
+	switch v.Kind {
+	case "inbox":
+		return "Triage"
+	case "favorites":
+		return "Starred"
+	default:
+		return "Most recent"
 	}
 }
 
@@ -1018,7 +1035,20 @@ func tabBar(names []string, active int) string {
 	return b.String()
 }
 
-func renderFrame(rows []row, sel int, query, status string, searching bool, width, height int, names []string, active int, metricKind, state string) string {
+func renderFrame(rows []row, sel int, query, status string, searching bool, width, height int, names []string, active int, metricKind, state string, sortOpts ...string) string {
+	sortPill := "Most recent"
+	if len(sortOpts) > 0 && sortOpts[0] != "" {
+		sortPill = sortOpts[0]
+	} else if active >= 0 && active < len(names) {
+		switch names[active] {
+		case "Inbox":
+			sortPill = "Triage"
+		case "Favorites":
+			sortPill = "Starred"
+		case "Most used":
+			sortPill = "Most used"
+		}
+	}
 	// The tab bar, hint, and search line are painted first and never scroll
 	// away. All is the long list, so a trailing newline on a full frame used
 	// to push those headers off the popup.
@@ -1039,7 +1069,19 @@ func renderFrame(rows []row, sel int, query, status string, searching bool, widt
 	case query != "":
 		prompt = keyText + query + keyReset
 	}
-	emit(slash + prompt)
+	leftSearch := slash + prompt
+	if sortPill != "" {
+		pillPlain := " sort: " + sortPill + " "
+		pillStyled := keySurface + "[" + keyReset + keyOverlay + "sort: " + keyAccentFg + keyBold + sortPill + keyReset + keySurface + "]" + keyReset
+		leftLen := len([]rune(stripANSI(leftSearch)))
+		pillLen := len([]rune(pillPlain))
+		if gap := width - leftLen - pillLen - 1; gap >= 2 {
+			leftSearch += strings.Repeat(" ", gap) + pillStyled
+		} else {
+			leftSearch += "  " + pillStyled
+		}
+	}
+	emit(leftSearch)
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	headerN := len(lines)
 	footerN := 3 // separator plus two hint lines
@@ -1253,7 +1295,7 @@ func fieldTitle(label string, focused bool) string {
 	return keyOverlay + "  " + label + keyReset
 }
 
-func sortLabels() []string  { return []string{"Newest", "Oldest", "Most used", "Least used"} }
+func sortLabels() []string  { return []string{"Most recent", "Oldest", "Most used", "Least used"} }
 func limitLabels() []string { return []string{"10", "20", "50", "All"} }
 func onlyLabels() []string  { return []string{"Any", "Favorites"} }
 func whereLabels() []string { return []string{"Anywhere", "This workspace"} }
@@ -1694,7 +1736,7 @@ func runPicker() int {
 			if v.Kind == "custom" {
 				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)
 			}
-			frame = renderFrame(rows, sel, query, status, searching, w, h, viewNames(st), tab, kind, stateFilter)
+			frame = renderFrame(rows, sel, query, status, searching, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
 		tty.WriteString(frame)
 
@@ -1905,9 +1947,16 @@ func runPicker() int {
 			if v.Kind != "inbox" && v.Kind != "all" && v.Kind != "favorites" {
 				break
 			}
-			sortMode = (sortMode + 1) % sortCount
+			if v.Kind == "all" && sortMode == sortDefault {
+				sortMode = sortOldest
+			} else {
+				sortMode = (sortMode + 1) % sortCount
+				if v.Kind == "all" && sortMode == sortDefault {
+					sortMode = sortNewest
+				}
+			}
 			sel = 0
-			status = "sort: " + sortLabel(sortHow(sortMode, "newest"))
+			status = "sort: " + activeSortLabel(st, v, sortMode)
 			rebuild()
 		case key == "e" && !searching && !showHelp:
 			if len(rows) == 0 {

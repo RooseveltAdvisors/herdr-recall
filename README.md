@@ -33,7 +33,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `b` / `w` / `i` / `d` / `a` | filter by status: blocked, working, idle, done, or all |
 | `/` | search tab names and sticky notes (`esc` leaves search, second `esc` closes) |
 | `c` / `r` / `x` | create, revise, or delete a custom tab |
-| `s` | cycle sort (`Newest`, `Oldest`, `Most used`, `Least used`) on `Inbox`, `All`, and `Favorites` |
+| `s` | cycle sort (`Most recent`, `Oldest`, `Most used`, `Least used`) on `Inbox`, `All`, and `Favorites` |
 | `?` | open or close help |
 | `esc` / `q` | leave modal/search, then close the picker |
 

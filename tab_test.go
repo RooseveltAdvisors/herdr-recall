@@ -8,7 +8,7 @@ import (
 
 func TestFormShowsEveryChoice(t *testing.T) {
 	frame := stripANSI(renderForm(80, 24, []string{"All", "Favorites", "Recent"}, 2, 1, true, "Recent", "newest", 20, "", "", ""))
-	for _, want := range []string{"Edit tab", "Newest", "Oldest", "Most used", "Least used", "This workspace"} {
+	for _, want := range []string{"Edit tab", "Most recent", "Oldest", "Most used", "Least used", "This workspace"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("form missing %q:\n%s", want, frame)
 		}
@@ -110,9 +110,9 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 		t.Fatalf("inbox rows = %v, want %v", gotIDs, wantIDs)
 	}
 
-	// Sticky note is rendered inline and searchable via filterRows.
+	// Sticky note and sort pill are rendered inline and searchable via filterRows.
 	plain := stripANSI(renderFrame(inbox, 0, "", "", false, 100, 16, viewNames(st), 0, "both", ""))
-	for _, want := range []string{"! idle", "● vendor-reply", "waiting on db migration", "e done", "z remind", "n note"} {
+	for _, want := range []string{"[sort: Triage]", "! idle", "● vendor-reply", "waiting on db migration", "e done", "z remind", "n note"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("inbox frame missing %q:\n%s", want, plain)
 		}
@@ -122,11 +122,11 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 		t.Fatalf("filterRows by sticky note = %+v", byNote)
 	}
 
-	// Snoozed pane renders ~ in All tab.
+	// Snoozed pane renders ~ in All tab, and All shows [sort: Most recent].
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
 	allPlain := stripANSI(renderFrame(all, 0, "", "", false, 100, 18, viewNames(st), 1, "both", ""))
-	if !strings.Contains(allPlain, "~ working") {
-		t.Fatalf("expected ~ working badge for snoozed pane in All:\n%s", allPlain)
+	if !strings.Contains(allPlain, "~ working") || !strings.Contains(allPlain, "[sort: Most recent]") {
+		t.Fatalf("expected ~ working badge and [sort: Most recent] pill in All:\n%s", allPlain)
 	}
 }
 
