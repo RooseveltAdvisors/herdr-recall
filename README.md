@@ -5,14 +5,19 @@ When you switch across 20 to 30 live agent threads to give quick feedback and un
 
 See [VISION.md](VISION.md) for the project vision and acceptance policy.
 
-Press `prefix+k` and the picker opens as a 95% by 95% popup.
+Press `prefix+k` and the picker opens as a 95% by 95% popup. The pane you are
+sitting in never appears in `Inbox`: opening the picker bumps it to most
+recent, so it would otherwise always top the triage list and Enter on it
+would go nowhere.
 Tabs from left to right are `Favorites`, `Inbox`, `Recent`, `Most used`, and `All`.
 `Recent` and `Most used` start as custom tabs. `t c` creates one, `t r` revises it, and `t x` deletes it after a confirmation.
 
 In `Inbox`, press `e` to mark a thread Done for the current cycle.
 Done is not mute: any new agent activity brings the thread back to `Inbox`.
 The row leaves the list you are looking at, on every tab, the way Superhuman
-archives out of whatever view you are triaging. `u` undoes the last `e` and
+archives out of whatever view you are triaging. On the reference tabs the
+limit is applied after done rows are hidden, so a limit of 50 always shows 50
+live rows instead of losing slots to hidden ones. `u` undoes the last `e` and
 the row returns to the top of the list. A thread also returns on its own when
 its agent does something new. A snoozed row is different: it keeps its `~`
 badge and stays visible until the reminder is due.

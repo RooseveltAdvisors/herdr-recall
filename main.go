@@ -837,16 +837,42 @@ func (s *store) addToInbox(id string) {
 func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 	all := collectRows(s, st)
 	now := time.Now().Unix()
-	list := rowsForInner(all, s, st, v, mode, now)
+	if v.Kind == "inbox" {
+		return inboxVisible(syncInboxRows(all, st, now), s.FocusedPaneID)
+	}
 	// Done leaves the list you are looking at, on every tab, the way
-	// Superhuman archives out of whatever view you are triaging. The row
-	// returns on its own when the agent does something new, or on u.
+	// Superhuman archives out of whatever view you are triaging. Filtering
+	// BEFORE the limit matters: done rows must not consume tab slots, or a
+	// limit of 50 with 40 done panes shows 10 rows.
+	return rowsForInner(triageVisible(all), s, st, v, mode, now)
+}
+
+// triageVisible drops rows done by e. A snoozed row keeps its badge and stays
+// until its reminder is due.
+func triageVisible(list []row) []row {
 	out := make([]row, 0, len(list))
 	for _, r := range list {
-		// A snoozed row stays: it carries its ~ badge and returns when due.
 		if !r.Done || r.RemindAt > 0 {
 			out = append(out, r)
 		}
+	}
+	return out
+}
+
+// inboxVisible also drops the pane the captain is sitting in. That pane was
+// just bumped to most recent by opening the picker, so without this it would
+// always top the triage list, and Enter on it is a no-op: focusing the pane
+// you are already in goes nowhere.
+func inboxVisible(list []row, focused string) []row {
+	out := make([]row, 0, len(list))
+	for _, r := range list {
+		if r.Done && r.RemindAt <= 0 {
+			continue
+		}
+		if focused != "" && r.PaneID == focused {
+			continue
+		}
+		out = append(out, r)
 	}
 	return out
 }
