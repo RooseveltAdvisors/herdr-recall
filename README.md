@@ -23,7 +23,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | Key | Action |
 | --- | ------ |
 | `prefix+k` | open the recall and triage popup |
-| `j` / `k` / `↑` / `↓` | move one row (`ctrl-n` / `ctrl-p` and arrows also move while searching) |
+| `j` / `k` / `↑` / `↓` | move one row, or N rows with a count such as `3j` |
 | `g` / `G` | jump to the first / last row |
 | `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
 | `h` / `l` / `←` / `→` | switch tabs (`Favorites`, `Inbox`, `Recent`, `Most used`, `All`) |

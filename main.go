@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"github.com/RooseveltAdvisors/vimline"
 	"github.com/RooseveltAdvisors/vimline/duration"
+	"github.com/RooseveltAdvisors/vimline/keys"
 	"net"
 	"os"
 	"os/exec"
@@ -1157,7 +1158,7 @@ func renderHelp(width, height int) string {
 	emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help - esc returns to the list" + keyReset)
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	keys := [][2]string{
-		{"j / k / arrows", "move one row"},
+		{"j / k / arrows", "move one row, or N rows with a count"},
 		{"g / G", "first row / last row"},
 		{"e", "mark done. New agent activity returns it. e again undoes"},
 		{"z", "snooze: type 3h 2w 1d12h tomorrow, or clear"},
@@ -1784,79 +1785,6 @@ func termSize(tty *os.File) (int, int) {
 
 // logicalKey turns one keystroke into a name the picker understands.
 // Herdr may deliver a raw byte or a CSI / kitty sequence. Both must work,
-// or the popup looks open and ignores typing.
-func logicalKey(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-	if b[0] != 0x1b {
-		switch b[0] {
-		case '\r', '\n':
-			return "enter"
-		case 0x7f, 0x08:
-			return "bs"
-		case 0x15:
-			return "ctrl-u"
-		case 0x0e:
-			return "ctrl-n"
-		case 0x10:
-			return "ctrl-p"
-		case 0x04:
-			return "ctrl-d"
-		default:
-			if b[0] >= 0x20 && b[0] < 0x7f {
-				return string(b[0])
-			}
-			return ""
-		}
-	}
-	if len(b) == 1 {
-		return "esc"
-	}
-	s := string(b)
-	if strings.Contains(s, "[") && strings.HasSuffix(s, "A") {
-		return "up"
-	}
-	if strings.Contains(s, "[") && strings.HasSuffix(s, "B") {
-		return "down"
-	}
-	if strings.Contains(s, "[") && strings.HasSuffix(s, "C") {
-		return "right"
-	}
-	if strings.Contains(s, "[") && strings.HasSuffix(s, "D") {
-		return "left"
-	}
-	if i := strings.Index(s, "["); i >= 0 && strings.HasSuffix(s, "u") {
-		code := 0
-		for _, c := range s[i+1:] {
-			if c < '0' || c > '9' {
-				break
-			}
-			code = code*10 + int(c-'0')
-		}
-		switch code {
-		case 13:
-			return "enter"
-		case 27:
-			return "esc"
-		case 127, 8:
-			return "bs"
-		case 57417:
-			return "left"
-		case 57418:
-			return "right"
-		case 57419:
-			return "up"
-		case 57420:
-			return "down"
-		default:
-			if code >= 32 && code < 127 {
-				return string(byte(code))
-			}
-		}
-	}
-	return "esc"
-}
 
 func runPicker() int {
 	// Herdr writes keystrokes to this process's stdin pty. Read that fd.
@@ -1899,7 +1827,12 @@ func runPicker() int {
 	formField := 0
 	confirmName := ""
 	confirmSel := 1
-	pendingT := false
+	tabKeys := keys.New()
+	tabKeys.Register("t", map[string]string{
+		"c": "tab-create",
+		"r": "tab-revise",
+		"x": "tab-delete",
+	}, "c create   r revise   x delete")
 	var commitRemind func()
 	reminding := false
 	remindField := 2
@@ -2001,8 +1934,9 @@ func runPicker() int {
 	}
 
 	// Keys arrive through a channel so a held j can wait for its pair without
-	// blocking the rest of the loop.
-	keyCh := make(chan []byte, 16)
+	// blocking the rest of the loop. keys.Split turns one read into ordered
+	// logical keys, so a burst keeps every key instead of losing the tail.
+	keyCh := make(chan string, 16)
 	go func() {
 		buf := make([]byte, 64)
 		for {
@@ -2011,9 +1945,9 @@ func runPicker() int {
 				close(keyCh)
 				return
 			}
-			b := make([]byte, n)
-			copy(b, buf[:n])
-			keyCh <- b
+			for _, k := range keys.Split(buf[:n]) {
+				keyCh <- k
+			}
 		}
 	}()
 
@@ -2100,22 +2034,22 @@ func runPicker() int {
 		if ed := activeEd(); ed != nil && ed.PendingJ() {
 			// One j is held. Give its pair a short window, then let it through.
 			select {
-			case b, ok := <-keyCh:
+			case k, ok := <-keyCh:
 				if !ok {
 					return 0
 				}
-				key = logicalKey(b)
+				key = k
 			case <-time.After(150 * time.Millisecond):
 				ed.FlushJ()
 				continue
 			}
 		} else {
 			select {
-			case b, ok := <-keyCh:
+			case k, ok := <-keyCh:
 				if !ok {
 					return 0
 				}
-				key = logicalKey(b)
+				key = k
 			case sc := <-jevCh:
 				applyJev(sc)
 				continue
@@ -2319,13 +2253,20 @@ func runPicker() int {
 			}
 			continue
 		}
-		if pendingT {
-			// Tab mutations live behind a prefix, the way vim gates structure
-			// behind : and tmux gates create behind prefix+c.
-			pendingT = false
+		// Tab mutations live behind the shared chord dispatcher, the way vim
+		// gates structure behind : and tmux gates create behind prefix+c.
+		if a, r := tabKeys.Feed(key); r != keys.Pass {
+			if r == keys.Consumed {
+				if _, hint, ok := tabKeys.Pending(); ok {
+					status = "tab: " + hint
+				} else {
+					status = ""
+				}
+				continue
+			}
 			v := views(st)[tab]
-			switch key {
-			case "c":
+			switch a.Name {
+			case "tab-create":
 				creating = true
 				editing = false
 				editIdx = -1
@@ -2333,7 +2274,7 @@ func runPicker() int {
 				formEd = vimline.New("")
 				newSort, newOnly, newWhere, newLimit = "newest", "", "", 20
 				status = ""
-			case "r":
+			case "tab-revise":
 				if v.Kind != "custom" {
 					break
 				}
@@ -2345,17 +2286,16 @@ func runPicker() int {
 				formEd = vimline.New(ct.Name)
 				newSort, newOnly, newWhere, newLimit = canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit
 				status = ""
-			case "x":
+			case "tab-delete":
 				if v.Kind != "custom" {
 					break
 				}
 				confirmName = st.Tabs[v.Idx].Name
 				confirmSel = 1
-			default:
-				status = ""
 			}
 			continue
 		}
+		browseCount := tabKeys.TakeCount()
 		switch {
 		case key == "esc":
 			if showHelp {
@@ -2499,9 +2439,6 @@ func runPicker() int {
 			}
 			_ = saveStore(st)
 			rebuild()
-		case key == "t" && !searching && !showHelp:
-			pendingT = true
-			status = "tab: c create   r revise   x delete"
 		case key == "/" && !searching:
 			searching = true
 			searchEd.SetMode(vimline.ModeInsert)
@@ -2513,12 +2450,25 @@ func runPicker() int {
 		case key == "G" && !searching:
 			sel = max(0, len(rows)-1)
 		case (key == "j" || key == "down") && !searching:
-			if sel < len(rows)-1 {
-				sel++
+			n := browseCount
+			if n < 1 {
+				n = 1
+			}
+			sel += n
+			if sel > len(rows)-1 {
+				sel = len(rows) - 1
+			}
+			if sel < 0 {
+				sel = 0
 			}
 		case (key == "k" || key == "up") && !searching:
-			if sel > 0 {
-				sel--
+			n := browseCount
+			if n < 1 {
+				n = 1
+			}
+			sel -= n
+			if sel < 0 {
+				sel = 0
 			}
 		case key == "ctrl-n" || (key == "down" && searching):
 			if sel < len(rows)-1 {
