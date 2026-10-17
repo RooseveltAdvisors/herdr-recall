@@ -10,7 +10,7 @@ The default view is a Superhuman-style Inbox of agent panes that currently requi
 Once a pane is in Inbox, its queue position stays pinned while you jump in and review it so the top thread never shifts away until you explicitly press `e` or `z`.
 Closing and reopening the popup restores the active tab, sort order, status filter, search query, and selected pane.
 Pressing `e` marks the selected pane done for the current cycle and removes it from Inbox.
-On the reference tabs the row stays in place and carries a visible `✓ done` mark, so the action answers from any list.
+The row leaves the list being triaged on every tab, so `e` always drains the view. `u` undoes the last `e` and returns the row. A snoozed row keeps its `~` badge and stays until due.
 Done is never mute: any new agent activity returns the thread to Inbox.
 Viewing a pane is the operator reading, not agent work, so it never returns a thread and never moves the pinned queue.
 Pressing `z` snoozes the selected pane with a quick reminder (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`) and hides it from Inbox until due.

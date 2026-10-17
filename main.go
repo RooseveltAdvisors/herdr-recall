@@ -750,11 +750,17 @@ func syncInboxRows(all []row, st *store, now int64) []row {
 			}
 		}
 		if ps.InInbox {
+			if r.Done != ps.Done {
+				r.Done = ps.Done
+				byID[r.PaneID] = r
+			}
 			continue
 		}
 		if inInbox(r, now) {
 			ps.InInbox = true
 			ps.Done = false
+			r.Done = false
+			byID[r.PaneID] = r
 		}
 	}
 	seen := map[string]bool{}
@@ -831,6 +837,21 @@ func (s *store) addToInbox(id string) {
 func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 	all := collectRows(s, st)
 	now := time.Now().Unix()
+	list := rowsForInner(all, s, st, v, mode, now)
+	// Done leaves the list you are looking at, on every tab, the way
+	// Superhuman archives out of whatever view you are triaging. The row
+	// returns on its own when the agent does something new, or on u.
+	out := make([]row, 0, len(list))
+	for _, r := range list {
+		// A snoozed row stays: it carries its ~ badge and returns when due.
+		if !r.Done || r.RemindAt > 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func rowsForInner(all []row, s *snapshot, st *store, v view, mode int, now int64) []row {
 	switch v.Kind {
 	case "inbox":
 		return syncInboxRows(all, st, now)
@@ -1846,6 +1867,7 @@ func runPicker() int {
 	remindField := 2
 	remindMode := 0
 	remindSel := 0
+	lastDoneID := ""
 	remindEd := vimline.New("")
 	remindPaneID := ""
 	remindLabel := ""
@@ -2403,14 +2425,31 @@ func runPicker() int {
 				if views(st)[tab].Kind == "inbox" {
 					st.jevLearn(r, rows[:sel])
 				}
-				status = "done: " + r.Label + " (press e again to undo)"
+				lastDoneID = r.PaneID
+				status = "done: " + r.Label + " (u undo)"
 			} else {
 				ps.Done = false
+				lastDoneID = ""
 				st.addToInbox(r.PaneID)
 				status = "moved to inbox: " + r.Label
 			}
 			_ = saveStore(st)
 			rebuild()
+		case key == "u" && !searching && !showHelp:
+			// Undo the last e, the way vim's u undoes the last change. The
+			// row returns to the list it left.
+			if lastDoneID == "" {
+				break
+			}
+			if ps := st.Panes[lastDoneID]; ps != nil {
+				ps.Done = false
+				ps.DoneState = ""
+				st.addToInbox(lastDoneID)
+				status = "undone"
+				lastDoneID = ""
+				_ = saveStore(st)
+				rebuild()
+			}
 		case key == "z" && !searching && !showHelp:
 			if len(rows) == 0 {
 				break
