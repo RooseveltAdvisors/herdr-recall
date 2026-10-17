@@ -1377,6 +1377,14 @@ func renderFrame(rows []row, sel int, fv vimline.View, status string, width, hei
 		}
 		var statusCell string
 		switch {
+		case r.Done && badge == "" && !r.ManualBlocked:
+			// Triage state outranks the agent word: this is what e just did.
+			mark := keyStGood + "\u2713 done"
+			if i == sel {
+				statusCell = pad(mark+keySelectFg, statusW)
+			} else {
+				statusCell = pad(mark+keyReset, statusW)
+			}
 		case statusW == 0 || word == "":
 			statusCell = strings.Repeat(" ", statusW)
 		case i == sel:

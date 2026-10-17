@@ -11,6 +11,9 @@ Tabs from left to right are `Favorites`, `Inbox`, `Recent`, `Most used`, and `Al
 
 In `Inbox`, press `e` to mark a thread Done for the current cycle.
 Done is not mute: any new agent activity brings the thread back to `Inbox`.
+On `Inbox` the row leaves the list. On every other tab the row stays where it
+is and shows a `✓ done` mark in the status column, so the triage state is
+visible from any list and `e` again undoes it right there.
 Viewing a pane is you reading, not the agent moving, so it never returns a thread and never moves the pinned queue.
 Press `e` again on that row to undo.
 Press `z` to snooze a thread (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`).
