@@ -43,6 +43,18 @@ func (s *store) ensureJev() {
 	if s.Jev == nil {
 		s.Jev = &jevState{}
 	}
+	// Every map must exist before any write. applyJev used to seed Scores
+	// without Weights, so the first jevLearn on Inbox wrote to a nil map,
+	// panicked, and killed the picker before the Enter jump ran.
+	if s.Jev.Weights == nil {
+		s.Jev.Weights = map[string]float64{}
+	}
+	if s.Jev.Scores == nil {
+		s.Jev.Scores = map[string]float64{}
+	}
+	if s.Jev.ScoreKey == nil {
+		s.Jev.ScoreKey = map[string]string{}
+	}
 }
 
 // jevProxyBin resolves the decision proxy, or "" when Jev is absent.

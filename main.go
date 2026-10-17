@@ -2114,6 +2114,13 @@ func runPicker() int {
 		if key == "" {
 			continue
 		}
+		if os.Getenv("RECALL_DEBUG") != "" {
+			f, _ := os.OpenFile("/tmp/recall-keys.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			if f != nil {
+				fmt.Fprintf(f, "key=%q tab=%d searching=%v rows=%d sel=%d\n", key, tab, searching, len(rows), sel)
+				f.Close()
+			}
+		}
 		if reminding && !showHelp {
 			if remindField == 2 {
 				switch remindEd.Feed(key) {
@@ -2388,6 +2395,16 @@ func runPicker() int {
 				sel++
 			}
 		case key == "enter":
+			if dbgEnter := os.Getenv("RECALL_DEBUG"); dbgEnter != "" {
+				f, _ := os.OpenFile("/tmp/recall-enter.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				if f != nil {
+					fmt.Fprintf(f, "ENTER tab=%d kind=%s rows=%d sel=%d\n", tab, views(st)[tab].Kind, len(rows), sel)
+					if len(rows) > 0 && sel < len(rows) {
+						fmt.Fprintf(f, "  target=%s label=%s\n", rows[sel].PaneID, rows[sel].Label)
+					}
+					f.Close()
+				}
+			}
 			if len(rows) == 0 {
 				return 0
 			}

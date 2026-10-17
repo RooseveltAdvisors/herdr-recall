@@ -126,3 +126,25 @@ func TestJevAbsentKeepsAppendOrder(t *testing.T) {
 		t.Fatalf("order = %v, want pinned then later", got)
 	}
 }
+
+// The captain's exact crash: applyJev seeded Scores but left Weights nil,
+// so the first jevLearn on Inbox wrote to a nil map and panicked.
+func TestJevLearnWithNilWeightsDoesNotPanic(t *testing.T) {
+	t.Setenv("HERDR_RECALL_JEV", "/bin/true")
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	// Simulate the corrupt state: applyJev ran, Weights was never created.
+	st.Jev = &jevState{
+		Scores:   map[string]float64{"a": 0.9},
+		ScoreKey: map[string]string{"a": "x"},
+		// Weights deliberately nil.
+	}
+	r := row{PaneID: "a", Label: "portal", Status: "working", Last: time.Now().Unix()}
+	// This must not panic.
+	st.jevLearn(r, nil)
+	if len(st.Jev.Weights) == 0 {
+		t.Fatal("ensureJev did not create the Weights map")
+	}
+	if st.Jev.Weights["status:working"] <= 0 {
+		t.Fatalf("weight = %v, want positive", st.Jev.Weights["status:working"])
+	}
+}
