@@ -1148,24 +1148,6 @@ func hintFooter(pairs ...string) string {
 	return strings.Join(parts, keyOverlay+"   "+keyReset)
 }
 
-// agoShort is the compact age form used when the overlay pane is narrow.
-func agoShort(ts int64) string {
-	if ts == 0 {
-		return "-"
-	}
-	d := time.Since(time.Unix(ts, 0))
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	}
-}
-
 // fitLine clips a rendered line to w display columns without breaking an ANSI
 // sequence, so a line can never wrap inside a narrow overlay pane.
 func fitLine(s string, w int) string {
@@ -1286,6 +1268,50 @@ func remindBadge(r row, now int64) string {
 		return "!"
 	}
 	return "~"
+}
+
+// screen is the shared frame builder every dialog uses.
+type screen struct {
+	lines  []string
+	width  int
+	height int
+}
+
+func newScreen(width, height, minHeight int) *screen {
+	if height < minHeight {
+		height = minHeight
+	}
+	return &screen{width: width, height: height}
+}
+
+func (sc *screen) emit(line string) {
+	sc.lines = append(sc.lines, fitLine(line, sc.width))
+}
+
+func (sc *screen) header(names []string, active int) {
+	sc.emit(tabBar(names, active))
+	sc.rule()
+}
+
+func (sc *screen) rule() {
+	sc.emit(keySurface + strings.Repeat("─", max(8, sc.width-1)) + keyReset)
+}
+
+func (sc *screen) done() string {
+	if len(sc.lines) > sc.height {
+		sc.lines = sc.lines[:sc.height]
+	}
+	return paint(sc.lines)
+}
+
+// dialog: header, body closure, footer rule, hints.
+func dialog(width, height, minHeight int, names []string, active int, body func(*screen), hints string) string {
+	sc := newScreen(width, height, minHeight)
+	sc.header(names, active)
+	body(sc)
+	sc.rule()
+	sc.emit(hintFooter(hints))
+	return sc.done()
 }
 
 // renderFrame draws one screenful. Exposed via --render so screenshots and
@@ -1635,70 +1661,51 @@ func stepFormValue(field, dir int, sort string, limit int, only, where string) (
 // renderForm is the criteria editor. Every choice is on screen. j/k moves
 // between fields. h/l changes the highlighted choice. Letters type the name.
 func renderForm(width, height int, names []string, active, field int, editing bool, fv vimline.View, sort string, limit int, only, where, status string) string {
-	if height < 8 {
-		height = 8
-	}
 	title := "New tab"
 	if editing {
 		title = "Edit tab"
 	}
-	var lines []string
-	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
-	emit(tabBar(names, active))
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit(keyText + keyBold + "  " + title + keyReset)
-	emit(keyOverlay + "  " + formSummary(sort, limit, only, where) + keyReset)
-	emit(fieldTitle("Name", field == 0))
-	emit(renderField(fv, width))
-	emit(fieldTitle("Sort", field == 1))
-	for _, line := range choiceLines(sortLabels(), sortChoice(sort), width) {
-		emit(line)
+	sc := newScreen(width, height, 8)
+	sc.header(names, active)
+	sc.emit(keyText + keyBold + "  " + title + keyReset)
+	sc.emit(keyOverlay + "  " + formSummary(sort, limit, only, where) + keyReset)
+	sc.emit(fieldTitle("Name", field == 0))
+	sc.emit(renderField(fv, sc.width))
+	sc.emit(fieldTitle("Sort", field == 1))
+	for _, line := range choiceLines(sortLabels(), sortChoice(sort), sc.width) {
+		sc.emit(line)
 	}
-	emit(fieldTitle("How many", field == 2))
-	for _, line := range choiceLines(limitLabels(), limitChoice(limit), width) {
-		emit(line)
+	sc.emit(fieldTitle("How many", field == 2))
+	for _, line := range choiceLines(limitLabels(), limitChoice(limit), sc.width) {
+		sc.emit(line)
 	}
-	emit(fieldTitle("Pinned", field == 3))
-	for _, line := range choiceLines(onlyLabels(), onlyChoice(only), width) {
-		emit(line)
+	sc.emit(fieldTitle("Pinned", field == 3))
+	for _, line := range choiceLines(onlyLabels(), onlyChoice(only), sc.width) {
+		sc.emit(line)
 	}
-	emit(fieldTitle("Workspace", field == 4))
-	for _, line := range choiceLines(whereLabels(), whereChoice(where), width) {
-		emit(line)
+	sc.emit(fieldTitle("Workspace", field == 4))
+	for _, line := range choiceLines(whereLabels(), whereChoice(where), sc.width) {
+		sc.emit(line)
 	}
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit(hintFooter("j/k", "field", "h/l", "choice", "enter", "save", "esc", "cancel"))
+	sc.rule()
+	sc.emit(hintFooter("j/k", "field", "h/l", "choice", "enter", "save", "esc", "cancel"))
 	if status != "" {
-		emit(keySub + status + keyReset)
+		sc.emit(keySub + status + keyReset)
 	}
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-	return paint(lines)
+	return sc.done()
 }
 
 // renderConfirm asks before a custom tab is removed. Cancel is selected.
 func renderConfirm(width, height int, names []string, active, sel int, name string) string {
-	if height < 8 {
-		height = 8
-	}
-	var lines []string
-	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
-	emit(tabBar(names, active))
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit("")
-	emit(keyText + keyBold + "  Delete " + name + "?" + keyReset)
-	emit(keyOverlay + "  The panes stay. Only this tab is removed." + keyReset)
-	emit("")
-	for _, line := range choiceLines([]string{"Delete", "Cancel"}, sel, width) {
-		emit(line)
-	}
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit(hintFooter("h/l", "choose", "enter", "confirm", "esc", "back"))
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-	return paint(lines)
+	return dialog(width, height, 8, names, active, func(sc *screen) {
+		sc.emit("")
+		sc.emit(keyText + keyBold + "  Delete " + name + "?" + keyReset)
+		sc.emit(keyOverlay + "  The panes stay. Only this tab is removed." + keyReset)
+		sc.emit("")
+		for _, line := range choiceLines([]string{"Delete", "Cancel"}, sel, sc.width) {
+			sc.emit(line)
+		}
+	}, "h/l choose,enter confirm,esc back")
 }
 
 func remindPicks() []string { return []string{"20min", "1h", "3h", "tomorrow", "clear"} }
@@ -1710,67 +1717,42 @@ func remindModeOpts() []string   { return []string{"", "regardless"} }
 // field. The time is typed with the shared vim editor and the resolved
 // absolute time is shown while you type, the way Superhuman does it.
 func renderRemind(width, height int, names []string, active, field, mode, pick int, fv vimline.View, label string) string {
-	if height < 14 {
-		height = 14
-	}
-	var lines []string
-	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
-	emit(tabBar(names, active))
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit("")
-	emit(keyText + keyBold + "  Remind me about " + label + keyReset)
-	emit(keyOverlay + "  Hides this thread from Inbox. New agent activity returns it early." + keyReset)
-	emit("")
-	emit(fieldTitle("Return to Inbox", field == 0))
-	for _, line := range choiceLines(remindModeLabels(), mode, width) {
-		emit(line)
-	}
-	emit(fieldTitle("Quick picks", field == 1))
-	for _, line := range choiceLines(remindPicks(), pick, width) {
-		emit(line)
-	}
-	emit(fieldTitle("Time", field == 2))
-	emit(renderField(fv, width))
-	switch _, ok, desc := duration.Parse(fv.Text, time.Now()); {
-	case ok:
-		emit(keyStGood + "  → " + desc + keyReset)
-	case strings.TrimSpace(fv.Text) == "":
-		emit(keyOverlay + "  → type a time: 3h 2w 1d12h tomorrow, or clear" + keyReset)
-	default:
-		emit(keyStBad + "  → not a time. Units: min h d w mo y" + keyReset)
-	}
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit(hintFooter("j/k", "field", "h/l", "choice", "enter", "set reminder", "esc", "cancel"))
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-	return paint(lines)
+	return dialog(width, height, 14, names, active, func(sc *screen) {
+		sc.emit("")
+		sc.emit(keyText + keyBold + "  Remind me about " + label + keyReset)
+		sc.emit(keyOverlay + "  Hides this thread from Inbox. New agent activity returns it early." + keyReset)
+		sc.emit("")
+		sc.emit(fieldTitle("Return to Inbox", field == 0))
+		for _, line := range choiceLines(remindModeLabels(), mode, sc.width) {
+			sc.emit(line)
+		}
+		sc.emit(fieldTitle("Quick picks", field == 1))
+		for _, line := range choiceLines(remindPicks(), pick, sc.width) {
+			sc.emit(line)
+		}
+		sc.emit(fieldTitle("Time", field == 2))
+		sc.emit(renderField(fv, sc.width))
+		switch _, ok, desc := duration.Parse(fv.Text, time.Now()); {
+		case ok:
+			sc.emit(keyStGood + "  → " + desc + keyReset)
+		case strings.TrimSpace(fv.Text) == "":
+			sc.emit(keyOverlay + "  → type a time: 3h 2w 1d12h tomorrow, or clear" + keyReset)
+		default:
+			sc.emit(keyStBad + "  → not a time. Units: min h d w mo y" + keyReset)
+		}
+	}, "j/k field,h/l choice,enter set reminder,esc cancel")
 }
 
 func renderNote(width, height int, names []string, active int, fv vimline.View) string {
-	if height < 8 {
-		height = 8
-	}
-	var lines []string
-	emit := func(line string) { lines = append(lines, fitLine(line, width)) }
-	emit(tabBar(names, active))
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit("")
-	emit(keyText + keyBold + "  Sticky note" + keyReset)
-	emit(keyOverlay + "  Shows beside the tab name so you remember what this thread is waiting on." + keyReset)
-	emit("")
-	emit(renderField(fv, width))
-	emit("")
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit(hintFooter("enter", "save", "ctrl+u", "clear", "esc", "cancel"))
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-	return paint(lines)
+	return dialog(width, height, 8, names, active, func(sc *screen) {
+		sc.emit("")
+		sc.emit(keyText + keyBold + "  Sticky note" + keyReset)
+		sc.emit(keyOverlay + "  Shows beside the tab name so you remember what this thread is waiting on." + keyReset)
+		sc.emit("")
+		sc.emit(renderField(fv, sc.width))
+	}, "enter save,ctrl+u clear,esc cancel")
 }
 
-// clipTail keeps the distinguishing end of a name: "portal-internal-scheduler"
-// shows its tail, never the "portal-int…" head clip.
 func clipTail(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
@@ -2614,17 +2596,6 @@ func runPicker() int {
 // ---------------------------------------------------------------------------
 // entrypoints
 // ---------------------------------------------------------------------------
-
-func paneRectWidth(s *snapshot, paneID string) int {
-	for _, l := range s.Layouts {
-		for _, lp := range l.Panes {
-			if lp.PaneID == paneID {
-				return lp.Rect.Width
-			}
-		}
-	}
-	return 0
-}
 
 func openPicker() int {
 	if id, err := recordFocus(); err == nil {
