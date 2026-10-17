@@ -247,19 +247,13 @@ func loadStore() *store {
 		s.TabsInit = true
 		_ = saveStore(s)
 	}
-	// ponytail: one-time bump, 20-row defaults left the popup half empty
-	for i := range s.Tabs {
-		if s.Tabs[i].Limit == 20 {
-			s.Tabs[i].Limit = 50
-		}
-	}
 	return s
 }
 
 func defaultTabs() []customTab {
 	return []customTab{
-		{Name: "Recent", Sort: "last", Limit: 50, Fixed: true},
-		{Name: "Most used", Sort: "times", Limit: 50, Fixed: true},
+		{Name: "Recent", Sort: "last", Limit: 20, Fixed: true},
+		{Name: "Most used", Sort: "times", Limit: 20, Fixed: true},
 	}
 }
 
@@ -708,10 +702,7 @@ func inInbox(r row, now int64) bool {
 	}
 	sw := statusWord(r.Status)
 	if !r.Done {
-		// Any live pane with an agent qualifies: the captain manages 20 to 30
-		// threads and needs them all visible for triage, not just ones the
-		// picker has already recorded a visit for.
-		return sw != "" || r.Last > 0 || r.Note != ""
+		return r.Last > 0 || r.Note != "" || sw == "blocked" || sw == "done"
 	}
 	// Done is not mute. New agent activity brings the thread back.
 	return activityChanged(sw, r.DoneState)
@@ -849,11 +840,9 @@ func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 	if v.Kind == "inbox" {
 		return inboxVisible(syncInboxRows(all, st, now), s.FocusedPaneID)
 	}
-	// Done leaves the list you are looking at, on every tab, the way
-	// Superhuman archives out of whatever view you are triaging. Filtering
-	// BEFORE the limit matters: done rows must not consume tab slots, or a
-	// limit of 50 with 40 done panes shows 10 rows.
-	return rowsForInner(triageVisible(all), s, st, v, mode, now)
+	// Reference tabs show every pane, done or not, so the captain can always
+	// find a thread. Only the Inbox drains on e. Done rows carry a check.
+	return rowsForInner(all, s, st, v, mode, now)
 }
 
 // triageVisible drops rows done by e. A snoozed row keeps its badge and stays
