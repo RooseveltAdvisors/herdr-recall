@@ -214,3 +214,52 @@ func TestInboxRetainsActivePaneAcrossJumps(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpEntriesSearchableAndJInFooter(t *testing.T) {
+	all := allHelpEntries()
+	if len(all) < 25 {
+		t.Fatalf("expected at least 25 help entries, got %d", len(all))
+	}
+
+	// Verify key shortcuts are searchable
+	testQueries := []struct {
+		query   string
+		wantKey string
+	}{
+		{"J", "J"},
+		{"jev", "J"},
+		{"teach", "i"},
+		{"enter", "enter"},
+		{"ctrl-d", "ctrl-d / ctrl-u"},
+		{"snooze", "z"},
+		{"note", "n"},
+		{"undo", "u"},
+		{"filter", "b w i d a"},
+	}
+
+	for _, tc := range testQueries {
+		matches := filterHelpEntries(all, tc.query)
+		found := false
+		for _, m := range matches {
+			if strings.Contains(m.key, tc.wantKey) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("query %q did not match expected key %q in help entries", tc.query, tc.wantKey)
+		}
+	}
+
+	// Verify that 'J' is explicitly shown on the page footer in renderFrame
+	rows := []row{{PaneID: "p1", Label: "build", Status: "working"}}
+	frame := renderFrame(rows, 0, 0, vimline.View{Label: "/"}, "", 100, 16, []string{"Inbox"}, 0, "both", "")
+	plain := stripANSI(frame)
+
+	if !strings.Contains(plain, "J jev") {
+		t.Fatalf("expected 'J jev' to be shown in the page footer:\n%s", plain)
+	}
+	if !strings.Contains(plain, "? help") {
+		t.Fatalf("expected '? help' to be shown in the page footer:\n%s", plain)
+	}
+}

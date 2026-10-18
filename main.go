@@ -1190,32 +1190,35 @@ type helpEntry struct {
 
 func allHelpEntries() []helpEntry {
 	return []helpEntry{
-		{"j / k / arrows", "move one row, or N rows with a count"},
-		{"g / G", "first row / last row"},
+		{"enter", "focus / switch to selected pane directly"},
+		{"j / k / arrows", "move one row, or N rows with a count (e.g. 3j)"},
+		{"g / G", "jump to first / last row"},
+		{"ctrl-d / ctrl-u", "scroll half-page down / up"},
 		{"e", "mark done. Leaves current list. u undoes"},
+		{"u", "undo the last e, returning thread to queue"},
 		{"i", "teach Jev on selected thread with visual preference"},
-		{"z", "snooze with typed time (3h, 2w, tomorrow, clear)"},
-		{"n", "sticky note, edited with vim keys"},
-		{"!", "toggle manual blocked override"},
-		{"m", "mark or unmark favorite (*)"},
+		{"J", "Jev dashboard: inspect and delete learned weights, see preview"},
+		{"z", "snooze with typed time (3h, 2w, tomorrow, clear) and return rules"},
+		{"n", "sticky note on selected thread, edited with vim keys"},
+		{"!", "toggle manual blocked override on selected thread"},
+		{"m", "mark or unmark favorite star (*)"},
 		{"b w i d a", "filter status: blocked, working, idle, done, all"},
-		{"/", "search, edited with vim keys"},
-		{"h / l", "switch tabs"},
+		{"/", "search tab names and sticky notes, with vim editing"},
+		{"h / l / arrows", "switch tabs (Inbox, Favorites, Recent, Most used, All)"},
+		{"s", "on All and Favorites: cycle sort order"},
 		{"t c / t r / t x", "create, revise, or delete a custom tab"},
-		{"s", "on All and Favorites: cycle sort"},
-		{"J", "inspect and correct Jev learnings"},
-		{"u", "undo the last e"},
-		{"?", "open or close this help"},
+		{"?", "open or close this searchable help overlay"},
 		{"esc", "insert to normal, normal to browse, clears search, closes"},
 		{"ctrl+c", "close from anywhere"},
 		{"jj / esc", "leave insert mode in any text field"},
-		{"w / b / e", "move by word in any text field"},
-		{"0 / $", "start / end of line in any text field"},
-		{"x / r / s", "delete or replace char in any text field"},
-		{"d / c / y", "delete, change, yank with motion in any text field"},
-		{"p / P", "paste after / before in any text field"},
-		{"u / ctrl+r", "undo / redo in any text field"},
-		{".", "repeat last edit in any text field"},
+		{"w / b / e", "move by word forward / backward / end in text field"},
+		{"0 / $", "jump to start / end of line in text field"},
+		{"x / X", "delete character under / before cursor in text field"},
+		{"r / s", "replace character / substitute in text field"},
+		{"d / c / y", "delete, change, yank with motion in text field"},
+		{"p / P", "paste after / before in text field"},
+		{"u / ctrl+r", "undo / redo in text field"},
+		{".", "repeat last edit in text field"},
 	}
 }
 
@@ -2011,9 +2014,9 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	if fv.Focused {
 		emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "esc", "browse", "ctrl+c", "close"))
 	} else {
-		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "z", "remind", "n", "note", "!", "block", "/", "search"))
+		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "J", "jev", "z", "remind", "n", "note", "!", "block", "/", "search"))
 	}
-	extra := "h/l tabs   m mark   b/w/i/d/a states   t c/r/x tab"
+	extra := "h/l tabs   m mark   u undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
 	}
