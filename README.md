@@ -1,14 +1,13 @@
 # herdr-recall
 
+![herdr-recall hero](assets/hero.png)
+
 A Superhuman-style agent triage inbox and pane recall picker for [Herdr](https://herdr.dev).
 When you switch across 20 to 30 live agent threads to give quick feedback and unblock work, `herdr-recall` keeps track of which threads need a cycle-back, lets you leave sticky notes and reminders, and jumps straight to any pane from `prefix+k`.
 
 See [VISION.md](VISION.md) for the project vision and acceptance policy.
 
-Press `prefix+k` and the picker opens as a 95% by 95% popup. The pane you are
-sitting in never appears in `Inbox`: opening the picker bumps it to most
-recent, so it would otherwise always top the triage list and Enter on it
-would go nowhere.
+Press `prefix+k` and the picker opens as a 95% by 95% popup.
 Tabs from left to right are `Favorites`, `Inbox`, `Recent`, `Most used`, and `All`.
 `Recent` and `Most used` start as custom tabs. `t c` creates one, `t r` revises it, and `t x` deletes it after a confirmation.
 
@@ -114,6 +113,14 @@ The CLI can do the same: `herdr-recall jev` lists, `jev reset` clears,
 Inbox triage view (default view with pinned queue order, sticky notes, and due `!` reminder badge):
 
 ![inbox triage view](assets/screenshot-browse.png)
+
+Visual teach dialog (`i`) with visual preference selection and feedback:
+
+![visual teach mode](assets/screenshot-teach.png)
+
+Jev learned weights dashboard (`J`) with priority impact bars and inbox ranking preview:
+
+![jev dashboard](assets/screenshot-jev.png)
 
 All view showing all four status colours (red blocked, yellow working, teal done, green idle) and a snoozed `~` reminder badge:
 

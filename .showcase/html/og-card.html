@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 1200px;
+  height: 630px;
+  background: #0d0f17;
+  background-image: 
+    radial-gradient(circle at 15% 15%, rgba(95, 215, 255, 0.15) 0%, transparent 45%),
+    radial-gradient(circle at 85% 85%, rgba(255, 215, 95, 0.08) 0%, transparent 40%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #f0f3f6;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 60px 70px;
+  overflow: hidden;
+}
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo-box {
+  width: 44px;
+  height: 44px;
+  background: #181b26;
+  border: 1px solid rgba(95, 215, 255, 0.3);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 20px;
+  font-weight: 700;
+  color: #5fd7ff;
+  box-shadow: 0 4px 12px rgba(95, 215, 255, 0.15);
+}
+
+.brand-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 22px;
+  font-weight: 700;
+  color: #f0f3f6;
+  letter-spacing: -0.02em;
+}
+
+.key-pill {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  background: #5fd7ff;
+  color: #0e1017;
+  padding: 6px 14px;
+  border-radius: 6px;
+  letter-spacing: 0.04em;
+}
+
+.center {
+  margin-top: 10px;
+}
+
+.headline {
+  font-size: 48px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  margin-bottom: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #c4cbd4 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.tagline {
+  font-size: 21px;
+  color: #8892a0;
+  line-height: 1.4;
+  max-width: 860px;
+}
+
+.bottom {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.feature-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #161822;
+  border: 1px solid #282c3c;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  color: #d0d0d0;
+}
+
+.feature-pill .key {
+  color: #5fd7ff;
+  font-weight: 700;
+}
+
+.feature-pill .sep {
+  color: #4a5268;
+}
+
+.feature-pill.active {
+  border-color: rgba(95, 215, 255, 0.4);
+  background: rgba(95, 215, 255, 0.08);
+}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="brand">
+    <div class="logo-box">⌘k</div>
+    <div class="brand-name">herdr-recall</div>
+  </div>
+  <div class="key-pill">PREFIX + K</div>
+</div>
+
+<div class="center">
+  <div class="headline">Superhuman Triage Inbox<br>for Live Agent Threads</div>
+  <div class="tagline">Triage across 20–30 concurrent coding agent panes with vim navigation, real-time Jev learning, snoozing, and sticky notes.</div>
+</div>
+
+<div class="bottom">
+  <div class="feature-pill active">
+    <span class="key">Inbox</span>
+    <span class="sep">·</span>
+    <span>Auto-surfacing queue</span>
+  </div>
+  <div class="feature-pill">
+    <span class="key">i</span>
+    <span class="sep">·</span>
+    <span>Teach Jev</span>
+  </div>
+  <div class="feature-pill">
+    <span class="key">e</span>
+    <span class="sep">·</span>
+    <span>Mark Done</span>
+  </div>
+  <div class="feature-pill">
+    <span class="key">z</span>
+    <span class="sep">·</span>
+    <span>Snooze</span>
+  </div>
+  <div class="feature-pill">
+    <span class="key">n</span>
+    <span class="sep">·</span>
+    <span>Sticky Note</span>
+  </div>
+</div>
+
+</body>
+</html>

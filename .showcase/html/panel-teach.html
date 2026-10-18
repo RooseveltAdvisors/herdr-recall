@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 1328px;
+  height: 380px;
+  background: #111218;
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  color: #d0d0d0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 16px 24px;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #232634;
+  font-size: 12px;
+}
+
+.tab {
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: #636d7e;
+}
+
+.tab.active {
+  background: #5fd7ff;
+  color: #111218;
+  font-weight: 700;
+}
+
+.body {
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.title-main { color: #d0d0d0; }
+.title-target { color: #5fd7ff; }
+.title-id { color: #7b8496; font-size: 12px; font-weight: 400; }
+
+.meta-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+  color: #8892a0;
+}
+
+.meta-row .dot-red { color: #ff5f5f; }
+.meta-row .status-word { color: #ff5f5f; font-weight: 600; }
+.meta-row .note { color: #d0d0d0; }
+.meta-row .prio-val { color: #87d787; font-weight: 700; }
+
+.features-row {
+  font-size: 12px;
+  color: #636d7e;
+}
+
+.features-row .val { color: #a6adc8; }
+
+.field-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #5fd7ff;
+  margin-top: 4px;
+}
+
+.chips {
+  display: flex;
+  gap: 12px;
+}
+
+.chip {
+  padding: 5px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  background: #181b26;
+  border: 1px solid #282c3c;
+  color: #8892a0;
+}
+
+.chip.selected {
+  background: #5fd7ff;
+  border-color: #5fd7ff;
+  color: #111218;
+  font-weight: 700;
+}
+
+.input-box {
+  background: #181b26;
+  border: 1px solid rgba(95, 215, 255, 0.4);
+  padding: 8px 12px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #d0d0d0;
+  font-size: 13px;
+}
+
+.input-box .label {
+  color: #5fd7ff;
+  font-weight: 700;
+}
+
+.input-box .cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: #5fd7ff;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px solid #232634;
+  gap: 18px;
+  font-size: 11px;
+}
+
+.hint-key {
+  color: #5fd7ff;
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.hint-desc {
+  color: #7b8496;
+}
+</style>
+</head>
+<body>
+
+<div class="tab-bar">
+  <div class="tab active">Inbox</div>
+  <div class="tab">Favorites</div>
+  <div class="tab">Recent</div>
+  <div class="tab">Most used</div>
+  <div class="tab">All</div>
+</div>
+
+<div class="body">
+  <div class="title-row">
+    <span class="title-main">Teach Jev:</span>
+    <span class="title-target">billing</span>
+    <span class="title-id">(w1:p1)</span>
+  </div>
+
+  <div class="meta-row">
+    <span><span class="dot-red">●</span> <span class="status-word">blocked</span></span>
+    <span>note: <span class="note">waiting on stripe live api keys</span></span>
+    <span>priority: <span class="prio-val">+0.85</span></span>
+  </div>
+
+  <div class="features-row">
+    features: <span class="val">blocked agents (need your input), threads with a sticky note, billing</span>
+  </div>
+
+  <div class="field-title">Preference</div>
+  <div class="chips">
+    <div class="chip selected">Prefer (+)</div>
+    <div class="chip">Neutral</div>
+    <div class="chip">Demote (-)</div>
+  </div>
+
+  <div class="field-title">Feedback / Reason (optional)</div>
+  <div class="input-box">
+    <span class="label">reason</span>
+    <span>prioritize stripe billing integration over documentation</span>
+    <span class="cursor"></span>
+  </div>
+</div>
+
+<div class="footer">
+  <div><span class="hint-key">h/l</span><span class="hint-desc">choose</span></div>
+  <div><span class="hint-key">j/k</span><span class="hint-desc">field</span></div>
+  <div><span class="hint-key">enter</span><span class="hint-desc">save teaching</span></div>
+  <div><span class="hint-key">ctrl+u</span><span class="hint-desc">clear</span></div>
+  <div><span class="hint-key">esc</span><span class="hint-desc">cancel</span></div>
+</div>
+
+</body>
+</html>

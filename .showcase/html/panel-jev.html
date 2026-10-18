@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 1328px;
+  height: 420px;
+  background: #111218;
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  color: #d0d0d0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 16px 24px;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #232634;
+  font-size: 12px;
+}
+
+.tab {
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: #636d7e;
+}
+
+.tab.active {
+  background: #5fd7ff;
+  color: #111218;
+  font-weight: 700;
+}
+
+.header-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 0 4px;
+}
+
+.header-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f0f3f6;
+}
+
+.header-meta {
+  font-size: 12px;
+  color: #7b8496;
+}
+
+.weights {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0;
+}
+
+.weight-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+
+.weight-row.selected {
+  background: #5fd7ff;
+  color: #111218;
+  font-weight: 700;
+}
+
+.val {
+  width: 50px;
+  font-weight: 700;
+}
+.val.pos { color: #87d787; }
+.val.neg { color: #ff5f5f; }
+.weight-row.selected .val { color: #111218; }
+
+.bar {
+  width: 120px;
+  letter-spacing: -1px;
+}
+.bar.pos { color: #87d787; }
+.bar.neg { color: #ff5f5f; }
+.weight-row.selected .bar { color: #111218; }
+
+.tag {
+  font-weight: 700;
+  width: 70px;
+  font-size: 12px;
+}
+.tag.first { color: #87d787; }
+.tag.bury { color: #ff5f5f; }
+.tag.proj { color: #5fd7ff; }
+.weight-row.selected .tag { color: #111218; }
+
+.desc {
+  flex: 1;
+}
+
+.preview-sec {
+  border-top: 1px solid #232634;
+  padding-top: 8px;
+  margin-top: 6px;
+}
+
+.preview-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #5fd7ff;
+  margin-bottom: 4px;
+}
+
+.preview-row {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.preview-score { color: #87d787; font-weight: 700; width: 50px; }
+.preview-name { width: 140px; color: #f0f3f6; font-weight: 600; }
+.preview-reason { color: #7b8496; }
+
+.footer {
+  display: flex;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px solid #232634;
+  gap: 18px;
+  font-size: 11px;
+}
+
+.hint-key {
+  color: #5fd7ff;
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.hint-desc {
+  color: #7b8496;
+}
+</style>
+</head>
+<body>
+
+<div class="tab-bar">
+  <div class="tab active">Inbox</div>
+  <div class="tab">Favorites</div>
+  <div class="tab">Recent</div>
+  <div class="tab">Most used</div>
+  <div class="tab">All</div>
+</div>
+
+<div>
+  <div class="header-row">
+    <span class="header-title">Jev dashboard</span>
+    <span class="header-meta">(1/12) · 42 actions taught these</span>
+  </div>
+
+  <div class="weights">
+    <div class="weight-row selected">
+      <span class="val">+1.00</span>
+      <span class="bar">████████████</span>
+      <span class="tag">[FIRST]</span>
+      <span class="desc">blocked agents (need your input)</span>
+    </div>
+    <div class="weight-row">
+      <span class="val pos">+0.85</span>
+      <span class="bar pos">██████████░░</span>
+      <span class="tag first">[FIRST]</span>
+      <span class="desc">threads with a sticky note</span>
+    </div>
+    <div class="weight-row">
+      <span class="val neg">-0.50</span>
+      <span class="bar neg">██████░░░░░░</span>
+      <span class="tag bury">[BURY]</span>
+      <span class="desc">idle agents (waiting)</span>
+    </div>
+    <div class="weight-row">
+      <span class="val pos">+0.80</span>
+      <span class="bar pos">██████████░░</span>
+      <span class="tag proj">[PROJ]</span>
+      <span class="desc">billing</span>
+    </div>
+  </div>
+
+  <div class="preview-sec">
+    <div class="preview-title">INBOX PREVIEW (why top threads rank first)</div>
+    <div class="preview-row">
+      <span class="preview-score">+0.85</span>
+      <span class="preview-name">billing</span>
+      <span class="preview-reason">blocked agents, billing</span>
+    </div>
+    <div class="preview-row">
+      <span class="preview-score">+0.65</span>
+      <span class="preview-name">build</span>
+      <span class="preview-reason">fresh threads, working</span>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <div><span class="hint-key">enter</span><span class="hint-desc">clear</span></div>
+  <div><span class="hint-key">i</span><span class="hint-desc">teach</span></div>
+  <div><span class="hint-key">D</span><span class="hint-desc">clear all</span></div>
+  <div><span class="hint-key">j/k</span><span class="hint-desc">scroll weights</span></div>
+  <div><span class="hint-key">esc</span><span class="hint-desc">back</span></div>
+</div>
+
+</body>
+</html>

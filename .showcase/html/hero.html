@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 1280px;
+  height: 640px;
+  background: #0e1017;
+  background-image: 
+    radial-gradient(ellipse at 50% 0%, rgba(95, 215, 255, 0.12) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 80%, rgba(135, 215, 135, 0.05) 0%, transparent 50%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #d0d0d0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 44px 50px 36px;
+  overflow: hidden;
+}
+
+.header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(95, 215, 255, 0.1);
+  border: 1px solid rgba(95, 215, 255, 0.25);
+  color: #5fd7ff;
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 12px;
+  border-radius: 999px;
+  margin-bottom: 12px;
+}
+
+.badge .dot {
+  width: 6px;
+  height: 6px;
+  background: #5fd7ff;
+  border-radius: 50%;
+  box-shadow: 0 0 6px #5fd7ff;
+}
+
+.title {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #f0f3f6;
+  margin-bottom: 6px;
+}
+
+.subtitle {
+  font-size: 15px;
+  color: #8892a0;
+  max-width: 680px;
+}
+
+.window {
+  width: 1000px;
+  background: #151720;
+  border: 1px solid rgba(95, 215, 255, 0.2);
+  border-radius: 10px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  background: #111218;
+  padding: 8px 12px;
+  border-bottom: 1px solid #232634;
+  font-size: 12px;
+}
+
+.tab {
+  padding: 3px 10px;
+  border-radius: 4px;
+  color: #7b8496;
+}
+
+.tab.active {
+  background: #5fd7ff;
+  color: #151720;
+  font-weight: 700;
+}
+
+.search-bar {
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #7b8496;
+  border-bottom: 1px solid #232634;
+  font-size: 12px;
+}
+
+.search-bar .slash {
+  color: #5fd7ff;
+  font-weight: 700;
+}
+
+.search-bar .cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: #5fd7ff;
+  animation: none;
+}
+
+.rows {
+  padding: 6px 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  padding: 5px 16px;
+  gap: 10px;
+}
+
+.row.selected {
+  background: #5fd7ff;
+  color: #151720;
+  font-weight: 700;
+}
+
+.row.selected .note,
+.row.selected .time,
+.row.selected .status-text {
+  color: #242933;
+}
+
+.star { color: #ffd75f; width: 14px; }
+.dot-red { color: #ff5f5f; }
+.dot-yel { color: #ffd75f; }
+.dot-teal { color: #5fafaf; }
+.dot-grn { color: #87d787; }
+
+.badge-due {
+  color: #ffd75f;
+  font-weight: 700;
+  margin-right: 2px;
+}
+
+.name {
+  width: 140px;
+  font-weight: 600;
+}
+
+.note {
+  flex: 1;
+  color: #8892a0;
+  font-size: 12px;
+}
+
+.status-text {
+  width: 90px;
+  color: #7b8496;
+  font-size: 12px;
+}
+
+.time {
+  width: 60px;
+  text-align: right;
+  color: #636d7e;
+  font-size: 12px;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  background: #111218;
+  border-top: 1px solid #232634;
+  gap: 16px;
+  font-size: 11px;
+}
+
+.hint-key {
+  color: #5fd7ff;
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.hint-desc {
+  color: #7b8496;
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="badge"><span class="dot"></span> Herdr Plugin · Prefix+K</div>
+  <div class="title">Superhuman Triage Inbox &amp; Pane Recall</div>
+  <div class="subtitle">Zero-friction keyboard triage across 20–30 live agent threads with real-time Jev learning</div>
+</div>
+
+<div class="window">
+  <div class="tab-bar">
+    <div class="tab active">Inbox (5)</div>
+    <div class="tab">Favorites</div>
+    <div class="tab">Recent</div>
+    <div class="tab">Most used</div>
+    <div class="tab">All</div>
+  </div>
+  <div class="search-bar">
+    <span class="slash">/</span>
+    <span class="cursor"></span>
+    <span>search panes and sticky notes...</span>
+  </div>
+  <div class="rows">
+    <div class="row selected">
+      <span class="star">★</span>
+      <span class="dot-red">●</span>
+      <span class="name">billing</span>
+      <span class="note">waiting on stripe live api keys</span>
+      <span class="status-text"><span class="badge-due">!</span> blocked</span>
+      <span class="time">2m ago</span>
+    </div>
+    <div class="row">
+      <span class="star"></span>
+      <span class="dot-yel">●</span>
+      <span class="name">build</span>
+      <span class="note">running verification test suite</span>
+      <span class="status-text">working</span>
+      <span class="time">4m ago</span>
+    </div>
+    <div class="row">
+      <span class="star">★</span>
+      <span class="dot-yel">●</span>
+      <span class="name">portal</span>
+      <span class="note">refactoring authentication provider</span>
+      <span class="status-text">working</span>
+      <span class="time">7m ago</span>
+    </div>
+    <div class="row">
+      <span class="star"></span>
+      <span class="dot-teal">●</span>
+      <span class="name">review</span>
+      <span class="note">PR #248 checks passed</span>
+      <span class="status-text">done</span>
+      <span class="time">12m ago</span>
+    </div>
+    <div class="row">
+      <span class="star"></span>
+      <span class="dot-grn">●</span>
+      <span class="name">docs</span>
+      <span class="note">updated triage runbook</span>
+      <span class="status-text">idle</span>
+      <span class="time">28m ago</span>
+    </div>
+  </div>
+  <div class="footer">
+    <div><span class="hint-key">enter</span><span class="hint-desc">switch</span></div>
+    <div><span class="hint-key">e</span><span class="hint-desc">done</span></div>
+    <div><span class="hint-key">i</span><span class="hint-desc">teach</span></div>
+    <div><span class="hint-key">z</span><span class="hint-desc">remind</span></div>
+    <div><span class="hint-key">n</span><span class="hint-desc">note</span></div>
+    <div><span class="hint-key">!</span><span class="hint-desc">block</span></div>
+    <div><span class="hint-key">/</span><span class="hint-desc">search</span></div>
+  </div>
+</div>
+
+</body>
+</html>
