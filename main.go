@@ -1182,22 +1182,18 @@ func fitLine(s string, w int) string {
 	return out.String()
 }
 
-// renderHelp draws the ? overlay: every key and what it does. Esc returns to
-// the list on the same row; the picker itself stays open.
-func renderHelp(width, height int, fv vimline.View, sel int) string {
-	sc := newScreen(width, height, 10)
-	sc.emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help" + keyReset)
-	if fv.Text != "" || fv.Focused {
-		sc.emit(renderField(fv, sc.width))
-	} else {
-		sc.emit(keyOverlay + "/ to search keys" + keyReset)
-	}
-	sc.rule()
-	keys := [][2]string{
+// helpEntry is one key binding and what it does.
+type helpEntry struct {
+	key  string
+	desc string
+}
+
+func allHelpEntries() []helpEntry {
+	return []helpEntry{
 		{"j / k / arrows", "move one row, or N rows with a count"},
 		{"g / G", "first row / last row"},
-		{"e", "mark done. New agent activity returns it. e again undoes"},
-		{"z", "snooze: type 3h 2w 1d12h tomorrow, or clear"},
+		{"e", "mark done. Leaves current list. u undoes"},
+		{"z", "snooze with typed time (3h, 2w, tomorrow, clear)"},
 		{"n", "sticky note, edited with vim keys"},
 		{"!", "toggle manual blocked override"},
 		{"m", "mark or unmark favorite (*)"},
@@ -1210,44 +1206,139 @@ func renderHelp(width, height int, fv vimline.View, sel int) string {
 		{"J", "inspect and correct Jev learnings"},
 		{"u", "undo the last e"},
 		{"?", "open or close this help"},
-		{"esc", "insert to normal, normal to browse, then clears search, then closes"},
+		{"esc", "insert to normal, normal to browse, clears search, closes"},
 		{"ctrl+c", "close from anywhere"},
+		{"jj / esc", "leave insert mode in any text field"},
+		{"w / b / e", "move by word in any text field"},
+		{"0 / $", "start / end of line in any text field"},
+		{"x / r / s", "delete or replace char in any text field"},
+		{"d / c / y", "delete, change, yank with motion in any text field"},
+		{"p / P", "paste after / before in any text field"},
+		{"u / ctrl+r", "undo / redo in any text field"},
+		{".", "repeat last edit in any text field"},
 	}
-	sc.emit(keyAccentFg + keyBold + "  / and n use vim editing" + keyReset)
-	sc.emit(keyText + "  esc or jj enters normal mode. i I a A insert. w b e 0 ^ $ move." + keyReset)
-	sc.emit(keyText + "  x X r s delete or replace. d c y take a motion, with counts." + keyReset)
-	sc.emit(keyText + "  p P paste. u undo. ctrl+r redo. ~ change case. . repeat." + keyReset)
-	sc.emit(keyText + "  z times: min h d w mo y, compound like 1d12h, tomorrow, clear." + keyReset)
-	q := strings.ToLower(fv.Text)
-	shown := 0
-	for _, kv := range keys {
-		if q != "" && !strings.Contains(strings.ToLower(kv[0]+" "+kv[1]), q) {
-			continue
-		}
-		if shown == sel {
-			sc.emit(keySelectBg + keySelectFg + keyBold + pad("  "+kv[0]+"  "+kv[1], sc.width) + keyReset)
-		} else {
-			sc.emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
-		}
-		shown++
+}
+
+func filterHelpEntries(all []helpEntry, query string) []helpEntry {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return all
 	}
-	if shown == 0 {
-		sc.emit(keyOverlay + "  no keys match" + keyReset)
+	var out []helpEntry
+	for _, kv := range all {
+		if strings.Contains(strings.ToLower(kv.key), q) || strings.Contains(strings.ToLower(kv.desc), q) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// renderHelp draws the ? overlay with windowed scrolling so the highlighted
+// selection is always visible and never cut off past the screen height.
+func renderHelp(width, height int, fv vimline.View, sel int) string {
+	maxLines := height
+	if height > 6 {
+		maxLines = height - 1
+	}
+	sc := newScreen(width, maxLines, 8)
+	entries := filterHelpEntries(allHelpEntries(), fv.Text)
+	total := len(entries)
+	if sel >= total {
+		sel = max(0, total-1)
+	}
+	if sel < 0 {
+		sel = 0
+	}
+
+	posStr := ""
+	if total > 0 {
+		posStr = fmt.Sprintf("  (%d/%d)", sel+1, total)
+	}
+	sc.emit(keyAccentFg + keyBold + "? " + keyReset + keyText + "Help" + keyReset + keyOverlay + posStr + keyReset)
+	if fv.Text != "" || fv.Focused {
+		sc.emit(renderField(fv, sc.width))
+	} else {
+		sc.emit(keyOverlay + "  / to search keys" + keyReset)
 	}
 	sc.rule()
-	sc.emit(keyOverlay + "body text stays light, status dot colours: red blocked, yellow working, teal done, green idle" + keyReset)
+	headerN := len(sc.lines)
+	footerN := 2 // separator + footer hint line
+	visible := maxLines - headerN - footerN
+	if visible < 1 {
+		visible = 1
+	}
+
+	start := 0
+	if sel >= visible {
+		start = sel - visible + 1
+	}
+	end := start + visible
+	if end > total {
+		end = total
+	}
+
+	for i := start; i < end; i++ {
+		kv := entries[i]
+		if i == sel {
+			sc.emit(keySelectBg + keySelectFg + keyBold + pad("  "+pad(kv.key, 18)+"  "+kv.desc, sc.width) + keyReset)
+		} else {
+			sc.emit("  " + keyAccentFg + pad(kv.key, 18) + keyReset + keyText + kv.desc + keyReset)
+		}
+	}
+	if total == 0 {
+		sc.emit(keyOverlay + "  no keys match" + keyReset)
+	}
+
+	sc.rule()
+	if fv.Focused {
+		sc.emit(hintFooter("enter", "select", "↑↓", "move", "ctrl+u", "clear", "esc", "normal", "esc", "browse"))
+	} else {
+		sc.emit(hintFooter("j/k", "move", "/", "search", "esc", "close"))
+	}
 	return sc.done()
 }
 
 // filterRows narrows the frozen list to the query without changing its order.
-// renderJev is the Jev dashboard. Weights group by type, sort by impact,
-// and carry a bar so relative strength reads at a glance. A prediction
-// section shows what Jev would surface first right now.
-func renderJev(width, height int, names []string, active int, weights []jevWeight, sel int, totalExamples int, inboxTop []jevRowScore) string {
-	sc := newScreen(width, height, 12)
+type jevItem struct {
+	feature string
+	value   float64
+	section string // "FIRST", "BURY", "PROJ"
+}
+
+func jevSelectableItems(st *store) []jevItem {
+	if st.Jev == nil || len(st.Jev.Weights) == 0 {
+		return nil
+	}
+	allWeights := sortedJevWeights(st)
+	var pos, neg, labels []jevItem
+	for _, w := range allWeights {
+		if strings.HasPrefix(w.feature, "label:") {
+			labels = append(labels, jevItem{feature: w.feature, value: w.value, section: "PROJ"})
+		} else if w.value >= 0 {
+			pos = append(pos, jevItem{feature: w.feature, value: w.value, section: "FIRST"})
+		} else {
+			neg = append(neg, jevItem{feature: w.feature, value: w.value, section: "BURY"})
+		}
+	}
+	var out []jevItem
+	out = append(out, pos...)
+	out = append(out, neg...)
+	out = append(out, labels...)
+	return out
+}
+
+// renderJev is the Jev dashboard. All learned weights are selectable and
+// windowed so the highlighted row is always visible and never cut off by height.
+func renderJev(width, height int, names []string, active int, items []jevItem, sel int, totalExamples int, inboxTop []jevRowScore) string {
+	maxLines := height
+	if height > 6 {
+		maxLines = height - 1
+	}
+	sc := newScreen(width, maxLines, 10)
 	sc.header(names, active)
 
-	if len(weights) == 0 {
+	total := len(items)
+	if total == 0 {
 		sc.emit(keyText + keyBold + "  Jev dashboard" + keyReset)
 		sc.emit("")
 		sc.emit(keyOverlay + "  Nothing learned yet." + keyReset)
@@ -1258,48 +1349,46 @@ func renderJev(width, height int, names []string, active int, weights []jevWeigh
 		return sc.done()
 	}
 
-	pos, neg := splitWeights(weights)
-	labels := filterPrefix(weights, "label:")
-	sc.emit(keyText + keyBold + "  Jev dashboard" + keyReset + keyOverlay + "  " + fmt.Sprintf("%d actions taught these", totalExamples) + keyReset)
-	sc.emit("")
-
-	// Preferences
-	if len(pos) > 0 {
-		sc.emit(keyAccentFg + keyBold + "  SURFACES FIRST" + keyReset)
-		for i, w := range pos {
-			sc.emit(weightLine(w, i == sel, sc.width))
-		}
-		sc.emit("")
+	if sel >= total {
+		sel = max(0, total-1)
+	}
+	if sel < 0 {
+		sel = 0
 	}
 
-	// Demotions
-	if len(neg) > 0 {
-		sc.emit(keyStBad + keyBold + "  BURIED" + keyReset)
-		for i, w := range neg {
-			sc.emit(weightLine(w, sel == len(pos)+i, sc.width))
-		}
-		sc.emit("")
+	sc.emit(keyText + keyBold + "  Jev dashboard" + keyReset + keyOverlay + fmt.Sprintf("  (%d/%d)", sel+1, total) + "  " + fmt.Sprintf("%d actions taught these", totalExamples) + keyReset)
+	sc.rule()
+	headerN := len(sc.lines)
+
+	showPreview := maxLines >= 26 && len(inboxTop) > 0
+	previewN := 0
+	if showPreview {
+		previewN = 2 + minInt(3, len(inboxTop))
+	}
+	footerN := 2 // rule + hintFooter
+	visible := maxLines - headerN - footerN - previewN
+	if visible < 3 {
+		visible = 3
 	}
 
-	// Top labels (collapse the rest)
-	if len(labels) > 0 {
-		sc.emit(keyAccentFg + keyBold + "  PROJECTS" + keyReset + keyOverlay + "  top " + fmt.Sprintf("%d of %d", minInt(5, len(labels)), len(labels)) + keyReset)
-		for i, w := range labels {
-			if i >= 5 {
-				break
-			}
-			sc.emit(weightLine(w, false, sc.width))
-		}
-		if len(labels) > 5 {
-			sc.emit(keyOverlay + "  +" + fmt.Sprintf("%d more at baseline", len(labels)-5) + keyReset)
-		}
-		sc.emit("")
+	start := 0
+	if sel >= visible {
+		start = sel - visible + 1
+	}
+	end := start + visible
+	if end > total {
+		end = total
 	}
 
-	// Live inbox preview: the actual top rows and why Jev put them there
-	if len(inboxTop) > 0 {
-		sc.emit(keyAccentFg + keyBold + "  YOUR INBOX TOP, AND WHY" + keyReset)
-		for _, r := range inboxTop {
+	for i := start; i < end; i++ {
+		item := items[i]
+		sc.emit(jevItemLine(item, i == sel, sc.width))
+	}
+
+	if showPreview {
+		sc.rule()
+		sc.emit(keyAccentFg + keyBold + "  INBOX PREVIEW (why top threads rank first)" + keyReset)
+		for _, r := range inboxTop[:minInt(3, len(inboxTop))] {
 			score := fmt.Sprintf("%+.2f", r.score)
 			color := keyStGood
 			if r.score < 0 {
@@ -1307,10 +1396,6 @@ func renderJev(width, height int, names []string, active int, weights []jevWeigh
 			}
 			sc.emit("  " + color + pad(score, 7) + keyReset + keyText + pad(r.label, 24) + keyReset + keyOverlay + r.reason + keyReset)
 		}
-	} else {
-		sc.emit(keyAccentFg + keyBold + "  IF A THREAD ARRIVES NOW" + keyReset)
-		sc.emit("  " + keyOverlay + "blocked" + keyReset + "  " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "status", "blocked")}, sc.width-20))
-		sc.emit("  " + keyOverlay + "working" + keyReset + "  " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "status", "working")}, sc.width-20))
 	}
 
 	sc.rule()
@@ -1318,40 +1403,72 @@ func renderJev(width, height int, names []string, active int, weights []jevWeigh
 	return sc.done()
 }
 
-func weightLine(w jevWeight, selected bool, width int) string {
-	val := fmt.Sprintf("%+.2f", w.value)
-	desc := featureDescription(w.feature)
+func jevItemLine(item jevItem, selected bool, width int) string {
+	val := fmt.Sprintf("%+.2f", item.value)
+	desc := featureDescription(item.feature)
+	var tag string
+	switch item.section {
+	case "FIRST":
+		tag = keyStGood + "[FIRST] " + keyReset
+	case "BURY":
+		tag = keyStBad + "[BURY]  " + keyReset
+	default:
+		tag = keyAccentFg + "[PROJ]  " + keyReset
+	}
 	if selected {
-		return keySelectBg + keySelectFg + keyBold + pad("  "+val+" "+desc, width) + keyReset
+		plainTag := "[" + item.section + "] "
+		bar := weightBarPlain(item.value, 14)
+		return keySelectBg + keySelectFg + keyBold + pad("  "+val+" "+bar+"  "+plainTag+desc, width) + keyReset
 	}
 	color := keyStGood
-	if w.value < 0 {
+	if item.value < 0 {
 		color = keyStBad
 	}
-	return "  " + color + pad(val, 7) + keyReset + weightBar(w, 18) + " " + keyText + desc + keyReset
+	return "  " + color + pad(val, 7) + keyReset + weightBar(item.value, 14) + "  " + tag + keyText + desc + keyReset
 }
 
-func weightBar(w jevWeight, width int) string {
+func weightBarPlain(value float64, width int) string {
 	if width < 4 {
 		return ""
 	}
-	filled := int(abs64(w.value) * float64(width-2))
+	filled := int(abs64(value) * float64(width-2))
+	if filled > width-2 {
+		filled = width - 2
+	}
+	var b strings.Builder
+	for i := 0; i < width-2; i++ {
+		if i < filled {
+			b.WriteString("█")
+		} else {
+			b.WriteString("░")
+		}
+	}
+	return b.String()
+}
+
+func weightBar(value float64, width int) string {
+	if width < 4 {
+		return ""
+	}
+	filled := int(abs64(value) * float64(width-2))
 	if filled > width-2 {
 		filled = width - 2
 	}
 	color := keyStGood
-	if w.value < 0 {
+	if value < 0 {
 		color = keyStBad
 	}
-	bar := color
+	var b strings.Builder
+	b.WriteString(color)
 	for i := 0; i < width-2; i++ {
 		if i < filled {
-			bar += "\u2588"
+			b.WriteString("█")
 		} else {
-			bar += "\u2591"
+			b.WriteString("░")
 		}
 	}
-	return bar + keyReset
+	b.WriteString(keyReset)
+	return b.String()
 }
 
 // featureDescription turns a feature key into what it means to a human.
@@ -1410,50 +1527,6 @@ func featureDescription(f string) string {
 	return f
 }
 
-// predictWeight sums the learned weight for a hypothetical thread with the
-// given status or age, so the dashboard shows what Jev would do next.
-func predictWeight(weights []jevWeight, kind, val string) float64 {
-	sum := 0.0
-	for _, w := range weights {
-		if strings.HasPrefix(w.feature, kind+":") && strings.HasSuffix(w.feature, val) {
-			sum += w.value
-		}
-	}
-	if kind == "status" {
-		// a blocked agent is also "not idle" so the idle demotion applies
-		for _, w := range weights {
-			if w.feature == "status:idle" && w.value < 0 && val != "idle" {
-				sum += abs64(w.value) * 0.3
-			}
-		}
-	}
-	return sum
-}
-
-func splitWeights(weights []jevWeight) (pos, neg []jevWeight) {
-	for _, w := range weights {
-		if strings.HasPrefix(w.feature, "label:") {
-			continue
-		}
-		if w.value >= 0 {
-			pos = append(pos, w)
-		} else {
-			neg = append(neg, w)
-		}
-	}
-	return
-}
-
-func filterPrefix(weights []jevWeight, prefix string) []jevWeight {
-	var out []jevWeight
-	for _, w := range weights {
-		if strings.HasPrefix(w.feature, prefix) {
-			out = append(out, w)
-		}
-	}
-	return out
-}
-
 // jevRowScore pairs an inbox row with its Jev score and the human-readable
 // reason it ranked where it did.
 type jevRowScore struct {
@@ -1470,7 +1543,6 @@ func inboxTopScored(s *snapshot, st *store, n int) []jevRowScore {
 	var out []jevRowScore
 	for _, r := range rows {
 		score := st.jevPriority(r, time.Now().Unix())
-		// Build the reason from the top contributing features
 		var parts []string
 		for _, w := range sortedJevWeights(st) {
 			if len(parts) >= 2 {
@@ -1479,7 +1551,6 @@ func inboxTopScored(s *snapshot, st *store, n int) []jevRowScore {
 			if strings.HasPrefix(w.feature, "label:") && w.feature != "label:"+strings.Fields(r.Label)[0] {
 				continue
 			}
-			// crude match: does this feature's kind apply to this row?
 			if featureApplies(w.feature, r) {
 				parts = append(parts, featureDescription(w.feature))
 			}
@@ -1520,13 +1591,23 @@ func featureApplies(feature string, r row) bool {
 // renderJevType is the free-text Jev feedback input. Type part of a feature
 // name, see matching features, then + to prefer or - to demote.
 func renderJevType(width, height int, names []string, active int, query string, weights []jevWeight) string {
-	sc := newScreen(width, height, 10)
+	maxLines := height
+	if height > 6 {
+		maxLines = height - 1
+	}
+	sc := newScreen(width, maxLines, 10)
 	sc.header(names, active)
 	sc.emit(keyText + keyBold + "  Teach Jev" + keyReset)
 	sc.emit(keyOverlay + "  Type a feature, then + to prefer or - to demote" + keyReset)
 	sc.emit("")
 	sc.emit(renderField(vimline.New(query).View("feature", true), sc.width))
 	sc.emit("")
+	headerN := len(sc.lines)
+	footerN := 2 // rule + hintFooter
+	visible := maxLines - headerN - footerN
+	if visible < 2 {
+		visible = 2
+	}
 	q := strings.ToLower(query)
 	matched := 0
 	for _, w := range weights {
@@ -1540,7 +1621,7 @@ func renderJevType(width, height int, names []string, active int, query string, 
 		}
 		sc.emit("  " + color + pad(val, 7) + keyReset + keyText + featureDescription(w.feature) + keyReset)
 		matched++
-		if matched >= 8 {
+		if matched >= visible {
 			break
 		}
 	}
@@ -1559,7 +1640,6 @@ func jevApplyFeedback(st *store, text string, up bool) {
 	if feature == "" {
 		return
 	}
-	// If it matches an existing feature exactly, use that
 	st.ensureJev()
 	for f := range st.Jev.Weights {
 		if f == feature || strings.HasSuffix(f, ":"+feature) {
@@ -1567,7 +1647,6 @@ func jevApplyFeedback(st *store, text string, up bool) {
 			break
 		}
 	}
-	// No prefix: treat as a label
 	if !strings.Contains(feature, ":") {
 		feature = "label:" + feature
 	}
@@ -2364,6 +2443,12 @@ func runPicker() int {
 
 	// activeEd reports which vim editor owns the next key, if any.
 	activeEd := func() *vimline.Editor {
+		if showHelp && helpSearching {
+			return helpEd
+		}
+		if showJev && jevTyping {
+			return jevEd
+		}
 		if noting {
 			return noteEd
 		}
@@ -2466,7 +2551,7 @@ func runPicker() int {
 			if jevTyping {
 				frame = renderJevType(w, h, viewNames(st), tab, jevEd.Text(), sortedJevWeights(st))
 			} else {
-				frame = renderJev(w, h, viewNames(st), tab, sortedJevWeights(st), jevSel, ex, inboxTopScored(frozen, st, 5))
+				frame = renderJev(w, h, viewNames(st), tab, jevSelectableItems(st), jevSel, ex, inboxTopScored(frozen, st, 5))
 			}
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
@@ -2521,6 +2606,134 @@ func runPicker() int {
 				f.Close()
 			}
 		}
+		half := max(1, (h-3)/2)
+		if showHelp {
+			entries := filterHelpEntries(allHelpEntries(), helpEd.Text())
+			total := len(entries)
+			if helpSel >= total {
+				helpSel = max(0, total-1)
+			}
+			if helpSel < 0 {
+				helpSel = 0
+			}
+			if helpSearching {
+				switch helpEd.Feed(key) {
+				case vimline.ActOut:
+					helpSearching = false
+				case vimline.ActCancel:
+					showHelp = false
+					helpSearching = false
+				case vimline.ActDown:
+					if helpSel < total-1 {
+						helpSel++
+					}
+				case vimline.ActUp:
+					if helpSel > 0 {
+						helpSel--
+					}
+				case vimline.ActFirst:
+					helpSel = 0
+				case vimline.ActLast:
+					helpSel = max(0, total-1)
+				case vimline.ActPageDown:
+					helpSel = minInt(helpSel+half, max(0, total-1))
+				case vimline.ActPageUp:
+					helpSel = max(0, helpSel-half)
+				}
+			} else {
+				switch key {
+				case "/":
+					helpSearching = true
+					helpEd = vimline.New("")
+					helpSel = 0
+				case "j", "down":
+					if helpSel < total-1 {
+						helpSel++
+					}
+				case "k", "up":
+					if helpSel > 0 {
+						helpSel--
+					}
+				case "g":
+					helpSel = 0
+				case "G":
+					helpSel = max(0, total-1)
+				case "ctrl-d":
+					helpSel = minInt(helpSel+half, max(0, total-1))
+				case "ctrl-u":
+					helpSel = max(0, helpSel-half)
+				case "?", "q", "esc":
+					showHelp = false
+				}
+			}
+			continue
+		}
+		if showJev {
+			items := jevSelectableItems(st)
+			total := len(items)
+			if jevSel >= total {
+				jevSel = max(0, total-1)
+			}
+			if jevSel < 0 {
+				jevSel = 0
+			}
+			if jevTyping {
+				switch key {
+				case "+", "=":
+					jevApplyFeedback(st, jevEd.Text(), true)
+					jevTyping = false
+					rebuild()
+				case "-":
+					jevApplyFeedback(st, jevEd.Text(), false)
+					jevTyping = false
+					rebuild()
+				case "esc":
+					jevTyping = false
+				default:
+					jevEd.Feed(key)
+				}
+				continue
+			}
+			switch key {
+			case "i":
+				jevTyping = true
+				jevEd = vimline.New("")
+			case "esc", "q":
+				showJev = false
+			case "j", "down":
+				if jevSel < total-1 {
+					jevSel++
+				}
+			case "k", "up":
+				if jevSel > 0 {
+					jevSel--
+				}
+			case "g":
+				jevSel = 0
+			case "G":
+				jevSel = max(0, total-1)
+			case "ctrl-d":
+				jevSel = minInt(jevSel+half, max(0, total-1))
+			case "ctrl-u":
+				jevSel = max(0, jevSel-half)
+			case "enter":
+				if jevSel < len(items) {
+					st.ensureJev()
+					delete(st.Jev.Weights, items[jevSel].feature)
+					_ = saveStore(st)
+					items = jevSelectableItems(st)
+					if jevSel >= len(items) {
+						jevSel = max(0, len(items)-1)
+					}
+					rebuild()
+				}
+			case "D":
+				confirmName = "all Jev learnings"
+				confirmSel = 1
+				showJev = false
+			}
+			continue
+		}
 		if reminding && !showHelp {
 			if remindField == 2 {
 				switch remindEd.Feed(key) {
@@ -2568,7 +2781,6 @@ func runPicker() int {
 			}
 			continue
 		}
-		half := max(1, (h-3)/2)
 		if noting && !showHelp {
 			switch noteEd.Feed(key) {
 			case vimline.ActAccept:
@@ -2768,10 +2980,6 @@ func runPicker() int {
 		browseCount := tabKeys.TakeCount()
 		switch {
 		case key == "esc":
-			if showHelp {
-				showHelp = false // esc closes help, the row stays
-				continue
-			}
 			// esc unwinds one thing per press, the same ladder the field
 			// uses: the search words go first, then the status filter, then
 			// the picker closes.
@@ -2788,37 +2996,6 @@ func runPicker() int {
 				continue
 			}
 			return 0 // esc closes from browse mode
-		case showHelp:
-			if helpSearching {
-				switch helpEd.Feed(key) {
-				case vimline.ActOut:
-					helpSearching = false
-				case vimline.ActCancel:
-					showHelp = false
-					helpSearching = false
-				case vimline.ActDown:
-					helpSel++
-				case vimline.ActUp:
-					if helpSel > 0 {
-						helpSel--
-					}
-				}
-			} else {
-				switch key {
-				case "/":
-					helpSearching = true
-					helpEd = vimline.New("")
-					helpSel = 0
-				case "j", "down":
-					helpSel++
-				case "k", "up":
-					if helpSel > 0 {
-						helpSel--
-					}
-				case "?", "q", "esc":
-					showHelp = false
-				}
-			}
 		case key == "up":
 			if sel > 0 {
 				sel--
@@ -2851,55 +3028,14 @@ func runPicker() int {
 			return 0
 		case key == "?" && !searching:
 			showHelp = true
+			helpSel = 0
+			helpSearching = false
+			helpEd = vimline.New("")
 		case key == "J" && !searching && !showHelp:
 			showJev = true
 			jevSel = 0
-		case showJev:
-			if jevTyping {
-				switch key {
-				case "+", "=":
-					jevApplyFeedback(st, jevEd.Text(), true)
-					jevTyping = false
-				case "-":
-					jevApplyFeedback(st, jevEd.Text(), false)
-					jevTyping = false
-				case "esc":
-					jevTyping = false
-				default:
-					jevEd.Feed(key)
-				}
-				continue
-			}
-			weights := sortedJevWeights(st)
-			switch key {
-			case "i":
-				jevTyping = true
-				jevEd = vimline.New("")
-			case "esc", "q":
-				showJev = false
-			case "j", "down":
-				if jevSel < len(weights)-1 {
-					jevSel++
-				}
-			case "k", "up":
-				if jevSel > 0 {
-					jevSel--
-				}
-			case "enter":
-				if jevSel < len(weights) {
-					st.ensureJev()
-					delete(st.Jev.Weights, weights[jevSel].feature)
-					_ = saveStore(st)
-					if jevSel >= len(sortedJevWeights(st)) {
-						jevSel = max(0, len(sortedJevWeights(st))-1)
-					}
-				}
-			case "D":
-				// D clears all, with the same confirm dialog as tab delete.
-				confirmName = "all Jev learnings"
-				confirmSel = 1
-				showJev = false
-			}
+			jevTyping = false
+			jevEd = vimline.New("")
 		case (key == "left" || key == "right" || (key == "h" || key == "l") && !searching) && !showHelp:
 			nTabs := len(views(st))
 			if nTabs < 1 {
