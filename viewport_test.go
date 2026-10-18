@@ -263,3 +263,38 @@ func TestHelpEntriesSearchableAndJInFooter(t *testing.T) {
 		t.Fatalf("expected '? help' to be shown in the page footer:\n%s", plain)
 	}
 }
+
+func TestRenderFieldWrapsLinesWhenWidthExceeded(t *testing.T) {
+	longText := "prioritize stripe billing integration because client is waiting on live api keys for launch"
+	fv := vimline.View{
+		Label:   "reason",
+		Text:    longText,
+		Cursor:  len([]rune(longText)), // cursor at end
+		Mode:    vimline.ModeInsert,
+		Focused: true,
+	}
+
+	width := 40
+	rendered := renderField(fv, width)
+	lines := strings.Split(rendered, "\n")
+
+	if len(lines) < 2 {
+		t.Fatalf("expected long text to wrap to multiple lines, got %d lines:\n%s", len(lines), rendered)
+	}
+
+	// Verify that each line's visual width does not exceed the allowed width
+	for i, l := range lines {
+		plain := stripANSI(l)
+		colCount := len([]rune(plain))
+		if colCount > width {
+			t.Fatalf("line %d visual length %d exceeds width %d: %q", i, colCount, width, plain)
+		}
+	}
+
+	// Verify screen emit splits on newlines and fits within screen
+	sc := newScreen(width, 10, 5)
+	sc.emit(rendered)
+	if len(sc.lines) != len(lines) {
+		t.Fatalf("expected screen to contain %d lines, got %d", len(lines), len(sc.lines))
+	}
+}

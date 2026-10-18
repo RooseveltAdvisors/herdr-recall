@@ -1100,46 +1100,177 @@ func modeChip(m vimline.Mode, pending rune, count int) string {
 	return keySurface + "[" + keyReset + color + keyBold + label + keyReset + keySurface + "]" + keyReset
 }
 
-// renderField paints one editing line with a visible cursor cell. The real
-// terminal cursor is hidden while the picker runs, so the painted cell is the
-// only cursor and it cannot drift or wrap.
+// fieldItem pairs a rune with its cursor state.
+type fieldItem struct {
+	ch    rune
+	isCur bool
+}
+
+// renderField paints an editing field with visible cursor cell, wrapping lines
+// cleanly at word boundaries when width is exceeded so text never runs off the screen.
 func renderField(fv vimline.View, width int) string {
+	if width <= 0 {
+		width = 80
+	}
+	effectiveWidth := width - 2
+	if effectiveWidth < 20 {
+		effectiveWidth = 20
+	}
+
 	if !fv.Focused {
 		if fv.Text == "" {
 			return keyOverlay + "  " + fv.Label + " " + keyReset + keyOverlay + "search panes" + keyReset
 		}
-		return keyOverlay + "  " + fv.Label + " " + keyReset + keyText + fv.Text + keyReset
+		prefix := keyOverlay + "  " + fv.Label + " " + keyReset
+		indent := "    "
+		return wrapWordsPlain(fv.Text, prefix, indent, effectiveWidth)
 	}
-	var b strings.Builder
-	b.WriteString(modeChip(fv.Mode, fv.Pending, fv.Count))
-	b.WriteString(keyAccentFg + keyBold + "  " + fv.Label + " " + keyReset)
+
+	prefix := modeChip(fv.Mode, fv.Pending, fv.Count) + keyAccentFg + keyBold + "  " + fv.Label + " " + keyReset
+	prefixPlainLen := len([]rune(stripANSI(prefix)))
+	indent := "      "
+	indentLen := len([]rune(indent))
+
 	runes := []rune(fv.Text)
 	cur := fv.Cursor
-	if cur > len(runes) {
-		cur = len(runes)
+	total := len(runes)
+	if cur >= total {
+		total = cur + 1
 	}
-	for i := 0; i <= len(runes); i++ {
+
+	var items []fieldItem
+	for i := 0; i < total; i++ {
 		ch := ' '
 		if i < len(runes) {
 			ch = runes[i]
 		}
-		if i != cur {
-			b.WriteRune(ch)
+		isCur := (i == cur)
+		if i == len(runes) && !isCur {
 			continue
 		}
-		switch fv.Mode {
-		case vimline.ModeNormal:
-			b.WriteString(keySelectBg + keySelectFg + string(ch) + keyReset)
-		case vimline.ModeReplace:
-			b.WriteString(keyStBusy + "\x1b[4m" + string(ch) + keyReset)
-		default:
-			b.WriteString(keyAccentFg + "\x1b[4m" + string(ch) + keyReset)
+		items = append(items, fieldItem{ch: ch, isCur: isCur})
+	}
+
+	type chunk struct {
+		items   []fieldItem
+		isSpace bool
+	}
+	var chunks []chunk
+	idx := 0
+	for idx < len(items) {
+		start := idx
+		isSp := items[idx].ch == ' '
+		for idx < len(items) && (items[idx].ch == ' ') == isSp {
+			idx++
 		}
+		chunks = append(chunks, chunk{items: items[start:idx], isSpace: isSp})
 	}
-	if fv.Pending != 0 {
-		b.WriteString(keyOverlay + "  " + string(fv.Pending) + keyReset)
+
+	renderItems := func(its []fieldItem) string {
+		var b strings.Builder
+		for _, it := range its {
+			if !it.isCur {
+				b.WriteRune(it.ch)
+				continue
+			}
+			switch fv.Mode {
+			case vimline.ModeNormal:
+				b.WriteString(keySelectBg + keySelectFg + string(it.ch) + keyReset)
+			case vimline.ModeReplace:
+				b.WriteString(keyStBusy + "\x1b[4m" + string(it.ch) + keyReset)
+			default:
+				b.WriteString(keyAccentFg + "\x1b[4m" + string(it.ch) + keyReset)
+			}
+		}
+		return b.String()
 	}
-	return b.String()
+
+	var lines []string
+	var curLineItems []fieldItem
+	linePrefix := prefix
+	curCol := prefixPlainLen
+	isFirstChunk := true
+
+	for _, chk := range chunks {
+		chkLen := len(chk.items)
+		// If chunk itself is longer than available line width, break by characters
+		if !chk.isSpace && curCol+chkLen > effectiveWidth && chkLen > (effectiveWidth-indentLen) {
+			for _, item := range chk.items {
+				if curCol+1 > effectiveWidth && !isFirstChunk {
+					lines = append(lines, linePrefix+renderItems(curLineItems))
+					curLineItems = nil
+					linePrefix = keyOverlay + indent + keyReset
+					curCol = indentLen
+				}
+				curLineItems = append(curLineItems, item)
+				curCol++
+				isFirstChunk = false
+			}
+			continue
+		}
+
+		if curCol+chkLen > effectiveWidth && !isFirstChunk {
+			if chk.isSpace {
+				hasCur := false
+				for _, it := range chk.items {
+					if it.isCur {
+						hasCur = true
+						break
+					}
+				}
+				if !hasCur {
+					continue
+				}
+			}
+			lines = append(lines, linePrefix+renderItems(curLineItems))
+			curLineItems = append([]fieldItem(nil), chk.items...)
+			linePrefix = keyOverlay + indent + keyReset
+			curCol = indentLen + chkLen
+		} else {
+			curLineItems = append(curLineItems, chk.items...)
+			curCol += chkLen
+		}
+		isFirstChunk = false
+	}
+
+	if len(curLineItems) > 0 || len(lines) == 0 {
+		lines = append(lines, linePrefix+renderItems(curLineItems))
+	}
+	if fv.Pending != 0 && len(lines) > 0 {
+		lines[len(lines)-1] += keyOverlay + "  " + string(fv.Pending) + keyReset
+	}
+	return strings.Join(lines, "\n")
+}
+
+func wrapWordsPlain(text, prefix, indent string, width int) string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return prefix
+	}
+	var lines []string
+	var curLine strings.Builder
+	curLine.WriteString(prefix)
+	curCol := len([]rune(stripANSI(prefix)))
+
+	for _, w := range words {
+		wLen := len([]rune(w))
+		if curCol+1+wLen > width && curLine.Len() > 0 {
+			lines = append(lines, curLine.String())
+			curLine.Reset()
+			curLine.WriteString(indent)
+			curCol = len([]rune(indent))
+		}
+		if curCol > len([]rune(indent)) && curLine.Len() > 0 && curCol > len([]rune(stripANSI(prefix))) {
+			curLine.WriteString(" ")
+			curCol++
+		}
+		curLine.WriteString(keyText + w + keyReset)
+		curCol += wLen
+	}
+	if curLine.Len() > 0 {
+		lines = append(lines, curLine.String())
+	}
+	return strings.Join(lines, "\n")
 }
 
 // hintFooter paints key names in accent and their hint words dim, the way the
@@ -1786,7 +1917,9 @@ func newScreen(width, height, minHeight int) *screen {
 }
 
 func (sc *screen) emit(line string) {
-	sc.lines = append(sc.lines, fitLine(line, sc.width))
+	for _, l := range strings.Split(line, "\n") {
+		sc.lines = append(sc.lines, fitLine(l, sc.width))
+	}
 }
 
 func (sc *screen) header(names []string, active int) {
