@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -174,5 +177,72 @@ func TestJevPreferBumpsFeaturesWithoutProxy(t *testing.T) {
 	// The prefer's ordering influence: a blocked portal row now outranks an idle docs row.
 	if st.jevWeight(blocked, time.Now().Unix()) <= st.jevWeight(idle, time.Now().Unix()) {
 		t.Fatal("preference did not rank the preferred row higher")
+	}
+}
+
+func TestJevContextualTeaching(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", tmpDir)
+
+	now := time.Now()
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+
+	teaching := jevTeaching{
+		ID:          "teach-test-01",
+		Timestamp:   now.Unix(),
+		TimeRFC3339: now.Format(time.RFC3339),
+		Feedback:    "prioritize billing because client is waiting",
+		Intent:      "prefer",
+		Pane: jevPaneContext{
+			PaneID:   "w1:p1",
+			Label:    "billing-engine",
+			Status:   "blocked",
+			Note:     "waiting on stripe keys",
+			Visits:   5,
+			Last:     now.Unix(),
+			JevScore: 0.85,
+		},
+		InboxRank:  0,
+		InboxTotal: 3,
+		Queue: []jevQueueContext{
+			{PaneID: "w1:p1", Label: "billing-engine", Status: "blocked", Priority: 0.85},
+			{PaneID: "w1:p2", Label: "docs", Status: "idle", Priority: 0.2},
+		},
+		Features: []string{"status:blocked", "label:billing-engine", "note:yes"},
+		Session: jevSessionContext{
+			ActiveTab: "inbox",
+		},
+	}
+
+	if err := recordJevTeaching(st, teaching); err != nil {
+		t.Fatalf("recordJevTeaching failed: %v", err)
+	}
+
+	if len(st.Jev.Teachings) != 1 {
+		t.Fatalf("expected 1 teaching in store, got %d", len(st.Jev.Teachings))
+	}
+	saved := st.Jev.Teachings[0]
+	if saved.Feedback != teaching.Feedback || saved.Pane.Label != "billing-engine" {
+		t.Fatalf("saved teaching mismatch: %+v", saved)
+	}
+
+	logPath := filepath.Join(configDir(), "jev-teachings.jsonl")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read jev-teachings.jsonl failed: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line in jsonl, got %d", len(lines))
+	}
+	var readBack jevTeaching
+	if err := json.Unmarshal([]byte(lines[0]), &readBack); err != nil {
+		t.Fatalf("json unmarshal failed: %v", err)
+	}
+	if readBack.ID != "teach-test-01" || readBack.Pane.Note != "waiting on stripe keys" {
+		t.Fatalf("readBack mismatch: %+v", readBack)
+	}
+	if len(readBack.Queue) != 2 || readBack.Features[0] != "status:blocked" {
+		t.Fatalf("context mismatch: queue=%+v, features=%+v", readBack.Queue, readBack.Features)
 	}
 }

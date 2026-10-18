@@ -1193,6 +1193,7 @@ func allHelpEntries() []helpEntry {
 		{"j / k / arrows", "move one row, or N rows with a count"},
 		{"g / G", "first row / last row"},
 		{"e", "mark done. Leaves current list. u undoes"},
+		{"i", "teach Jev on selected thread with context"},
 		{"z", "snooze with typed time (3h, 2w, tomorrow, clear)"},
 		{"n", "sticky note, edited with vim keys"},
 		{"!", "toggle manual blocked override"},
@@ -2002,7 +2003,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	if fv.Focused {
 		emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "esc", "browse", "ctrl+c", "close"))
 	} else {
-		emit(hintFooter("enter", "switch", "e", "done", "z", "remind", "n", "note", "!", "block", "/", "search"))
+		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "z", "remind", "n", "note", "!", "block", "/", "search"))
 	}
 	extra := "h/l tabs   m mark   b/w/i/d/a states   t c/r/x tab"
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
@@ -2260,6 +2261,38 @@ func renderNote(width, height int, names []string, active int, fv vimline.View) 
 	}, "enter save,ctrl+u clear,esc cancel")
 }
 
+// renderTeach draws the 'i' teach dialog for the selected thread.
+func renderTeach(width, height int, names []string, active int, r row, fv vimline.View, st *store, now int64) string {
+	return dialog(width, height, 12, names, active, func(sc *screen) {
+		sc.emit("")
+		sc.emit(keyText + keyBold + "  Teach Jev: " + keyReset + keyAccentFg + keyBold + r.Label + keyReset + keyOverlay + " (" + r.PaneID + ")" + keyReset)
+
+		statusStr := statusWord(r.Status)
+		glyph, scol := statusMark(r.Status)
+		meta := "  " + scol + glyph + " " + statusStr + keyReset
+		if r.Note != "" {
+			meta += keyOverlay + "  note: " + keyReset + keyText + r.Note + keyReset
+		}
+		priority := st.jevPriority(r, now)
+		scoreColor := keyStGood
+		if priority < 0 {
+			scoreColor = keyStBad
+		}
+		meta += keyOverlay + "  priority: " + keyReset + scoreColor + fmt.Sprintf("%+.2f", priority) + keyReset
+		sc.emit(meta)
+
+		feats := jevFeatures(r, now)
+		var featDesc []string
+		for _, f := range feats {
+			featDesc = append(featDesc, featureDescription(f))
+		}
+		sc.emit(keyOverlay + "  features: " + keyReset + keyText + strings.Join(featDesc, ", ") + keyReset)
+		sc.emit("")
+		sc.emit(keyOverlay + "  Feedback / instruction (type + to prefer, - to demote, or reasons):" + keyReset)
+		sc.emit(renderField(fv, sc.width))
+	}, "enter save teaching,ctrl+u clear,esc cancel")
+}
+
 func clipTail(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
@@ -2399,6 +2432,11 @@ func runPicker() int {
 	noting := false
 	noteEd := vimline.New("")
 	notePaneID := ""
+	teaching := false
+	teachEd := vimline.New("")
+	teachRow := row{}
+	teachRank := 0
+	teachTotal := 0
 	formEd := vimline.New("")
 	newSort, newOnly, newWhere := "newest", "", ""
 	newLimit := 20
@@ -2437,6 +2475,101 @@ func runPicker() int {
 		_ = saveStore(st)
 	}
 
+	// commitTeach records full real-time teaching context and applies feedback.
+	commitTeach := func() {
+		text := strings.TrimSpace(teachEd.String())
+		if text == "" {
+			teaching = false
+			return
+		}
+		now := time.Now()
+		nowUnix := now.Unix()
+
+		intent := "feedback"
+		up := false
+		hasSign := false
+		lower := strings.ToLower(text)
+		if text == "+" || text == "=" || strings.HasPrefix(lower, "+") || strings.Contains(lower, "prefer") || strings.Contains(lower, "priority") || strings.Contains(lower, "first") || strings.Contains(lower, "up") {
+			intent = "prefer"
+			up = true
+			hasSign = true
+		} else if text == "-" || strings.HasPrefix(lower, "-") || strings.Contains(lower, "demote") || strings.Contains(lower, "bury") || strings.Contains(lower, "down") || strings.Contains(lower, "later") {
+			intent = "demote"
+			up = false
+			hasSign = true
+		} else if strings.Contains(lower, "block") || strings.Contains(lower, "wait") || strings.Contains(lower, "hold") {
+			intent = "directive"
+		}
+
+		cwd := ""
+		for _, p := range frozen.Panes {
+			if p.PaneID == teachRow.PaneID {
+				cwd = p.CWD
+				break
+			}
+		}
+
+		queueCtx := make([]jevQueueContext, 0, len(allRows))
+		for _, r := range allRows {
+			queueCtx = append(queueCtx, jevQueueContext{
+				PaneID:   r.PaneID,
+				Label:    r.Label,
+				Status:   statusWord(r.Status),
+				Priority: st.jevPriority(r, nowUnix),
+			})
+		}
+
+		tRecord := jevTeaching{
+			ID:          fmt.Sprintf("teach-%d-%s", nowUnix, strings.ReplaceAll(teachRow.PaneID, ":", "-")),
+			Timestamp:   nowUnix,
+			TimeRFC3339: now.Format(time.RFC3339),
+			Feedback:    text,
+			Intent:      intent,
+			Pane: jevPaneContext{
+				PaneID:        teachRow.PaneID,
+				Label:         teachRow.Label,
+				Status:        statusWord(teachRow.Status),
+				CWD:           cwd,
+				Note:          teachRow.Note,
+				ManualBlocked: teachRow.ManualBlocked,
+				RemindAt:      teachRow.RemindAt,
+				SnoozeMode:    teachRow.SnoozeMode,
+				SnoozeState:   teachRow.SnoozeState,
+				Done:          teachRow.Done,
+				DoneAt:        teachRow.DoneAt,
+				DoneState:     teachRow.DoneState,
+				Visits:        teachRow.Visits,
+				Last:          teachRow.Last,
+				JevScore:      st.JevScore(teachRow.PaneID),
+				JevPriority:   st.jevPriority(teachRow, nowUnix),
+			},
+			InboxRank:  teachRank,
+			InboxTotal: teachTotal,
+			Queue:      queueCtx,
+			Features:   jevFeatures(teachRow, nowUnix),
+			Session: jevSessionContext{
+				ActiveTab:    views(st)[tab].Kind,
+				ActiveFilter: stateFilter,
+				ActiveQuery:  searchEd.String(),
+				SocketPath:   os.Getenv("HERDR_SOCKET_PATH"),
+				FocusedPane:  frozen.FocusedPaneID,
+			},
+		}
+
+		if hasSign {
+			st.jevPrefer(teachRow, up)
+		} else {
+			jevApplyFeedback(st, text, true)
+		}
+
+		_ = recordJevTeaching(st, tRecord)
+		_ = saveStore(st)
+
+		teaching = false
+		status = "taught Jev: " + clip(text, 28)
+		rebuild()
+	}
+
 	// commitRemind parses the typed time and applies the snooze contract.
 	commitRemind = func() {
 		due, ok, desc := duration.Parse(remindEd.String(), time.Now())
@@ -2473,6 +2606,9 @@ func runPicker() int {
 
 	// activeEd reports which vim editor owns the next key, if any.
 	activeEd := func() *vimline.Editor {
+		if teaching {
+			return teachEd
+		}
 		if showHelp && helpSearching {
 			return helpEd
 		}
@@ -2626,6 +2762,8 @@ func runPicker() int {
 			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, remindEd.View("at", remindField == 2), remindLabel)
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
+		case teaching:
+			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachEd.View("teach", true), st, time.Now().Unix())
 		case creating:
 			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.View("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
 		default:
@@ -2844,6 +2982,26 @@ func runPicker() int {
 				commitRemind()
 			case "esc":
 				reminding = false
+				status = ""
+			}
+			continue
+		}
+		if teaching && !showHelp {
+			switch key {
+			case "esc":
+				if teachEd.Mode() == vimline.ModeInsert {
+					teachEd.Feed(key)
+				} else {
+					teaching = false
+					status = ""
+				}
+				continue
+			}
+			switch teachEd.Feed(key) {
+			case vimline.ActAccept:
+				commitTeach()
+			case vimline.ActCancel:
+				teaching = false
 				status = ""
 			}
 			continue
@@ -3134,6 +3292,14 @@ func runPicker() int {
 			sel = 0
 			status = "sort: " + activeSortLabel(st, v, sortMode)
 			rebuild()
+		case key == "i" && !searching && !showHelp && !showJev:
+			if len(rows) > 0 && sel < len(rows) {
+				teaching = true
+				teachRow = rows[sel]
+				teachRank = sel
+				teachTotal = len(rows)
+				teachEd = vimline.New("")
+			}
 		case key == "e" && !searching && !showHelp:
 			if len(rows) == 0 {
 				break

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -32,11 +33,12 @@ import (
 const jevDefaultProxy = "/opt/ra/infisical/bin/jev-proxy.sh"
 
 type jevState struct {
-	Proxy    string             `json:"proxy,omitempty"`
-	Scores   map[string]float64 `json:"scores,omitempty"`
-	ScoreKey map[string]string  `json:"score_key,omitempty"`
-	Weights  map[string]float64 `json:"weights,omitempty"`
-	Examples int                `json:"examples,omitempty"`
+	Proxy     string             `json:"proxy,omitempty"`
+	Scores    map[string]float64 `json:"scores,omitempty"`
+	ScoreKey  map[string]string  `json:"score_key,omitempty"`
+	Weights   map[string]float64 `json:"weights,omitempty"`
+	Examples  int                `json:"examples,omitempty"`
+	Teachings []jevTeaching      `json:"teachings,omitempty"`
 }
 
 func (s *store) ensureJev() {
@@ -315,4 +317,81 @@ func (s *store) jevSortDesc(list []row, now int64) {
 		}
 		return list[i].PaneID < list[j].PaneID
 	})
+}
+
+// jevTeaching captures full real-time feedback context from the captain.
+type jevTeaching struct {
+	ID          string            `json:"id"`
+	Timestamp   int64             `json:"timestamp"`
+	TimeRFC3339 string            `json:"time_rfc3339"`
+	Feedback    string            `json:"feedback"`
+	Intent      string            `json:"intent"` // "prefer", "demote", "directive", "feedback"
+	Pane        jevPaneContext    `json:"pane"`
+	InboxRank   int               `json:"inbox_rank"`
+	InboxTotal  int               `json:"inbox_total"`
+	Queue       []jevQueueContext `json:"queue,omitempty"`
+	Features    []string          `json:"features"`
+	Session     jevSessionContext `json:"session"`
+}
+
+type jevPaneContext struct {
+	PaneID        string  `json:"pane_id"`
+	Label         string  `json:"label"`
+	Status        string  `json:"status"`
+	CWD           string  `json:"cwd,omitempty"`
+	Note          string  `json:"note,omitempty"`
+	ManualBlocked bool    `json:"manual_blocked"`
+	RemindAt      int64   `json:"remind_at,omitempty"`
+	SnoozeMode    string  `json:"snooze_mode,omitempty"`
+	SnoozeState   string  `json:"snooze_state,omitempty"`
+	Done          bool    `json:"done"`
+	DoneAt        int64   `json:"done_at,omitempty"`
+	DoneState     string  `json:"done_state,omitempty"`
+	Visits        int64   `json:"visits"`
+	Last          int64   `json:"last"`
+	JevScore      float64 `json:"jev_score"`
+	JevPriority   float64 `json:"jev_priority"`
+}
+
+type jevQueueContext struct {
+	PaneID   string  `json:"pane_id"`
+	Label    string  `json:"label"`
+	Status   string  `json:"status"`
+	Priority float64 `json:"priority"`
+}
+
+type jevSessionContext struct {
+	ActiveTab    string `json:"active_tab"`
+	ActiveFilter string `json:"active_filter,omitempty"`
+	ActiveQuery  string `json:"active_query,omitempty"`
+	SocketPath   string `json:"socket_path,omitempty"`
+	FocusedPane  string `json:"focused_pane,omitempty"`
+}
+
+func (s *store) JevScore(paneID string) float64 {
+	if s.Jev == nil || s.Jev.Scores == nil {
+		return 0
+	}
+	return s.Jev.Scores[paneID]
+}
+
+func recordJevTeaching(st *store, t jevTeaching) error {
+	st.ensureJev()
+	st.Jev.Teachings = append(st.Jev.Teachings, t)
+	if len(st.Jev.Teachings) > 200 {
+		st.Jev.Teachings = st.Jev.Teachings[len(st.Jev.Teachings)-200:]
+	}
+
+	logPath := filepath.Join(configDir(), "jev-teachings.jsonl")
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	b, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(b, '\n'))
+	return err
 }
