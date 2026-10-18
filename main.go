@@ -1227,7 +1227,7 @@ func renderHelp(width, height int) string {
 // renderJev is the Jev dashboard. Weights group by type, sort by impact,
 // and carry a bar so relative strength reads at a glance. A prediction
 // section shows what Jev would surface first right now.
-func renderJev(width, height int, names []string, active int, weights []jevWeight, sel int, totalExamples int) string {
+func renderJev(width, height int, names []string, active int, weights []jevWeight, sel int, totalExamples int, inboxTop []jevRowScore) string {
 	sc := newScreen(width, height, 12)
 	sc.header(names, active)
 
@@ -1280,11 +1280,22 @@ func renderJev(width, height int, names []string, active int, weights []jevWeigh
 		sc.emit("")
 	}
 
-	// Prediction: what a typical thread of each kind scores now
-	sc.emit(keyAccentFg + keyBold + "  IF A THREAD ARRIVES NOW" + keyReset)
-	sc.emit("  " + keyOverlay + "blocked" + keyReset + "  " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "status", "blocked")}, sc.width-20))
-	sc.emit("  " + keyOverlay + "working" + keyReset + "  " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "status", "working")}, sc.width-20))
-	sc.emit("  " + keyOverlay + "fresh" + keyReset + "    " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "age", "fresh")}, sc.width-20))
+	// Live inbox preview: the actual top rows and why Jev put them there
+	if len(inboxTop) > 0 {
+		sc.emit(keyAccentFg + keyBold + "  YOUR INBOX TOP, AND WHY" + keyReset)
+		for _, r := range inboxTop {
+			score := fmt.Sprintf("%+.2f", r.score)
+			color := keyStGood
+			if r.score < 0 {
+				color = keyStBad
+			}
+			sc.emit("  " + color + pad(score, 7) + keyReset + keyText + pad(r.label, 24) + keyReset + keyOverlay + r.reason + keyReset)
+		}
+	} else {
+		sc.emit(keyAccentFg + keyBold + "  IF A THREAD ARRIVES NOW" + keyReset)
+		sc.emit("  " + keyOverlay + "blocked" + keyReset + "  " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "status", "blocked")}, sc.width-20))
+		sc.emit("  " + keyOverlay + "working" + keyReset + "  " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "status", "working")}, sc.width-20))
+	}
 
 	sc.rule()
 	sc.emit(hintFooter("enter", "clear weight", "D", "clear all (confirm)", "esc", "back"))
@@ -1425,6 +1436,69 @@ func filterPrefix(weights []jevWeight, prefix string) []jevWeight {
 		}
 	}
 	return out
+}
+
+// jevRowScore pairs an inbox row with its Jev score and the human-readable
+// reason it ranked where it did.
+type jevRowScore struct {
+	label  string
+	score  float64
+	reason string
+}
+
+func inboxTopScored(s *snapshot, st *store, n int) []jevRowScore {
+	rows := rowsFor(s, st, view{Kind: "inbox"}, sortDefault)
+	if len(rows) > n {
+		rows = rows[:n]
+	}
+	var out []jevRowScore
+	for _, r := range rows {
+		score := st.jevPriority(r, time.Now().Unix())
+		// Build the reason from the top contributing features
+		var parts []string
+		for _, w := range sortedJevWeights(st) {
+			if len(parts) >= 2 {
+				break
+			}
+			if strings.HasPrefix(w.feature, "label:") && w.feature != "label:"+strings.Fields(r.Label)[0] {
+				continue
+			}
+			// crude match: does this feature's kind apply to this row?
+			if featureApplies(w.feature, r) {
+				parts = append(parts, featureDescription(w.feature))
+			}
+		}
+		reason := strings.Join(parts, ", ")
+		if reason == "" {
+			reason = "Jev score only"
+		}
+		out = append(out, jevRowScore{label: clip(r.Label, 22), score: score, reason: reason})
+	}
+	return out
+}
+
+func featureApplies(feature string, r row) bool {
+	kind, val, ok := strings.Cut(feature, ":")
+	if !ok {
+		return false
+	}
+	switch kind {
+	case "status":
+		return statusWord(r.Status) == val
+	case "age":
+		return jevAgeBucket(r, time.Now().Unix()) == feature
+	case "label":
+		if toks := strings.Fields(r.Label); len(toks) > 0 {
+			return "label:"+toks[0] == feature
+		}
+	case "remind":
+		return r.RemindAt > 0
+	case "note":
+		return r.Note != ""
+	case "manual":
+		return r.ManualBlocked
+	}
+	return false
 }
 
 type jevWeight struct {
@@ -2298,7 +2372,7 @@ func runPicker() int {
 			if st.Jev != nil {
 				ex = st.Jev.Examples
 			}
-			frame = renderJev(w, h, viewNames(st), tab, sortedJevWeights(st), jevSel, ex)
+			frame = renderJev(w, h, viewNames(st), tab, sortedJevWeights(st), jevSel, ex, inboxTopScored(frozen, st, 5))
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
@@ -2645,9 +2719,6 @@ func runPicker() int {
 			}
 			if len(rows) == 0 {
 				return 0
-			}
-			if views(st)[tab].Kind == "inbox" {
-				st.jevLearn(rows[sel], rows[:sel])
 			}
 			target := rows[sel].PaneID
 			tty.WriteString("\x1b[2J\x1b[H")
