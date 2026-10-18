@@ -1193,7 +1193,7 @@ func allHelpEntries() []helpEntry {
 		{"j / k / arrows", "move one row, or N rows with a count"},
 		{"g / G", "first row / last row"},
 		{"e", "mark done. Leaves current list. u undoes"},
-		{"i", "teach Jev on selected thread with context"},
+		{"i", "teach Jev on selected thread with visual preference"},
 		{"z", "snooze with typed time (3h, 2w, tomorrow, clear)"},
 		{"n", "sticky note, edited with vim keys"},
 		{"!", "toggle manual blocked override"},
@@ -1203,7 +1203,6 @@ func allHelpEntries() []helpEntry {
 		{"h / l", "switch tabs"},
 		{"t c / t r / t x", "create, revise, or delete a custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
-		{"+ / -", "tell Jev: more like this row / less like it"},
 		{"J", "inspect and correct Jev learnings"},
 		{"u", "undo the last e"},
 		{"?", "open or close this help"},
@@ -1809,7 +1808,16 @@ func dialog(width, height, minHeight int, names []string, active int, body func(
 	sc.header(names, active)
 	body(sc)
 	sc.rule()
-	sc.emit(hintFooter(hints))
+	var pairs []string
+	for _, tok := range strings.Split(hints, ",") {
+		tok = strings.TrimSpace(tok)
+		if f := strings.Fields(tok); len(f) >= 2 {
+			pairs = append(pairs, f[0], strings.Join(f[1:], " "))
+		} else if len(f) == 1 {
+			pairs = append(pairs, f[0], "")
+		}
+	}
+	sc.emit(hintFooter(pairs...))
 	return sc.done()
 }
 
@@ -2261,9 +2269,11 @@ func renderNote(width, height int, names []string, active int, fv vimline.View) 
 	}, "enter save,ctrl+u clear,esc cancel")
 }
 
-// renderTeach draws the 'i' teach dialog for the selected thread.
-func renderTeach(width, height int, names []string, active int, r row, fv vimline.View, st *store, now int64) string {
-	return dialog(width, height, 12, names, active, func(sc *screen) {
+func teachPrefLabels() []string { return []string{"Prefer (+)", "Neutral", "Demote (-)"} }
+
+// renderTeach draws the 'i' teach dialog for the selected thread with visual preference selection.
+func renderTeach(width, height int, names []string, active int, r row, field, pref int, fv vimline.View, st *store, now int64) string {
+	return dialog(width, height, 14, names, active, func(sc *screen) {
 		sc.emit("")
 		sc.emit(keyText + keyBold + "  Teach Jev: " + keyReset + keyAccentFg + keyBold + r.Label + keyReset + keyOverlay + " (" + r.PaneID + ")" + keyReset)
 
@@ -2288,9 +2298,13 @@ func renderTeach(width, height int, names []string, active int, r row, fv vimlin
 		}
 		sc.emit(keyOverlay + "  features: " + keyReset + keyText + strings.Join(featDesc, ", ") + keyReset)
 		sc.emit("")
-		sc.emit(keyOverlay + "  Feedback / instruction (type + to prefer, - to demote, or reasons):" + keyReset)
+		sc.emit(fieldTitle("Preference", field == 0))
+		for _, line := range choiceLines(teachPrefLabels(), pref, sc.width) {
+			sc.emit(line)
+		}
+		sc.emit(fieldTitle("Feedback / Reason (optional)", field == 1))
 		sc.emit(renderField(fv, sc.width))
-	}, "enter save teaching,ctrl+u clear,esc cancel")
+	}, "h/l choose,j/k field,enter save,esc cancel")
 }
 
 func clipTail(s string, n int) string {
@@ -2433,6 +2447,8 @@ func runPicker() int {
 	noteEd := vimline.New("")
 	notePaneID := ""
 	teaching := false
+	teachField := 0
+	teachPref := 0
 	teachEd := vimline.New("")
 	teachRow := row{}
 	teachRank := 0
@@ -2478,27 +2494,30 @@ func runPicker() int {
 	// commitTeach records full real-time teaching context and applies feedback.
 	commitTeach := func() {
 		text := strings.TrimSpace(teachEd.String())
-		if text == "" {
-			teaching = false
-			return
-		}
 		now := time.Now()
 		nowUnix := now.Unix()
 
-		intent := "feedback"
-		up := false
-		hasSign := false
-		lower := strings.ToLower(text)
-		if text == "+" || text == "=" || strings.HasPrefix(lower, "+") || strings.Contains(lower, "prefer") || strings.Contains(lower, "priority") || strings.Contains(lower, "first") || strings.Contains(lower, "up") {
+		intent := "neutral"
+		switch teachPref {
+		case 0:
 			intent = "prefer"
-			up = true
-			hasSign = true
-		} else if text == "-" || strings.HasPrefix(lower, "-") || strings.Contains(lower, "demote") || strings.Contains(lower, "bury") || strings.Contains(lower, "down") || strings.Contains(lower, "later") {
+			st.jevPrefer(teachRow, true)
+		case 2:
 			intent = "demote"
-			up = false
-			hasSign = true
-		} else if strings.Contains(lower, "block") || strings.Contains(lower, "wait") || strings.Contains(lower, "hold") {
-			intent = "directive"
+			st.jevPrefer(teachRow, false)
+		default:
+			if text != "" {
+				lower := strings.ToLower(text)
+				if strings.Contains(lower, "block") || strings.Contains(lower, "wait") || strings.Contains(lower, "hold") {
+					intent = "directive"
+				} else {
+					intent = "feedback"
+				}
+			}
+		}
+
+		if text != "" {
+			jevApplyFeedback(st, text, teachPref != 2)
 		}
 
 		cwd := ""
@@ -2556,17 +2575,19 @@ func runPicker() int {
 			},
 		}
 
-		if hasSign {
-			st.jevPrefer(teachRow, up)
-		} else {
-			jevApplyFeedback(st, text, true)
-		}
-
 		_ = recordJevTeaching(st, tRecord)
 		_ = saveStore(st)
 
 		teaching = false
-		status = "taught Jev: " + clip(text, 28)
+		if teachPref == 0 {
+			status = "taught Jev: prefer " + teachRow.Label
+		} else if teachPref == 2 {
+			status = "taught Jev: demote " + teachRow.Label
+		} else if text != "" {
+			status = "taught Jev: " + clip(text, 28)
+		} else {
+			status = "saved teaching for " + teachRow.Label
+		}
 		rebuild()
 	}
 
@@ -2606,7 +2627,7 @@ func runPicker() int {
 
 	// activeEd reports which vim editor owns the next key, if any.
 	activeEd := func() *vimline.Editor {
-		if teaching {
+		if teaching && teachField == 1 {
 			return teachEd
 		}
 		if showHelp && helpSearching {
@@ -2763,7 +2784,7 @@ func runPicker() int {
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
 		case teaching:
-			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachEd.View("teach", true), st, time.Now().Unix())
+			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachField, teachPref, teachEd.View("reason", teachField == 1), st, time.Now().Unix())
 		case creating:
 			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.View("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
 		default:
@@ -2987,22 +3008,43 @@ func runPicker() int {
 			continue
 		}
 		if teaching && !showHelp {
-			switch key {
-			case "esc":
-				if teachEd.Mode() == vimline.ModeInsert {
-					teachEd.Feed(key)
-				} else {
+			if teachField == 0 {
+				switch key {
+				case "h", "left":
+					teachPref = cycle(3, teachPref, -1)
+				case "l", "right":
+					teachPref = cycle(3, teachPref, 1)
+				case "j", "down", "tab":
+					teachField = 1
+				case "enter":
+					commitTeach()
+				case "esc", "q":
 					teaching = false
 					status = ""
 				}
 				continue
 			}
+			switch key {
+			case "esc":
+				if teachEd.Mode() == vimline.ModeInsert {
+					teachEd.Feed(key)
+				} else {
+					teachField = 0
+				}
+				continue
+			case "k", "up":
+				if teachEd.Mode() != vimline.ModeInsert {
+					teachField = 0
+					continue
+				}
+			}
 			switch teachEd.Feed(key) {
 			case vimline.ActAccept:
 				commitTeach()
 			case vimline.ActCancel:
-				teaching = false
-				status = ""
+				teachField = 0
+			case vimline.ActUp:
+				teachField = 0
 			}
 			continue
 		}
@@ -3295,6 +3337,8 @@ func runPicker() int {
 		case key == "i" && !searching && !showHelp && !showJev:
 			if len(rows) > 0 && sel < len(rows) {
 				teaching = true
+				teachField = 0
+				teachPref = 0
 				teachRow = rows[sel]
 				teachRank = sel
 				teachTotal = len(rows)
@@ -3329,22 +3373,6 @@ func runPicker() int {
 			}
 			_ = saveStore(st)
 			rebuild()
-		case (key == "+" || key == "=" || key == "-") && !searching && !showHelp:
-			// Explicit Jev feedback: plus bumps this row's features, minus
-			// decays them. The next arrival with the same features ranks
-			// higher or lower.
-			if len(rows) == 0 {
-				break
-			}
-			r := rows[sel]
-			up := key == "+" || key == "="
-			st.jevPrefer(r, up)
-			_ = saveStore(st)
-			if up {
-				status = "preferred: " + r.Label
-			} else {
-				status = "demoted: " + r.Label
-			}
 		case key == "u" && !searching && !showHelp:
 			// Undo the last e, the way vim's u undoes the last change. The
 			// row returns to the list it left.

@@ -43,8 +43,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `n` | set or edit a sticky note on the selected thread |
 | `!` | toggle manual `blocked` override on the selected thread |
 | `m` | mark or unmark the selected thread as a favorite (`*`) |
-| `i` | teach Jev on the selected thread, saving full context to `jev-teachings.jsonl` |
-| `+` / `-` | quick prefer / demote selected thread for Jev |
+| `i` | teach Jev on the selected thread with visual preference (Prefer/Neutral/Demote) |
 | `J` | inspect and correct Jev learned feature weights |
 | `b` / `w` / `i` / `d` / `a` | filter by status: blocked, working, idle, done, or all |
 | `/` | search tab names and sticky notes, with vim editing |

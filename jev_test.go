@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/RooseveltAdvisors/vimline"
 )
 
 func TestJevDisabledWithoutProxy(t *testing.T) {
@@ -244,5 +246,40 @@ func TestJevContextualTeaching(t *testing.T) {
 	}
 	if len(readBack.Queue) != 2 || readBack.Features[0] != "status:blocked" {
 		t.Fatalf("context mismatch: queue=%+v, features=%+v", readBack.Queue, readBack.Features)
+	}
+}
+
+func TestRenderTeachVisualPreferences(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	r := row{
+		PaneID: "w1:p1",
+		Label:  "portal-billing",
+		Status: "blocked",
+		Note:   "waiting on stripe keys",
+	}
+
+	fv := vimline.View{Label: "reason", Text: "high priority"}
+
+	// When pref is 0 (Prefer (+)), "Prefer (+)" chip should be highlighted
+	framePrefer := renderTeach(100, 20, []string{"Inbox"}, 0, r, 0, 0, fv, st, now)
+	plainPrefer := stripANSI(framePrefer)
+
+	if !strings.Contains(plainPrefer, "Teach Jev: portal-billing (w1:p1)") {
+		t.Fatalf("teach header missing in frame:\n%s", plainPrefer)
+	}
+	if !strings.Contains(plainPrefer, "waiting on stripe keys") {
+		t.Fatalf("sticky note missing in frame:\n%s", plainPrefer)
+	}
+	if !strings.Contains(plainPrefer, "Prefer (+)") || !strings.Contains(plainPrefer, "Neutral") || !strings.Contains(plainPrefer, "Demote (-)") {
+		t.Fatalf("preference choices missing in frame:\n%s", plainPrefer)
+	}
+	if !strings.Contains(plainPrefer, "h/l choose") || !strings.Contains(plainPrefer, "enter save") {
+		t.Fatalf("footer missing in frame:\n%s", plainPrefer)
+	}
+
+	// Verify that the Prefer (+) chip is highlighted with keySelectBg in framePrefer
+	if !strings.Contains(framePrefer, keySelectBg) {
+		t.Fatalf("expected selected chip to have keySelectBg styling")
 	}
 }
