@@ -90,7 +90,7 @@ func TestJevOrdersNewArrivalsToFront(t *testing.T) {
 	}
 	// Score keys must match the current content or the score is ignored.
 	for id := range st.Jev.Scores {
-		for _, r := range collectRows(&snapshot{Panes: []paneRec{{PaneID: id}}}, st) {
+		for _, r := range collectRows(&snapshot{Panes: []paneRec{{PaneID: id, AgentStatus: "working"}}}, st) {
 			st.Jev.ScoreKey[id] = jevRowKey(r)
 		}
 	}

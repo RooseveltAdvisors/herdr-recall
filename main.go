@@ -591,7 +591,12 @@ func collectRows(s *snapshot, st *store) []row {
 	for _, id := range st.Favorites {
 		addID(id)
 	}
+	paneKeys := make([]string, 0, len(st.Panes))
 	for id := range st.Panes {
+		paneKeys = append(paneKeys, id)
+	}
+	sort.Strings(paneKeys)
+	for _, id := range paneKeys {
 		addID(id)
 	}
 	for _, p := range s.Panes {
@@ -844,7 +849,7 @@ func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 	all := collectRows(s, st)
 	now := time.Now().Unix()
 	if v.Kind == "inbox" {
-		return inboxVisible(syncInboxRows(all, st, now), s.FocusedPaneID)
+		return inboxVisible(syncInboxRows(all, st, now))
 	}
 	// Reference tabs show every pane, done or not, so the captain can always
 	// find a thread. Only the Inbox drains on e. Done rows carry a check.
@@ -863,17 +868,12 @@ func triageVisible(list []row) []row {
 	return out
 }
 
-// inboxVisible also drops the pane the captain is sitting in. That pane was
-// just bumped to most recent by opening the picker, so without this it would
-// always top the triage list, and Enter on it is a no-op: focusing the pane
-// you are already in goes nowhere.
-func inboxVisible(list []row, focused string) []row {
+// inboxVisible drops rows marked done. The active pane stays in the inbox
+// queue so jumping between threads never shifts or hides rows.
+func inboxVisible(list []row) []row {
 	out := make([]row, 0, len(list))
 	for _, r := range list {
 		if r.Done && r.RemindAt <= 0 {
-			continue
-		}
-		if focused != "" && r.PaneID == focused {
 			continue
 		}
 		out = append(out, r)
@@ -1235,7 +1235,7 @@ func filterHelpEntries(all []helpEntry, query string) []helpEntry {
 
 // renderHelp draws the ? overlay with windowed scrolling so the highlighted
 // selection is always visible and never cut off past the screen height.
-func renderHelp(width, height int, fv vimline.View, sel int) string {
+func renderHelp(width, height int, fv vimline.View, sel, scrollOffset int) string {
 	maxLines := height
 	if height > 6 {
 		maxLines = height - 1
@@ -1268,9 +1268,18 @@ func renderHelp(width, height int, fv vimline.View, sel int) string {
 		visible = 1
 	}
 
-	start := 0
-	if sel >= visible {
+	start := scrollOffset
+	if sel < start {
+		start = sel
+	}
+	if sel >= start+visible {
 		start = sel - visible + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if maxStart := max(0, total-visible); start > maxStart {
+		start = maxStart
 	}
 	end := start + visible
 	if end > total {
@@ -1329,7 +1338,7 @@ func jevSelectableItems(st *store) []jevItem {
 
 // renderJev is the Jev dashboard. All learned weights are selectable and
 // windowed so the highlighted row is always visible and never cut off by height.
-func renderJev(width, height int, names []string, active int, items []jevItem, sel int, totalExamples int, inboxTop []jevRowScore) string {
+func renderJev(width, height int, names []string, active int, items []jevItem, sel, scrollOffset int, totalExamples int, inboxTop []jevRowScore) string {
 	maxLines := height
 	if height > 6 {
 		maxLines = height - 1
@@ -1371,9 +1380,18 @@ func renderJev(width, height int, names []string, active int, items []jevItem, s
 		visible = 3
 	}
 
-	start := 0
-	if sel >= visible {
+	start := scrollOffset
+	if sel < start {
+		start = sel
+	}
+	if sel >= start+visible {
 		start = sel - visible + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if maxStart := max(0, total-visible); start > maxStart {
+		start = maxStart
 	}
 	end := start + visible
 	if end > total {
@@ -1811,7 +1829,7 @@ func tabBar(names []string, active int) string {
 	return b.String()
 }
 
-func renderFrame(rows []row, sel int, fv vimline.View, status string, width, height int, names []string, active int, metricKind, state string, sortOpts ...string) string {
+func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status string, width, height int, names []string, active int, metricKind, state string, sortOpts ...string) string {
 	sortPill := ""
 	if len(sortOpts) > 0 {
 		sortPill = sortOpts[0]
@@ -1867,9 +1885,18 @@ func renderFrame(rows []row, sel int, fv vimline.View, status string, width, hei
 	if visible < 1 {
 		visible = 1
 	}
-	start := 0
-	if sel >= visible {
+	start := scrollOffset
+	if sel < start {
+		start = sel
+	}
+	if sel >= start+visible {
 		start = sel - visible + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if maxStart := max(0, len(rows)-visible); start > maxStart {
+		start = maxStart
 	}
 	lastSection := ""
 	// Column budget: a narrow overlay keeps the status dot and a short visit
@@ -2332,6 +2359,9 @@ func runPicker() int {
 	helpSel := 0
 	showJev := false
 	jevSel := 0
+	jevScrollOffset := 0
+	helpScrollOffset := 0
+	scrollOffset := 0
 	jevTyping := false
 	jevEd := vimline.New("")
 	// The snapshot is frozen when the picker opens so j/k does not reshuffle
@@ -2523,7 +2553,19 @@ func runPicker() int {
 		}
 		st.Jev.Proxy = jevProxyBin()
 		_ = saveStore(st)
+		activePane := ""
+		if sel >= 0 && sel < len(allRows) {
+			activePane = allRows[sel].PaneID
+		}
 		rebuild()
+		if activePane != "" {
+			for i, r := range allRows {
+				if r.PaneID == activePane {
+					sel = i
+					break
+				}
+			}
+		}
 	}
 
 	for {
@@ -2539,10 +2581,35 @@ func runPicker() int {
 		}
 		persistView(rows)
 		w, h := termSize(tty)
+		headerLines := 3
+		footerLines := 3
+		if status != "" {
+			footerLines++
+		}
+		maxVisible := h
+		if h > 6 {
+			maxVisible = h - 1
+		}
+		vis := maxVisible - headerLines - footerLines
+		if vis < 1 {
+			vis = 1
+		}
+		if sel < scrollOffset {
+			scrollOffset = sel
+		}
+		if sel >= scrollOffset+vis {
+			scrollOffset = sel - vis + 1
+		}
+		if scrollOffset < 0 {
+			scrollOffset = 0
+		}
+		if maxS := max(0, len(rows)-vis); scrollOffset > maxS {
+			scrollOffset = maxS
+		}
 		var frame string
 		switch {
 		case showHelp:
-			frame = renderHelp(w, h, helpEd.View("/", helpSearching), helpSel)
+			frame = renderHelp(w, h, helpEd.View("/", helpSearching), helpSel, helpScrollOffset)
 		case showJev:
 			ex := 0
 			if st.Jev != nil {
@@ -2551,7 +2618,7 @@ func runPicker() int {
 			if jevTyping {
 				frame = renderJevType(w, h, viewNames(st), tab, jevEd.Text(), sortedJevWeights(st))
 			} else {
-				frame = renderJev(w, h, viewNames(st), tab, jevSelectableItems(st), jevSel, ex, inboxTopScored(frozen, st, 5))
+				frame = renderJev(w, h, viewNames(st), tab, jevSelectableItems(st), jevSel, jevScrollOffset, ex, inboxTopScored(frozen, st, 5))
 			}
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
@@ -2567,7 +2634,7 @@ func runPicker() int {
 			if v.Kind == "custom" {
 				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)
 			}
-			frame = renderFrame(rows, sel, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
+			frame = renderFrame(rows, sel, scrollOffset, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
 		tty.WriteString(frame)
 
@@ -3029,11 +3096,13 @@ func runPicker() int {
 		case key == "?" && !searching:
 			showHelp = true
 			helpSel = 0
+			helpScrollOffset = 0
 			helpSearching = false
 			helpEd = vimline.New("")
 		case key == "J" && !searching && !showHelp:
 			showJev = true
 			jevSel = 0
+			jevScrollOffset = 0
 			jevTyping = false
 			jevEd = vimline.New("")
 		case (key == "left" || key == "right" || (key == "h" || key == "l") && !searching) && !showHelp:
@@ -3047,6 +3116,7 @@ func runPicker() int {
 				tab = (tab + 1) % nTabs
 			}
 			sel = 0
+			scrollOffset = 0
 			rebuild()
 		case key == "s" && !searching && !showHelp:
 			v := views(st)[tab]
@@ -3247,9 +3317,6 @@ func runPicker() int {
 // ---------------------------------------------------------------------------
 
 func openPicker() int {
-	if id, err := recordFocus(); err == nil {
-		_ = id
-	}
 	// Popup is a session modal, like prefix+k: it floats over the current view
 	// and does not change the tab layout. Exiting the process dismisses it, so
 	// no pane close or tab close is ever issued. The CLI help omits popup, but
@@ -3293,7 +3360,7 @@ func renderOnce() int {
 			h = n
 		}
 	}
-	os.Stdout.WriteString(renderFrame(rows, sel, fv, os.Getenv("RECALL_STATUS"), w, h, viewNames(st), 0, "both", os.Getenv("RECALL_STATE")))
+	os.Stdout.WriteString(renderFrame(rows, sel, 0, fv, os.Getenv("RECALL_STATUS"), w, h, viewNames(st), 0, "both", os.Getenv("RECALL_STATE")))
 	return 0
 }
 

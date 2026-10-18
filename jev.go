@@ -303,9 +303,16 @@ func (s *store) jevPrefer(r row, up bool) {
 	s.Jev.Examples++
 }
 
-// jevOrderAscending sorts rows by descending priority, most important first.
+// jevSortDesc sorts rows by descending priority, most important first.
 func (s *store) jevSortDesc(list []row, now int64) {
 	sort.SliceStable(list, func(i, j int) bool {
-		return s.jevPriority(list[i], now) > s.jevPriority(list[j], now)
+		pi, pj := s.jevPriority(list[i], now), s.jevPriority(list[j], now)
+		if pi != pj {
+			return pi > pj
+		}
+		if list[i].Last != list[j].Last {
+			return list[i].Last > list[j].Last
+		}
+		return list[i].PaneID < list[j].PaneID
 	})
 }

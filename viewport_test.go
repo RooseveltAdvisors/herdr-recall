@@ -19,7 +19,7 @@ func TestHelpViewportScrolling(t *testing.T) {
 	fv := vimline.View{}
 
 	for sel := 0; sel < len(entries); sel++ {
-		out := renderHelp(w, h, fv, sel)
+		out := renderHelp(w, h, fv, sel, 0)
 		lines := strings.Split(out, "\n")
 		if len(lines) > h {
 			t.Fatalf("height %d exceeded: got %d lines", h, len(lines))
@@ -57,7 +57,7 @@ func TestJevViewportScrolling(t *testing.T) {
 	names := []string{"Inbox", "All"}
 
 	for sel := 0; sel < len(items); sel++ {
-		out := renderJev(w, h, names, 0, items, sel, 10, nil)
+		out := renderJev(w, h, names, 0, items, sel, 0, 10, nil)
 		lines := strings.Split(out, "\n")
 		if len(lines) > h {
 			t.Fatalf("height %d exceeded: got %d lines", h, len(lines))
@@ -105,5 +105,112 @@ func TestJevSelectableItemsOrderAndPartition(t *testing.T) {
 	}
 	if items[3].section != "PROJ" || items[4].section != "PROJ" {
 		t.Fatalf("expected items 3 and 4 to be PROJ: %+v", items[3:])
+	}
+}
+
+func TestStableNavigationWithoutItemShifting(t *testing.T) {
+	var rows []row
+	for i := 0; i < 20; i++ {
+		rows = append(rows, row{
+			PaneID: fmt.Sprintf("p%d", i),
+			Label:  fmt.Sprintf("pane-%02d", i),
+			Status: "idle",
+		})
+	}
+
+	w, h := 80, 14 // visible rows ~ 7
+	fv := vimline.View{Label: "/"}
+
+	// Simulate pressing j down to row 10, then k back up to row 7.
+	// As we press k, the visible slice [start..start+visible] must remain
+	// rock-solid, and lines on screen must NOT shift down.
+	scrollOffset := 0
+	visible := 7
+
+	// Move down to row 10
+	for sel := 0; sel <= 10; sel++ {
+		if sel >= scrollOffset+visible {
+			scrollOffset = sel - visible + 1
+		}
+	}
+	// At sel 10, scrollOffset should be 10 - 7 + 1 = 4. Slice is rows 4..10.
+	if scrollOffset != 4 {
+		t.Fatalf("expected scrollOffset=4, got %d", scrollOffset)
+	}
+
+	frame10 := renderFrame(rows, 10, scrollOffset, fv, "", w, h, []string{"Inbox"}, 0, "both", "")
+
+	// Now press k: sel becomes 9. Since 9 is within [4..10], scrollOffset must NOT change.
+	sel := 9
+	if sel < scrollOffset {
+		scrollOffset = sel
+	}
+	if scrollOffset != 4 {
+		t.Fatalf("scrollOffset changed to %d on k, expected 4", scrollOffset)
+	}
+	frame9 := renderFrame(rows, 9, scrollOffset, fv, "", w, h, []string{"Inbox"}, 0, "both", "")
+
+	// Extract lines for rows 4..10 in both frames.
+	// The rows on screen must be in the exact same positions.
+	lines10 := strings.Split(stripANSI(frame10), "\n")
+	lines9 := strings.Split(stripANSI(frame9), "\n")
+
+	// Verify pane-04 is on the exact same line in both frames
+	idx10, idx9 := -1, -1
+	for i, l := range lines10 {
+		if strings.Contains(l, "pane-04") {
+			idx10 = i
+			break
+		}
+	}
+	for i, l := range lines9 {
+		if strings.Contains(l, "pane-04") {
+			idx9 = i
+			break
+		}
+	}
+	if idx10 != idx9 || idx10 == -1 {
+		t.Fatalf("pane-04 shifted position between sel=10 and sel=9: line %d vs line %d", idx10, idx9)
+	}
+}
+
+func TestInboxRetainsActivePaneAcrossJumps(t *testing.T) {
+	st := &store{
+		Version:  1,
+		Panes:    map[string]*paneStat{"p1": {Last: 100}},
+		TabsInit: true,
+		Tabs:     defaultTabs(),
+	}
+	snap := &snapshot{
+		FocusedPaneID: "p1",
+		Panes: []paneRec{
+			{PaneID: "p1", AgentStatus: "working"},
+			{PaneID: "p2", AgentStatus: "blocked"},
+			{PaneID: "p3", AgentStatus: "done"},
+		},
+	}
+	// p1 is focused. It MUST remain in the inbox list!
+	inbox := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	foundP1 := false
+	for _, r := range inbox {
+		if r.PaneID == "p1" {
+			foundP1 = true
+			break
+		}
+	}
+	if !foundP1 {
+		t.Fatal("focused pane p1 was removed from inbox list")
+	}
+
+	// Focusing p2 should keep the exact same inbox items without shifting
+	snap.FocusedPaneID = "p2"
+	inbox2 := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	if len(inbox2) != len(inbox) {
+		t.Fatalf("inbox length changed after focus switch: %d vs %d", len(inbox2), len(inbox))
+	}
+	for i := range inbox {
+		if inbox[i].PaneID != inbox2[i].PaneID {
+			t.Fatalf("inbox items shifted after focus switch at index %d: %q vs %q", i, inbox[i].PaneID, inbox2[i].PaneID)
+		}
 	}
 }

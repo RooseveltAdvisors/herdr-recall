@@ -15,7 +15,7 @@ func TestDoneRowShowsTheTriageCheck(t *testing.T) {
 		{PaneID: "a", Label: "alpha", Status: "working", Last: now, Done: true},
 		{PaneID: "b", Label: "beta", Status: "working", Last: now},
 	}
-	frame := stripANSI(renderFrame(rows, 0, vimline.View{Label: "/"}, "", 90, 12, []string{"Recent"}, 0, "newest", ""))
+	frame := stripANSI(renderFrame(rows, 0, 0, vimline.View{Label: "/"}, "", 90, 12, []string{"Recent"}, 0, "newest", ""))
 	var doneLine, liveLine string
 	for _, l := range strings.Split(frame, "\n") {
 		if strings.Contains(l, "alpha") {
