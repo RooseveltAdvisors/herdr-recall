@@ -1184,11 +1184,11 @@ func fitLine(s string, w int) string {
 
 // renderHelp draws the ? overlay: every key and what it does. Esc returns to
 // the list on the same row; the picker itself stays open.
-func renderHelp(width, height int, query string) string {
+func renderHelp(width, height int, fv vimline.View) string {
 	sc := newScreen(width, height, 10)
 	sc.emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help" + keyReset)
-	if query != "" {
-		sc.emit(keyAccentFg + "/" + keyReset + keyText + query + keyReset)
+	if fv.Text != "" || fv.Focused {
+		sc.emit(renderField(fv, sc.width))
 	} else {
 		sc.emit(keyOverlay + "/ to search keys" + keyReset)
 	}
@@ -1218,7 +1218,7 @@ func renderHelp(width, height int, query string) string {
 	sc.emit(keyText + "  x X r s delete or replace. d c y take a motion, with counts." + keyReset)
 	sc.emit(keyText + "  p P paste. u undo. ctrl+r redo. ~ change case. . repeat." + keyReset)
 	sc.emit(keyText + "  z times: min h d w mo y, compound like 1d12h, tomorrow, clear." + keyReset)
-	q := strings.ToLower(query)
+	q := strings.ToLower(fv.Text)
 	shown := 0
 	for _, kv := range keys {
 		if q != "" && !strings.Contains(strings.ToLower(kv[0]+" "+kv[1]), q) {
@@ -2452,7 +2452,7 @@ func runPicker() int {
 		var frame string
 		switch {
 		case showHelp:
-			frame = renderHelp(w, h, helpEd.Text())
+			frame = renderHelp(w, h, helpEd.View("/", helpSearching))
 		case showJev:
 			ex := 0
 			if st.Jev != nil {
