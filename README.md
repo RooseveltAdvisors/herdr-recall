@@ -108,19 +108,37 @@ positive green and negative red. Enter clears one, ctrl+u clears all.
 The CLI can do the same: `herdr-recall jev` lists, `jev reset` clears,
 `jev reset status:blocked` clears one, `jev scores` shows the API scores.
 
+## Showcase
+
+Designed frames of the picker. Live terminal captures follow below.
+The social card is [assets/og.png](assets/og.png).
+
+Inbox is the default view. A coloured dot plus a coloured word marks status:
+red blocked, yellow working, teal done, green idle. `e` marks a thread done
+for this cycle. A sticky note from `n` sits beside the name.
+
+![triage inbox](assets/showcase-inbox.png)
+
+`i` opens teach mode on the selected thread. Prefer, Neutral, and Demote are
+chips. An optional reason is saved with the choice.
+
+![teach Jev](assets/showcase-teach.png)
+
+`J` shows what Jev has learned. Positive weights are teal. Negative weights
+are red. The inbox preview says why the top threads rank first.
+
+![Jev dashboard](assets/showcase-jev.png)
+
+`z` snoozes with a typed time and a live preview (`3h` resolves to "in 3 hours"
+before it commits). `If no reply` returns the thread early on new agent activity.
+
+![snooze](assets/showcase-snooze.png)
+
 ## Screenshots
 
 Inbox triage view (default view with pinned queue order, sticky notes, and due `!` reminder badge):
 
 ![inbox triage view](assets/screenshot-browse.png)
-
-Visual teach dialog (`i`) with visual preference selection and feedback:
-
-![visual teach mode](assets/screenshot-teach.png)
-
-Jev learned weights dashboard (`J`) with priority impact bars and inbox ranking preview:
-
-![jev dashboard](assets/screenshot-jev.png)
 
 All view showing all four status colours (red blocked, yellow working, teal done, green idle) and a snoozed `~` reminder badge:
 
