@@ -1184,7 +1184,7 @@ func fitLine(s string, w int) string {
 
 // renderHelp draws the ? overlay: every key and what it does. Esc returns to
 // the list on the same row; the picker itself stays open.
-func renderHelp(width, height int, fv vimline.View) string {
+func renderHelp(width, height int, fv vimline.View, sel int) string {
 	sc := newScreen(width, height, 10)
 	sc.emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help" + keyReset)
 	if fv.Text != "" || fv.Focused {
@@ -1224,7 +1224,11 @@ func renderHelp(width, height int, fv vimline.View) string {
 		if q != "" && !strings.Contains(strings.ToLower(kv[0]+" "+kv[1]), q) {
 			continue
 		}
-		sc.emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
+		if shown == sel {
+			sc.emit(keySelectBg + keySelectFg + keyBold + pad("  "+kv[0]+"  "+kv[1], sc.width) + keyReset)
+		} else {
+			sc.emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
+		}
 		shown++
 	}
 	if shown == 0 {
@@ -2246,6 +2250,7 @@ func runPicker() int {
 	showHelp := false
 	helpEd := vimline.New("")
 	helpSearching := false
+	helpSel := 0
 	showJev := false
 	jevSel := 0
 	jevTyping := false
@@ -2452,7 +2457,7 @@ func runPicker() int {
 		var frame string
 		switch {
 		case showHelp:
-			frame = renderHelp(w, h, helpEd.View("/", helpSearching))
+			frame = renderHelp(w, h, helpEd.View("/", helpSearching), helpSel)
 		case showJev:
 			ex := 0
 			if st.Jev != nil {
@@ -2791,12 +2796,25 @@ func runPicker() int {
 				case vimline.ActCancel:
 					showHelp = false
 					helpSearching = false
+				case vimline.ActDown:
+					helpSel++
+				case vimline.ActUp:
+					if helpSel > 0 {
+						helpSel--
+					}
 				}
 			} else {
 				switch key {
 				case "/":
 					helpSearching = true
 					helpEd = vimline.New("")
+					helpSel = 0
+				case "j", "down":
+					helpSel++
+				case "k", "up":
+					if helpSel > 0 {
+						helpSel--
+					}
 				case "?", "q", "esc":
 					showHelp = false
 				}
