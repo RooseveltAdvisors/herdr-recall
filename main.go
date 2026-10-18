@@ -1224,33 +1224,207 @@ func renderHelp(width, height int) string {
 }
 
 // filterRows narrows the frozen list to the query without changing its order.
-// renderJev shows what Jev has learned, sorted by impact. Positive weights
-// are preferences, negative are demotions. Enter on a row clears it.
-func renderJev(width, height int, names []string, active int, weights []jevWeight, sel int) string {
-	sc := newScreen(width, height, 10)
+// renderJev is the Jev dashboard. Weights group by type, sort by impact,
+// and carry a bar so relative strength reads at a glance. A prediction
+// section shows what Jev would surface first right now.
+func renderJev(width, height int, names []string, active int, weights []jevWeight, sel int, totalExamples int) string {
+	sc := newScreen(width, height, 12)
 	sc.header(names, active)
-	sc.emit(keyText + keyBold + "  Jev learnings" + keyReset)
+
 	if len(weights) == 0 {
-		sc.emit(keyOverlay + "  Nothing learned yet. Press + or - on a row to teach Jev." + keyReset)
-	} else {
-		sc.emit(keyOverlay + "  enter clears a weight, ctrl+u clears all" + keyReset)
+		sc.emit(keyText + keyBold + "  Jev dashboard" + keyReset)
+		sc.emit("")
+		sc.emit(keyOverlay + "  Nothing learned yet." + keyReset)
+		sc.emit(keyOverlay + "  Press + on a row to teach Jev what to surface first." + keyReset)
+		sc.emit(keyOverlay + "  Press - to teach it what to bury." + keyReset)
+		sc.rule()
+		sc.emit(hintFooter("esc", "back"))
+		return sc.done()
 	}
+
+	pos, neg := splitWeights(weights)
+	labels := filterPrefix(weights, "label:")
+	sc.emit(keyText + keyBold + "  Jev dashboard" + keyReset + keyOverlay + "  " + fmt.Sprintf("%d actions taught these", totalExamples) + keyReset)
 	sc.emit("")
-	for i, w := range weights {
-		val := fmt.Sprintf("%+.2f", w.value)
-		color := keyStGood
-		if w.value < 0 {
-			color = keyStBad
+
+	// Preferences
+	if len(pos) > 0 {
+		sc.emit(keyAccentFg + keyBold + "  SURFACES FIRST" + keyReset)
+		for i, w := range pos {
+			sc.emit(weightLine(w, i == sel, sc.width))
 		}
-		if i == sel {
-			sc.emit(keySelectBg + keySelectFg + keyBold + pad("  "+val+" "+w.feature, sc.width) + keyReset)
-		} else {
-			sc.emit("  " + color + pad(val, 7) + keyReset + keyText + w.feature + keyReset)
-		}
+		sc.emit("")
 	}
+
+	// Demotions
+	if len(neg) > 0 {
+		sc.emit(keyStBad + keyBold + "  BURIED" + keyReset)
+		for i, w := range neg {
+			sc.emit(weightLine(w, sel == len(pos)+i, sc.width))
+		}
+		sc.emit("")
+	}
+
+	// Top labels (collapse the rest)
+	if len(labels) > 0 {
+		sc.emit(keyAccentFg + keyBold + "  PROJECTS" + keyReset + keyOverlay + "  top " + fmt.Sprintf("%d of %d", minInt(5, len(labels)), len(labels)) + keyReset)
+		for i, w := range labels {
+			if i >= 5 {
+				break
+			}
+			sc.emit(weightLine(w, false, sc.width))
+		}
+		if len(labels) > 5 {
+			sc.emit(keyOverlay + "  +" + fmt.Sprintf("%d more at baseline", len(labels)-5) + keyReset)
+		}
+		sc.emit("")
+	}
+
+	// Prediction: what a typical thread of each kind scores now
+	sc.emit(keyAccentFg + keyBold + "  IF A THREAD ARRIVES NOW" + keyReset)
+	sc.emit("  " + keyOverlay + "blocked" + keyReset + "  " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "status", "blocked")}, sc.width-20))
+	sc.emit("  " + keyOverlay + "working" + keyReset + "  " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "status", "working")}, sc.width-20))
+	sc.emit("  " + keyOverlay + "fresh" + keyReset + "    " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "age", "fresh")}, sc.width-20))
+
 	sc.rule()
 	sc.emit(hintFooter("enter", "clear weight", "ctrl+u", "clear all", "esc", "back"))
 	return sc.done()
+}
+
+func weightLine(w jevWeight, selected bool, width int) string {
+	val := fmt.Sprintf("%+.2f", w.value)
+	desc := featureDescription(w.feature)
+	if selected {
+		return keySelectBg + keySelectFg + keyBold + pad("  "+val+" "+desc, width) + keyReset
+	}
+	color := keyStGood
+	if w.value < 0 {
+		color = keyStBad
+	}
+	return "  " + color + pad(val, 7) + keyReset + weightBar(w, 18) + " " + keyText + desc + keyReset
+}
+
+func weightBar(w jevWeight, width int) string {
+	if width < 4 {
+		return ""
+	}
+	filled := int(abs64(w.value) * float64(width-2))
+	if filled > width-2 {
+		filled = width - 2
+	}
+	color := keyStGood
+	if w.value < 0 {
+		color = keyStBad
+	}
+	bar := color
+	for i := 0; i < width-2; i++ {
+		if i < filled {
+			bar += "\u2588"
+		} else {
+			bar += "\u2591"
+		}
+	}
+	return bar + keyReset
+}
+
+// featureDescription turns a feature key into what it means to a human.
+func featureDescription(f string) string {
+	kind, val, ok := strings.Cut(f, ":")
+	if !ok {
+		return f
+	}
+	switch kind {
+	case "status":
+		switch val {
+		case "":
+			return "no agent status"
+		case "blocked":
+			return "blocked agents (need your input)"
+		case "working":
+			return "working agents (running now)"
+		case "done":
+			return "finished agents (check results)"
+		case "idle":
+			return "idle agents (waiting)"
+		}
+		return val + " agents"
+	case "age":
+		switch val {
+		case "fresh":
+			return "fresh threads (under 10 min)"
+		case "hour":
+			return "threads from the last hour"
+		case "day":
+			return "threads from today"
+		case "old":
+			return "older threads"
+		case "none":
+			return "threads you never opened"
+		}
+		return val
+	case "label":
+		return val
+	case "remind":
+		if val == "yes" {
+			return "threads with a reminder set"
+		}
+		return val
+	case "note":
+		if val == "yes" {
+			return "threads with a sticky note"
+		}
+		return val
+	case "manual":
+		if val == "yes" {
+			return "manually blocked threads"
+		}
+		return val
+	}
+	return f
+}
+
+// predictWeight sums the learned weight for a hypothetical thread with the
+// given status or age, so the dashboard shows what Jev would do next.
+func predictWeight(weights []jevWeight, kind, val string) float64 {
+	sum := 0.0
+	for _, w := range weights {
+		if strings.HasPrefix(w.feature, kind+":") && strings.HasSuffix(w.feature, val) {
+			sum += w.value
+		}
+	}
+	if kind == "status" {
+		// a blocked agent is also "not idle" so the idle demotion applies
+		for _, w := range weights {
+			if w.feature == "status:idle" && w.value < 0 && val != "idle" {
+				sum += abs64(w.value) * 0.3
+			}
+		}
+	}
+	return sum
+}
+
+func splitWeights(weights []jevWeight) (pos, neg []jevWeight) {
+	for _, w := range weights {
+		if strings.HasPrefix(w.feature, "label:") {
+			continue
+		}
+		if w.value >= 0 {
+			pos = append(pos, w)
+		} else {
+			neg = append(neg, w)
+		}
+	}
+	return
+}
+
+func filterPrefix(weights []jevWeight, prefix string) []jevWeight {
+	var out []jevWeight
+	for _, w := range weights {
+		if strings.HasPrefix(w.feature, prefix) {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 type jevWeight struct {
@@ -2120,7 +2294,11 @@ func runPicker() int {
 		case showHelp:
 			frame = renderHelp(w, h)
 		case showJev:
-			frame = renderJev(w, h, viewNames(st), tab, sortedJevWeights(st), jevSel)
+			ex := 0
+			if st.Jev != nil {
+				ex = st.Jev.Examples
+			}
+			frame = renderJev(w, h, viewNames(st), tab, sortedJevWeights(st), jevSel, ex)
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
@@ -2863,4 +3041,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "recall: unknown command %q\n", os.Args[1])
 		os.Exit(2)
 	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
