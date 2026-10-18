@@ -1184,12 +1184,15 @@ func fitLine(s string, w int) string {
 
 // renderHelp draws the ? overlay: every key and what it does. Esc returns to
 // the list on the same row; the picker itself stays open.
-func renderHelp(width, height int) string {
-	var b strings.Builder
-	b.WriteString("\x1b[2J\x1b[H")
-	emit := func(line string) { b.WriteString(fitLine(line, width) + "\r\n") }
-	emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help - esc returns to the list" + keyReset)
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+func renderHelp(width, height int, query string) string {
+	sc := newScreen(width, height, 10)
+	sc.emit(keyAccentFg + keyBold + "? " + keyReset + keyOverlay + "help" + keyReset)
+	if query != "" {
+		sc.emit(keyAccentFg + "/" + keyReset + keyText + query + keyReset)
+	} else {
+		sc.emit(keyOverlay + "/ to search keys" + keyReset)
+	}
+	sc.rule()
 	keys := [][2]string{
 		{"j / k / arrows", "move one row, or N rows with a count"},
 		{"g / G", "first row / last row"},
@@ -1205,22 +1208,31 @@ func renderHelp(width, height int) string {
 		{"s", "on All and Favorites: cycle sort"},
 		{"+ / -", "tell Jev: more like this row / less like it"},
 		{"J", "inspect and correct Jev learnings"},
+		{"u", "undo the last e"},
 		{"?", "open or close this help"},
 		{"esc", "insert to normal, normal to browse, then clears search, then closes"},
 		{"ctrl+c", "close from anywhere"},
 	}
-	emit(keyAccentFg + keyBold + "  / and n use vim editing" + keyReset)
-	emit(keyText + "  esc or jj enters normal mode. i I a A insert. w b e 0 ^ $ move." + keyReset)
-	emit(keyText + "  x X r s delete or replace. d c y take a motion, with counts." + keyReset)
-	emit(keyText + "  p P paste. u undo. ctrl+r redo. ~ change case. . repeat." + keyReset)
-	emit(keyText + "  z times: min h d w mo y, compound like 1d12h, tomorrow, clear." + keyReset)
-	emit(keyText + "  j k arrows move the list. enter jumps." + keyReset)
+	sc.emit(keyAccentFg + keyBold + "  / and n use vim editing" + keyReset)
+	sc.emit(keyText + "  esc or jj enters normal mode. i I a A insert. w b e 0 ^ $ move." + keyReset)
+	sc.emit(keyText + "  x X r s delete or replace. d c y take a motion, with counts." + keyReset)
+	sc.emit(keyText + "  p P paste. u undo. ctrl+r redo. ~ change case. . repeat." + keyReset)
+	sc.emit(keyText + "  z times: min h d w mo y, compound like 1d12h, tomorrow, clear." + keyReset)
+	q := strings.ToLower(query)
+	shown := 0
 	for _, kv := range keys {
-		emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
+		if q != "" && !strings.Contains(strings.ToLower(kv[0]+" "+kv[1]), q) {
+			continue
+		}
+		sc.emit("  " + keyAccentFg + pad(kv[0], 8) + keyReset + keyText + kv[1] + keyReset)
+		shown++
 	}
-	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	emit(keyOverlay + "body text stays light, status dot colours: red blocked, yellow working, teal done, green idle" + keyReset)
-	return b.String()
+	if shown == 0 {
+		sc.emit(keyOverlay + "  no keys match" + keyReset)
+	}
+	sc.rule()
+	sc.emit(keyOverlay + "body text stays light, status dot colours: red blocked, yellow working, teal done, green idle" + keyReset)
+	return sc.done()
 }
 
 // filterRows narrows the frozen list to the query without changing its order.
@@ -1298,7 +1310,7 @@ func renderJev(width, height int, names []string, active int, weights []jevWeigh
 	}
 
 	sc.rule()
-	sc.emit(hintFooter("enter", "clear weight", "D", "clear all (confirm)", "esc", "back"))
+	sc.emit(hintFooter("enter", "clear", "i", "teach", "D", "clear all", "esc", "back"))
 	return sc.done()
 }
 
@@ -1499,6 +1511,76 @@ func featureApplies(feature string, r row) bool {
 		return r.ManualBlocked
 	}
 	return false
+}
+
+// renderJevType is the free-text Jev feedback input. Type part of a feature
+// name, see matching features, then + to prefer or - to demote.
+func renderJevType(width, height int, names []string, active int, query string, weights []jevWeight) string {
+	sc := newScreen(width, height, 10)
+	sc.header(names, active)
+	sc.emit(keyText + keyBold + "  Teach Jev" + keyReset)
+	sc.emit(keyOverlay + "  Type a feature, then + to prefer or - to demote" + keyReset)
+	sc.emit("")
+	sc.emit(renderField(vimline.New(query).View("feature", true), sc.width))
+	sc.emit("")
+	q := strings.ToLower(query)
+	matched := 0
+	for _, w := range weights {
+		if q != "" && !strings.Contains(strings.ToLower(w.feature), q) && !strings.Contains(strings.ToLower(featureDescription(w.feature)), q) {
+			continue
+		}
+		val := fmt.Sprintf("%+.2f", w.value)
+		color := keyStGood
+		if w.value < 0 {
+			color = keyStBad
+		}
+		sc.emit("  " + color + pad(val, 7) + keyReset + keyText + featureDescription(w.feature) + keyReset)
+		matched++
+		if matched >= 8 {
+			break
+		}
+	}
+	if matched == 0 && q != "" {
+		sc.emit(keyOverlay + "  new feature: " + query + keyReset)
+	}
+	sc.rule()
+	sc.emit(hintFooter("+", "prefer", "-", "demote", "esc", "cancel"))
+	return sc.done()
+}
+
+// jevApplyFeedback sets a feature weight from the typing input. A bare
+// word becomes a label feature. A prefix like status: or age: is kept.
+func jevApplyFeedback(st *store, text string, up bool) {
+	feature := strings.TrimSpace(strings.ToLower(text))
+	if feature == "" {
+		return
+	}
+	// If it matches an existing feature exactly, use that
+	st.ensureJev()
+	for f := range st.Jev.Weights {
+		if f == feature || strings.HasSuffix(f, ":"+feature) {
+			feature = f
+			break
+		}
+	}
+	// No prefix: treat as a label
+	if !strings.Contains(feature, ":") {
+		feature = "label:" + feature
+	}
+	sign := -0.5
+	if up {
+		sign = 0.5
+	}
+	w := st.Jev.Weights[feature] + sign
+	if w > 1 {
+		w = 1
+	}
+	if w < -1 {
+		w = -1
+	}
+	st.Jev.Weights[feature] = w
+	st.Jev.Examples++
+	_ = saveStore(st)
 }
 
 type jevWeight struct {
@@ -2162,8 +2244,12 @@ func runPicker() int {
 	searching := false
 	stateFilter := st.ActiveState
 	showHelp := false
+	helpEd := vimline.New("")
+	helpSearching := false
 	showJev := false
 	jevSel := 0
+	jevTyping := false
+	jevEd := vimline.New("")
 	// The snapshot is frozen when the picker opens so j/k does not reshuffle
 	// rows. Tab and sort changes reorder that frozen set on purpose.
 	frozen, err := loadSnapshot()
@@ -2366,13 +2452,17 @@ func runPicker() int {
 		var frame string
 		switch {
 		case showHelp:
-			frame = renderHelp(w, h)
+			frame = renderHelp(w, h, helpEd.Text())
 		case showJev:
 			ex := 0
 			if st.Jev != nil {
 				ex = st.Jev.Examples
 			}
-			frame = renderJev(w, h, viewNames(st), tab, sortedJevWeights(st), jevSel, ex, inboxTopScored(frozen, st, 5))
+			if jevTyping {
+				frame = renderJevType(w, h, viewNames(st), tab, jevEd.Text(), sortedJevWeights(st))
+			} else {
+				frame = renderJev(w, h, viewNames(st), tab, sortedJevWeights(st), jevSel, ex, inboxTopScored(frozen, st, 5))
+			}
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
@@ -2694,9 +2784,22 @@ func runPicker() int {
 			}
 			return 0 // esc closes from browse mode
 		case showHelp:
-			// While help is open only esc, ? and q act; the list does not move.
-			if key == "?" || key == "q" {
-				showHelp = false
+			if helpSearching {
+				switch helpEd.Feed(key) {
+				case vimline.ActOut:
+					helpSearching = false
+				case vimline.ActCancel:
+					showHelp = false
+					helpSearching = false
+				}
+			} else {
+				switch key {
+				case "/":
+					helpSearching = true
+					helpEd = vimline.New("")
+				case "?", "q", "esc":
+					showHelp = false
+				}
 			}
 		case key == "up":
 			if sel > 0 {
@@ -2734,8 +2837,26 @@ func runPicker() int {
 			showJev = true
 			jevSel = 0
 		case showJev:
+			if jevTyping {
+				switch key {
+				case "+", "=":
+					jevApplyFeedback(st, jevEd.Text(), true)
+					jevTyping = false
+				case "-":
+					jevApplyFeedback(st, jevEd.Text(), false)
+					jevTyping = false
+				case "esc":
+					jevTyping = false
+				default:
+					jevEd.Feed(key)
+				}
+				continue
+			}
 			weights := sortedJevWeights(st)
 			switch key {
+			case "i":
+				jevTyping = true
+				jevEd = vimline.New("")
 			case "esc", "q":
 				showJev = false
 			case "j", "down":
