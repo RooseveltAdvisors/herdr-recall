@@ -1287,7 +1287,7 @@ func renderJev(width, height int, names []string, active int, weights []jevWeigh
 	sc.emit("  " + keyOverlay + "fresh" + keyReset + "    " + weightBar(jevWeight{feature: "", value: predictWeight(weights, "age", "fresh")}, sc.width-20))
 
 	sc.rule()
-	sc.emit(hintFooter("enter", "clear weight", "ctrl+u", "clear all", "esc", "back"))
+	sc.emit(hintFooter("enter", "clear weight", "D", "clear all (confirm)", "esc", "back"))
 	return sc.done()
 }
 
@@ -2464,13 +2464,20 @@ func runPicker() int {
 				confirmSel = cycle(2, confirmSel, 1)
 			case "enter":
 				if confirmSel == 0 {
-					v := views(st)[tab]
-					if v.Kind == "custom" {
-						st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
+					if confirmName == "all Jev learnings" {
+						st.ensureJev()
+						st.Jev.Weights = map[string]float64{}
 						_ = saveStore(st)
-						tab = 0
-						status = "deleted " + confirmName
-						rebuild()
+						status = "all Jev learnings cleared"
+					} else {
+						v := views(st)[tab]
+						if v.Kind == "custom" {
+							st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
+							_ = saveStore(st)
+							tab = 0
+							status = "deleted " + confirmName
+							rebuild()
+						}
 					}
 				}
 				confirmName = ""
@@ -2677,11 +2684,11 @@ func runPicker() int {
 						jevSel = max(0, len(sortedJevWeights(st))-1)
 					}
 				}
-			case "ctrl-u":
-				st.ensureJev()
-				st.Jev.Weights = map[string]float64{}
-				_ = saveStore(st)
-				jevSel = 0
+			case "D":
+				// D clears all, with the same confirm dialog as tab delete.
+				confirmName = "all Jev learnings"
+				confirmSel = 1
+				showJev = false
 			}
 		case (key == "left" || key == "right" || (key == "h" || key == "l") && !searching) && !showHelp:
 			nTabs := len(views(st))
