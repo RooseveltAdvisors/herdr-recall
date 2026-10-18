@@ -279,6 +279,30 @@ func (s *store) jevLearn(chosen row, skipped []row) {
 	s.Jev.Examples++
 }
 
+// jevPrefer records explicit feedback on one row. Plus bumps its features,
+// minus decays them. This is local weight math, so it works without the
+// decision proxy; only the arrival scoring needs the endpoint.
+func (s *store) jevPrefer(r row, up bool) {
+	s.ensureJev()
+	now := time.Now().Unix()
+	const alpha = 0.1
+	sign := -1.0
+	if up {
+		sign = 1.0
+	}
+	for _, f := range jevFeatures(r, now) {
+		w := s.Jev.Weights[f] + sign*alpha
+		if w > 1 {
+			w = 1
+		}
+		if w < -1 {
+			w = -1
+		}
+		s.Jev.Weights[f] = w
+	}
+	s.Jev.Examples++
+}
+
 // jevOrderAscending sorts rows by descending priority, most important first.
 func (s *store) jevSortDesc(list []row, now int64) {
 	sort.SliceStable(list, func(i, j int) bool {

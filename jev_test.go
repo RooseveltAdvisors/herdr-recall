@@ -148,3 +148,31 @@ func TestJevLearnWithNilWeightsDoesNotPanic(t *testing.T) {
 		t.Fatalf("weight = %v, want positive", st.Jev.Weights["status:working"])
 	}
 }
+
+func TestJevPreferBumpsFeaturesWithoutProxy(t *testing.T) {
+	// No HERDR_RECALL_JEV set: preference is local, must still work.
+	os.Unsetenv("HERDR_RECALL_JEV")
+	os.Unsetenv("FM_JEV_PROXY_BIN")
+	t.Setenv("HERDR_RECALL_JEV", "off")
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	blocked := row{PaneID: "a", Label: "portal billing", Status: "blocked", Last: time.Now().Unix()}
+
+	st.jevPrefer(blocked, true)
+	if w := st.Jev.Weights["status:blocked"]; w <= 0 {
+		t.Fatalf("status:blocked = %v after prefer, want positive", w)
+	}
+	if w := st.Jev.Weights["label:portal"]; w <= 0 {
+		t.Fatalf("label:portal = %v after prefer, want positive", w)
+	}
+
+	idle := row{PaneID: "b", Label: "docs cleanup", Status: "idle", Last: time.Now().Unix()}
+	st.jevPrefer(idle, false)
+	if w := st.Jev.Weights["status:idle"]; w >= 0 {
+		t.Fatalf("status:idle = %v after demote, want negative", w)
+	}
+
+	// The prefer's ordering influence: a blocked portal row now outranks an idle docs row.
+	if st.jevWeight(blocked, time.Now().Unix()) <= st.jevWeight(idle, time.Now().Unix()) {
+		t.Fatal("preference did not rank the preferred row higher")
+	}
+}

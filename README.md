@@ -98,6 +98,10 @@ Preference is learned locally. Acting on an Inbox row reinforces its features
 (status, note, age, label) and decays the features of the rows skipped above
 it, so the ordering drifts toward what you actually handle first.
 
+Explicit feedback is faster: `+` on a row tells Jev to rank threads like it
+higher,  tells it to rank them lower. The bump is double the implicit
+rate. It works without the decision proxy, since the weights are local.
+
 ## Screenshots
 
 Inbox triage view (default view with pinned queue order, sticky notes, and due `!` reminder badge):

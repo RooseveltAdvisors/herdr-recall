@@ -1197,6 +1197,7 @@ func renderHelp(width, height int) string {
 		{"h / l", "switch tabs"},
 		{"t c / t r / t x", "create, revise, or delete a custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
+		{"+ / -", "tell Jev: more like this row / less like it"},
 		{"?", "open or close this help"},
 		{"esc", "insert to normal, normal to browse, then clears search, then closes"},
 		{"ctrl+c", "close from anywhere"},
@@ -2458,6 +2459,22 @@ func runPicker() int {
 			}
 			_ = saveStore(st)
 			rebuild()
+		case (key == "+" || key == "=" || key == "-") && !searching && !showHelp:
+			// Explicit Jev feedback: plus bumps this row's features, minus
+			// decays them. The next arrival with the same features ranks
+			// higher or lower.
+			if len(rows) == 0 {
+				break
+			}
+			r := rows[sel]
+			up := key == "+" || key == "="
+			st.jevPrefer(r, up)
+			_ = saveStore(st)
+			if up {
+				status = "preferred: " + r.Label
+			} else {
+				status = "demoted: " + r.Label
+			}
 		case key == "u" && !searching && !showHelp:
 			// Undo the last e, the way vim's u undoes the last change. The
 			// row returns to the list it left.
