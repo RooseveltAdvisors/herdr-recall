@@ -1204,6 +1204,7 @@ func renderHelp(width, height int) string {
 		{"t c / t r / t x", "create, revise, or delete a custom tab"},
 		{"s", "on All and Favorites: cycle sort"},
 		{"+ / -", "tell Jev: more like this row / less like it"},
+		{"J", "inspect and correct Jev learnings"},
 		{"?", "open or close this help"},
 		{"esc", "insert to normal, normal to browse, then clears search, then closes"},
 		{"ctrl+c", "close from anywhere"},
@@ -1223,6 +1224,67 @@ func renderHelp(width, height int) string {
 }
 
 // filterRows narrows the frozen list to the query without changing its order.
+// renderJev shows what Jev has learned, sorted by impact. Positive weights
+// are preferences, negative are demotions. Enter on a row clears it.
+func renderJev(width, height int, names []string, active int, weights []jevWeight, sel int) string {
+	sc := newScreen(width, height, 10)
+	sc.header(names, active)
+	sc.emit(keyText + keyBold + "  Jev learnings" + keyReset)
+	if len(weights) == 0 {
+		sc.emit(keyOverlay + "  Nothing learned yet. Press + or - on a row to teach Jev." + keyReset)
+	} else {
+		sc.emit(keyOverlay + "  enter clears a weight, ctrl+u clears all" + keyReset)
+	}
+	sc.emit("")
+	for i, w := range weights {
+		val := fmt.Sprintf("%+.2f", w.value)
+		color := keyStGood
+		if w.value < 0 {
+			color = keyStBad
+		}
+		if i == sel {
+			sc.emit(keySelectBg + keySelectFg + keyBold + pad("  "+val+" "+w.feature, sc.width) + keyReset)
+		} else {
+			sc.emit("  " + color + pad(val, 7) + keyReset + keyText + w.feature + keyReset)
+		}
+	}
+	sc.rule()
+	sc.emit(hintFooter("enter", "clear weight", "ctrl+u", "clear all", "esc", "back"))
+	return sc.done()
+}
+
+type jevWeight struct {
+	feature string
+	value   float64
+}
+
+func sortedJevWeights(st *store) []jevWeight {
+	if st.Jev == nil || len(st.Jev.Weights) == 0 {
+		return nil
+	}
+	out := make([]jevWeight, 0, len(st.Jev.Weights))
+	for f, v := range st.Jev.Weights {
+		if v != 0 {
+			out = append(out, jevWeight{feature: f, value: v})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ai, aj := abs64(out[i].value), abs64(out[j].value)
+		if ai != aj {
+			return ai > aj
+		}
+		return out[i].feature < out[j].feature
+	})
+	return out
+}
+
+func abs64(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 func filterByState(rows []row, state string) []row {
 	if state == "" {
 		return rows
@@ -1852,6 +1914,8 @@ func runPicker() int {
 	searching := false
 	stateFilter := st.ActiveState
 	showHelp := false
+	showJev := false
+	jevSel := 0
 	// The snapshot is frozen when the picker opens so j/k does not reshuffle
 	// rows. Tab and sort changes reorder that frozen set on purpose.
 	frozen, err := loadSnapshot()
@@ -2055,6 +2119,8 @@ func runPicker() int {
 		switch {
 		case showHelp:
 			frame = renderHelp(w, h)
+		case showJev:
+			frame = renderJev(w, h, viewNames(st), tab, sortedJevWeights(st), jevSel)
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
@@ -2408,6 +2474,37 @@ func runPicker() int {
 			return 0
 		case key == "?" && !searching:
 			showHelp = true
+		case key == "J" && !searching && !showHelp:
+			showJev = true
+			jevSel = 0
+		case showJev:
+			weights := sortedJevWeights(st)
+			switch key {
+			case "esc", "q":
+				showJev = false
+			case "j", "down":
+				if jevSel < len(weights)-1 {
+					jevSel++
+				}
+			case "k", "up":
+				if jevSel > 0 {
+					jevSel--
+				}
+			case "enter":
+				if jevSel < len(weights) {
+					st.ensureJev()
+					delete(st.Jev.Weights, weights[jevSel].feature)
+					_ = saveStore(st)
+					if jevSel >= len(sortedJevWeights(st)) {
+						jevSel = max(0, len(sortedJevWeights(st))-1)
+					}
+				}
+			case "ctrl-u":
+				st.ensureJev()
+				st.Jev.Weights = map[string]float64{}
+				_ = saveStore(st)
+				jevSel = 0
+			}
 		case (key == "left" || key == "right" || (key == "h" || key == "l") && !searching) && !showHelp:
 			nTabs := len(views(st))
 			if nTabs < 1 {
@@ -2724,6 +2821,41 @@ func main() {
 			fmt.Println("favorite added")
 		} else {
 			fmt.Println("favorite removed")
+		}
+	case "jev":
+		st := loadStore()
+		if len(os.Args) < 3 {
+			// list
+			for _, w := range sortedJevWeights(st) {
+				fmt.Printf("%+.2f  %s\n", w.value, w.feature)
+			}
+			if st.Jev != nil {
+				fmt.Printf("\nexamples: %d, scored panes: %d\n", st.Jev.Examples, len(st.Jev.Scores))
+			}
+			os.Exit(0)
+		}
+		switch os.Args[2] {
+		case "reset":
+			if len(os.Args) > 3 {
+				// reset one feature
+				st.ensureJev()
+				delete(st.Jev.Weights, os.Args[3])
+				fmt.Println("cleared:", os.Args[3])
+			} else {
+				st.ensureJev()
+				st.Jev.Weights = map[string]float64{}
+				fmt.Println("all learnings cleared")
+			}
+			_ = saveStore(st)
+		case "scores":
+			if st.Jev != nil {
+				for id, sc := range st.Jev.Scores {
+					fmt.Printf("%.2f  %s\n", sc, id)
+				}
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "usage: herdr-recall jev [reset [feature]|scores]\n")
+			os.Exit(2)
 		}
 	case "render":
 		os.Exit(renderOnce())

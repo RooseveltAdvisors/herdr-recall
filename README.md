@@ -102,6 +102,11 @@ Explicit feedback is faster: `+` on a row tells Jev to rank threads like it
 higher,  tells it to rank them lower. The bump is double the implicit
 rate. It works without the decision proxy, since the weights are local.
 
+Press `J` to inspect what Jev has learned. Weights sort by impact,
+positive green and negative red. Enter clears one, ctrl+u clears all.
+The CLI can do the same: `herdr-recall jev` lists, `jev reset` clears,
+`jev reset status:blocked` clears one, `jev scores` shows the API scores.
+
 ## Screenshots
 
 Inbox triage view (default view with pinned queue order, sticky notes, and due `!` reminder badge):
