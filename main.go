@@ -247,13 +247,19 @@ func loadStore() *store {
 		s.TabsInit = true
 		_ = saveStore(s)
 	}
+	// Bump persisted 20 limits to 50 so Most used fills the popup.
+	for i := range s.Tabs {
+		if s.Tabs[i].Limit == 20 {
+			s.Tabs[i].Limit = 50
+		}
+	}
 	return s
 }
 
 func defaultTabs() []customTab {
 	return []customTab{
-		{Name: "Recent", Sort: "last", Limit: 20, Fixed: true},
-		{Name: "Most used", Sort: "times", Limit: 20, Fixed: true},
+		{Name: "Recent", Sort: "last", Limit: 50, Fixed: true},
+		{Name: "Most used", Sort: "times", Limit: 50, Fixed: true},
 	}
 }
 

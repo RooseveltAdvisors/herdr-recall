@@ -188,8 +188,8 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 	}
 	snap := &snapshot{Panes: panes}
 	recent := rowsFor(snap, st, view{Kind: "custom", Idx: 0}, sortDefault)
-	if len(recent) != 20 {
-		t.Fatalf("recent len = %d, want 20 (20 limit)", len(recent))
+	if len(recent) != 26 {
+		t.Fatalf("recent len = %d, want 26 (50 limit, 26 panes)", len(recent))
 	}
 	// The old favorite sits at the bottom by recency, not pinned to the top.
 	if len(recent) > 0 && recent[0].PaneID == "notes" {
