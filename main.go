@@ -20,9 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-	"unsafe"
 )
 
 const pluginID = "RooseveltAdvisors.herdr-recall"
@@ -2494,21 +2492,6 @@ func max(a, b int) int {
 // ---------------------------------------------------------------------------
 // interactive picker
 // ---------------------------------------------------------------------------
-
-// termSize measures the pane's own tty. The overlay pane this plugin runs in
-// is narrow (31 columns in the live session), so the size must come from the
-// tty the picker itself holds, and a failure must never fall back to a wide
-// default: a frame wider than the pane wraps and every row becomes unreadable.
-func termSize(tty *os.File) (int, int) {
-	var ws struct {
-		Row, Col, X, Y uint16
-	}
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, tty.Fd(), 0x5413, uintptr(unsafe.Pointer(&ws)))
-	if errno != 0 || ws.Col < 8 || ws.Row < 4 {
-		return 62, 12
-	}
-	return int(ws.Col), int(ws.Row)
-}
 
 // logicalKey turns one keystroke into a name the picker understands.
 // Herdr may deliver a raw byte or a CSI / kitty sequence. Both must work,
