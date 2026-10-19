@@ -5,9 +5,9 @@ import (
 	"time"
 )
 
-// e removes the row from the list being triaged. All view keeps it with a check
-// so the captain can always find any thread.
-func TestEDrainsTriageViewsAndAllRetains(t *testing.T) {
+// e removes the row from the Inbox queue. Reference tabs (Recent, Most used, All)
+// keep every pane with a check mark, so all 50 history slots remain populated.
+func TestEDrainsInboxOnly(t *testing.T) {
 	now := time.Now().Unix()
 	st := &store{
 		Version: 1, TabsInit: true, Tabs: defaultTabs(), Panes: map[string]*paneStat{},
@@ -26,27 +26,28 @@ func TestEDrainsTriageViewsAndAllRetains(t *testing.T) {
 	ps.DoneState = baselineState(liveStatusWord(snap, "gone"))
 	st.removeFromInbox("gone")
 
-	// Inbox and triage tabs exclude it so the queue drains.
-	for _, v := range []view{{Kind: "inbox"}, {Kind: "custom", Idx: 0}} {
-		for _, r := range rowsFor(snap, st, v, sortDefault) {
-			if r.PaneID == "gone" {
-				t.Fatalf("done row still in %s view; did not drain on e", v.Kind)
-			}
+	// Inbox excludes it: row leaves the triage queue.
+	inbox := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	for _, r := range inbox {
+		if r.PaneID == "gone" {
+			t.Fatal("done row still in the Inbox queue")
 		}
 	}
 
-	// All view keeps it so the captain can always find any thread.
-	foundAll := false
-	for _, r := range rowsFor(snap, st, view{Kind: "all"}, sortDefault) {
-		if r.PaneID == "gone" {
-			foundAll = true
-			if !r.Done {
-				t.Fatal("expected done=true in All view")
+	// Reference tabs (All, Recent) keep it so history is never cut down to a handful.
+	for _, v := range []view{{Kind: "all"}, {Kind: "custom", Idx: 0}} {
+		found := false
+		for _, r := range rowsFor(snap, st, v, sortDefault) {
+			if r.PaneID == "gone" {
+				found = true
+				if !r.Done {
+					t.Fatalf("expected done=true in %s view", v.Kind)
+				}
+				break
 			}
-			break
 		}
-	}
-	if !foundAll {
-		t.Fatal("done row vanished from All view; the captain lost it")
+		if !found {
+			t.Fatalf("done row vanished from %s reference view; history was lost", v.Kind)
+		}
 	}
 }
