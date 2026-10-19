@@ -344,8 +344,13 @@ func viewNames(st *store) []string {
 
 func openTab(st *store) int {
 	vs := views(st)
-	if st.ActiveTab >= 0 && st.ActiveTab < len(vs) {
+	if st != nil && st.ActiveTab >= 0 && st.ActiveTab < len(vs) {
 		return st.ActiveTab
+	}
+	for i, v := range vs {
+		if v.Kind == "inbox" {
+			return i
+		}
 	}
 	return 0
 }
@@ -896,9 +901,13 @@ func rowsFor(s *snapshot, st *store, v view, mode int) []row {
 	if v.Kind == "inbox" {
 		return inboxVisible(syncInboxRows(all, st, now))
 	}
-	// Reference tabs show every pane, done or not, so the captain can always
-	// find a thread. Only the Inbox drains on e. Done rows carry a check.
-	return rowsForInner(all, s, st, v, mode, now)
+	list := rowsForInner(all, s, st, v, mode, now)
+	if v.Kind == "all" {
+		// All view is the reference archive: keeps all panes so triaged threads are always findable.
+		return list
+	}
+	// Triage tabs (Inbox, Recent, Most used, Favorites) drain done rows on e.
+	return triageVisible(list)
 }
 
 // triageVisible drops rows done by e. A snoozed row keeps its badge and stays
