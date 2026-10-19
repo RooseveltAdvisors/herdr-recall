@@ -205,7 +205,54 @@ type store struct {
 	ActiveState  string               `json:"active_state,omitempty"`
 	ActiveQuery  string               `json:"active_query,omitempty"`
 	ActivePaneID string               `json:"active_pane_id,omitempty"`
+	SnoozePicks  []string             `json:"snooze_picks,omitempty"`
 	Jev          *jevState            `json:"jev,omitempty"`
+}
+
+func defaultSnoozePicks() []string {
+	return []string{"20min", "1h", "3h", "tomorrow", "clear"}
+}
+
+func (s *store) getSnoozePicks() []string {
+	if s != nil && len(s.SnoozePicks) > 0 {
+		return s.SnoozePicks
+	}
+	return defaultSnoozePicks()
+}
+
+func (s *store) pinSnoozePick(pick string) bool {
+	if s == nil {
+		return false
+	}
+	pick = strings.TrimSpace(pick)
+	if pick == "" {
+		return false
+	}
+	for _, p := range s.getSnoozePicks() {
+		if strings.EqualFold(p, pick) {
+			return false
+		}
+	}
+	picks := append([]string(nil), s.getSnoozePicks()...)
+	if len(picks) > 0 && strings.EqualFold(picks[len(picks)-1], "clear") {
+		picks = append(picks[:len(picks)-1], pick, "clear")
+	} else {
+		picks = append(picks, pick)
+	}
+	s.SnoozePicks = picks
+	return true
+}
+
+func (s *store) removeSnoozePick(idx int) bool {
+	if s == nil {
+		return false
+	}
+	picks := s.getSnoozePicks()
+	if idx < 0 || idx >= len(picks) || len(picks) <= 1 {
+		return false
+	}
+	s.SnoozePicks = append(picks[:idx], picks[idx+1:]...)
+	return true
 }
 
 type view struct {
@@ -2358,15 +2405,13 @@ func renderConfirm(width, height int, names []string, active, sel int, name stri
 	}, "h/l choose,enter confirm,esc back")
 }
 
-func remindPicks() []string { return []string{"20min", "1h", "3h", "tomorrow", "clear"} }
-
 func remindModeLabels() []string { return []string{"If no reply", "Regardless"} }
 func remindModeOpts() []string   { return []string{"", "regardless"} }
 
-// renderRemind is the snooze dialog. The return rule is a contract, so it is a
-// field. The time is typed with the shared vim editor and the resolved
-// absolute time is shown while you type, the way Superhuman does it.
-func renderRemind(width, height int, names []string, active, field, mode, pick int, fv vimline.View, label string) string {
+// renderRemind is the snooze dialog. Focus starts on Quick picks with 20min
+// immediately active so Enter snoozes in 1 keypress. Custom times can be typed
+// below and pinned as quick picks with ctrl+p.
+func renderRemind(width, height int, names []string, active, field, mode, pick int, picks []string, fv vimline.View, label string) string {
 	return dialog(width, height, 14, names, active, func(sc *screen) {
 		sc.emit("")
 		sc.emit(keyText + keyBold + "  Remind me about " + label + keyReset)
@@ -2377,10 +2422,10 @@ func renderRemind(width, height int, names []string, active, field, mode, pick i
 			sc.emit(line)
 		}
 		sc.emit(fieldTitle("Quick picks", field == 1))
-		for _, line := range choiceLines(remindPicks(), pick, sc.width) {
+		for _, line := range choiceLines(picks, pick, sc.width) {
 			sc.emit(line)
 		}
-		sc.emit(fieldTitle("Time", field == 2))
+		sc.emit(fieldTitle("Custom time", field == 2))
 		sc.emit(renderField(fv, sc.width))
 		switch _, ok, desc := duration.Parse(fv.Text, time.Now()); {
 		case ok:
@@ -2390,7 +2435,15 @@ func renderRemind(width, height int, names []string, active, field, mode, pick i
 		default:
 			sc.emit(keyStBad + "  → not a time. Units: min h d w mo y" + keyReset)
 		}
-	}, "j/k field,h/l choice,enter set reminder,esc cancel")
+	}, func() string {
+		if field == 2 {
+			return "enter snooze,ctrl+p pin pick,k quick picks,esc cancel"
+		}
+		if field == 1 {
+			return "h/l pick,enter snooze,x remove pick,j custom time,esc cancel"
+		}
+		return "h/l choice,j quick picks,enter snooze,esc cancel"
+	}())
 }
 
 func renderNote(width, height int, names []string, active int, fv vimline.View) string {
@@ -2555,7 +2608,7 @@ func runPicker() int {
 	}, "c create   r revise   x delete")
 	var commitRemind func()
 	reminding := false
-	remindField := 2
+	remindField := 1
 	remindMode := 0
 	remindSel := 0
 	lastDoneID := ""
@@ -2899,7 +2952,7 @@ func runPicker() int {
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
-			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, remindEd.View("at", remindField == 2), remindLabel)
+			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, st.getSnoozePicks(), remindEd.View("at", remindField == 2), remindLabel)
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
 		case teaching:
@@ -3080,23 +3133,51 @@ func runPicker() int {
 			continue
 		}
 		if reminding && !showHelp {
+			picks := st.getSnoozePicks()
 			if remindField == 2 {
+				switch key {
+				case "ctrl+p":
+					txt := strings.TrimSpace(remindEd.String())
+					if _, ok, _ := duration.Parse(txt, time.Now()); ok {
+						if st.pinSnoozePick(txt) {
+							_ = saveStore(st)
+							status = "pinned quick pick: " + txt
+							remindField = 1
+							picks = st.getSnoozePicks()
+							remindSel = indexOf(picks, txt)
+						} else {
+							status = "quick pick already exists: " + txt
+						}
+					} else {
+						status = "cannot pin: not a valid time"
+					}
+					continue
+				case "esc":
+					if remindEd.Mode() == vimline.ModeInsert {
+						remindEd.Feed(key)
+					} else {
+						remindField = 1
+					}
+					continue
+				case "k", "up":
+					if remindEd.Mode() != vimline.ModeInsert {
+						remindField = 1
+						continue
+					}
+				}
 				switch remindEd.Feed(key) {
 				case vimline.ActAccept:
 					commitRemind()
 				case vimline.ActUp:
-					if remindField > 0 {
-						remindField--
-					}
-				case vimline.ActOut, vimline.ActCancel:
-					reminding = false
-					status = ""
+					remindField = 1
+				case vimline.ActCancel:
+					remindField = 1
 				}
 				continue
 			}
-			picks := remindPicks()
+
 			switch key {
-			case "j", "down":
+			case "j", "down", "tab":
 				if remindField < 2 {
 					remindField++
 				}
@@ -3118,9 +3199,21 @@ func runPicker() int {
 					remindSel = cycle(len(picks), remindSel, 1)
 					remindEd = vimline.New(picks[remindSel])
 				}
+			case "x":
+				if remindField == 1 && len(picks) > 1 {
+					removed := picks[remindSel]
+					st.removeSnoozePick(remindSel)
+					_ = saveStore(st)
+					status = "removed quick pick: " + removed
+					picks = st.getSnoozePicks()
+					if remindSel >= len(picks) {
+						remindSel = len(picks) - 1
+					}
+					remindEd = vimline.New(picks[remindSel])
+				}
 			case "enter":
 				commitRemind()
-			case "esc":
+			case "esc", "q":
 				reminding = false
 				status = ""
 			}
@@ -3512,10 +3605,15 @@ func runPicker() int {
 				break
 			}
 			reminding = true
-			remindField = 2
+			remindField = 1
 			remindMode = 0
 			remindSel = 0
-			remindEd = vimline.New("")
+			picks := st.getSnoozePicks()
+			if len(picks) > 0 {
+				remindEd = vimline.New(picks[0])
+			} else {
+				remindEd = vimline.New("")
+			}
 			remindPaneID = rows[sel].PaneID
 			remindLabel = rows[sel].Label
 			status = ""

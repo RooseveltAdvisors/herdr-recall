@@ -298,3 +298,55 @@ func TestRenderFieldWrapsLinesWhenWidthExceeded(t *testing.T) {
 		t.Fatalf("expected screen to contain %d lines, got %d", len(lines), len(sc.lines))
 	}
 }
+
+func TestSnoozeDefaultQuickPicksAndPinning(t *testing.T) {
+	st := &store{Version: 1}
+	picks := st.getSnoozePicks()
+
+	// 1. Verify default quick picks
+	wantDefaults := []string{"20min", "1h", "3h", "tomorrow", "clear"}
+	if strings.Join(picks, ",") != strings.Join(wantDefaults, ",") {
+		t.Fatalf("default snooze picks = %v, want %v", picks, wantDefaults)
+	}
+
+	// 2. Pin a new custom quick pick "4h"
+	if !st.pinSnoozePick("4h") {
+		t.Fatal("pinSnoozePick('4h') returned false")
+	}
+	picksAfterPin := st.getSnoozePicks()
+	// Should be inserted before "clear"
+	wantAfterPin := []string{"20min", "1h", "3h", "tomorrow", "4h", "clear"}
+	if strings.Join(picksAfterPin, ",") != strings.Join(wantAfterPin, ",") {
+		t.Fatalf("picks after pin = %v, want %v", picksAfterPin, wantAfterPin)
+	}
+
+	// Duplicate pin should return false
+	if st.pinSnoozePick("4h") {
+		t.Fatal("duplicate pinSnoozePick('4h') should return false")
+	}
+
+	// 3. Remove a quick pick
+	idx := indexOf(picksAfterPin, "4h")
+	if !st.removeSnoozePick(idx) {
+		t.Fatalf("removeSnoozePick(%d) failed", idx)
+	}
+	picksAfterRemove := st.getSnoozePicks()
+	if strings.Join(picksAfterRemove, ",") != strings.Join(wantDefaults, ",") {
+		t.Fatalf("picks after remove = %v, want %v", picksAfterRemove, wantDefaults)
+	}
+
+	// 4. Test renderRemind with field 1 (Quick picks focused)
+	fv := vimline.View{Label: "at", Text: "20min"}
+	frame := renderRemind(100, 16, []string{"Inbox"}, 0, 1, 0, 0, picks, fv, "billing")
+	plain := stripANSI(frame)
+
+	if !strings.Contains(plain, "Quick picks") {
+		t.Fatalf("Quick picks field missing:\n%s", plain)
+	}
+	if !strings.Contains(plain, "20min") || !strings.Contains(plain, "1h") {
+		t.Fatalf("chips missing in frame:\n%s", plain)
+	}
+	if !strings.Contains(plain, "h/l pick") || !strings.Contains(plain, "enter snooze") {
+		t.Fatalf("footer missing in frame:\n%s", plain)
+	}
+}

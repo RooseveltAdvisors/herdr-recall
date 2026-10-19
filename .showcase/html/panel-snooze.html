@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 1280px;
+  height: 800px;
+  background: #111218;
+  font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+  color: #d0d0d0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 32px 48px;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #232634;
+  font-size: 13px;
+}
+
+.tab {
+  padding: 3px 10px;
+  border-radius: 4px;
+  color: #636d7e;
+}
+
+.tab.active {
+  background: #5fd7ff;
+  color: #111218;
+  font-weight: 700;
+}
+
+.body {
+  padding: 24px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.title-main { color: #f0f3f6; }
+.title-target { color: #5fd7ff; }
+
+.subtitle {
+  font-size: 13px;
+  color: #7b8496;
+  margin-top: -8px;
+}
+
+.field-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #7b8496;
+}
+
+.field-title.focused {
+  color: #5fd7ff;
+}
+
+.chips {
+  display: flex;
+  gap: 12px;
+}
+
+.chip {
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #181b26;
+  border: 1px solid #282c3c;
+  color: #8892a0;
+}
+
+.chip.active {
+  background: #5fd7ff;
+  border-color: #5fd7ff;
+  color: #111218;
+  font-weight: 700;
+}
+
+.input-box {
+  background: #181b26;
+  border: 1px solid #282c3c;
+  padding: 10px 14px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #d0d0d0;
+  font-size: 14px;
+}
+
+.input-box .label {
+  color: #5fd7ff;
+  font-weight: 700;
+}
+
+.preview-resolve {
+  color: #5fafaf;
+  font-size: 13px;
+  margin-top: -6px;
+  font-weight: 600;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  padding-top: 16px;
+  border-top: 1px solid #232634;
+  gap: 24px;
+  font-size: 12px;
+}
+
+.hint-key { color: #5fd7ff; font-weight: 700; margin-right: 4px; }
+.hint-desc { color: #7b8496; }
+</style>
+</head>
+<body>
+
+<div class="tab-bar">
+  <div class="tab active">Inbox</div>
+  <div class="tab">Favorites</div>
+  <div class="tab">Recent</div>
+  <div class="tab">Most used</div>
+  <div class="tab">All</div>
+</div>
+
+<div class="body">
+  <div class="title-row">
+    <span class="title-main">Remind me about</span>
+    <span class="title-target">billing</span>
+  </div>
+  <div class="subtitle">Hides this thread from Inbox. New agent activity returns it early.</div>
+
+  <div class="field-title">Return to Inbox</div>
+  <div class="chips">
+    <div class="chip active">If no reply</div>
+    <div class="chip">Regardless</div>
+  </div>
+
+  <div class="field-title focused">Quick picks (focused by default)</div>
+  <div class="chips">
+    <div class="chip active">20min</div>
+    <div class="chip">1h</div>
+    <div class="chip">3h</div>
+    <div class="chip">tomorrow</div>
+    <div class="chip">clear</div>
+  </div>
+
+  <div class="field-title">Custom time</div>
+  <div class="input-box">
+    <span class="label">at</span>
+    <span>20min</span>
+  </div>
+  <div class="preview-resolve">→ in 20 minutes</div>
+</div>
+
+<div class="footer">
+  <div><span class="hint-key">h/l</span><span class="hint-desc">pick</span></div>
+  <div><span class="hint-key">enter</span><span class="hint-desc">snooze (1 keypress)</span></div>
+  <div><span class="hint-key">x</span><span class="hint-desc">remove pick</span></div>
+  <div><span class="hint-key">ctrl+p</span><span class="hint-desc">pin custom pick</span></div>
+  <div><span class="hint-key">j</span><span class="hint-desc">custom time</span></div>
+  <div><span class="hint-key">esc</span><span class="hint-desc">cancel</span></div>
+</div>
+
+</body>
+</html>
