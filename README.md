@@ -106,6 +106,11 @@ credit. Free text can name a comparison (`billing over docs`) or a
 conditional rule (`demote idle until afternoon`). The raw text is also
 stored for later review.
 
+Topic words are not a fixed list. Jev takes them from the tab name, the
+sticky note, the workspace name, and the words you type. A new project name
+becomes a chip with no code change. Terms that sit on most panes start
+unchecked, so path noise does not get the credit.
+
 Press `J` to inspect what Jev has learned. Weights sort by impact,
 positive green and negative red. Enter clears one, ctrl+u clears all.
 The CLI can do the same: `herdr-recall jev` lists, `jev reset` clears,

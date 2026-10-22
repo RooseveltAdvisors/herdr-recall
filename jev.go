@@ -40,6 +40,8 @@ type jevState struct {
 	ScoreKey  map[string]string  `json:"score_key,omitempty"`
 	Weights   map[string]float64 `json:"weights,omitempty"`
 	Rules     []jevRule          `json:"rules,omitempty"`
+	DocFreq   map[string]int     `json:"doc_freq,omitempty"`
+	DocCount  int                `json:"doc_count,omitempty"`
 	Examples  int                `json:"examples,omitempty"`
 	Teachings []jevTeaching      `json:"teachings,omitempty"`
 }
@@ -228,8 +230,7 @@ func jevAgeBucket(r row, now int64) string {
 }
 
 // jevFeatures names the dimensions preference is learned over.
-// The set is curated. Raw words are not features, or one teaching would
-// poison every token that happened to sit on the row.
+// Topic words come from the pane itself. There is no topic dictionary.
 func jevFeatures(r row, now int64) []string {
 	var f []string
 	if sw := statusWord(r.Status); sw != "" {
@@ -266,7 +267,7 @@ func jevFeatures(r row, now int64) []string {
 	if r.Last > 0 && now-r.Last < 5*60 {
 		f = append(f, "attention:hot")
 	}
-	f = append(f, jevDomainFeatures(r.Label, r.Note, r.CWD, r.Workspace)...)
+	f = append(f, jevContentFeatures(r.Label, r.Note, r.Workspace)...)
 	if lab := jevLabelFeature(r.Label); lab != "" {
 		f = append(f, lab)
 	}
@@ -285,7 +286,8 @@ func jevFeatures(r row, now int64) []string {
 
 // jevSignalFeatures is the subset implicit actions may train. Time of day,
 // visit count, and "just touched" are context, not a reason to bury a project.
-func jevSignalFeatures(r row, now int64) []string {
+// Common tokens and path-only tokens wait for an explicit chip or sentence.
+func (s *store) jevSignalFeatures(r row, now int64) []string {
 	var out []string
 	for _, f := range jevFeatures(r, now) {
 		kind, val, _ := strings.Cut(f, ":")
@@ -294,6 +296,13 @@ func jevSignalFeatures(r row, now int64) []string {
 			continue
 		case "attention":
 			if val == "hot" {
+				continue
+			}
+		case "tok":
+			if s.jevCommon(f) {
+				continue
+			}
+			if !jevTextHasToken(r.Label, val) && !jevTextHasToken(r.Note, val) && !jevTextHasToken(r.Workspace, val) {
 				continue
 			}
 		}
@@ -306,9 +315,21 @@ func (s *store) jevWeight(r row, now int64) float64 {
 	if s.Jev == nil || len(s.Jev.Weights) == 0 {
 		return 0
 	}
+	feats := jevFeatures(r, now)
+	have := map[string]bool{}
 	sum := 0.0
-	for _, f := range jevFeatures(r, now) {
+	for _, f := range feats {
+		have[f] = true
 		sum += s.Jev.Weights[f]
+	}
+	values := jevValueSet(r, feats)
+	for f, w := range s.Jev.Weights {
+		if w == 0 || have[f] {
+			continue
+		}
+		if jevAliasHit(f, values) {
+			sum += w
+		}
 	}
 	return sum
 }
@@ -390,7 +411,7 @@ func (s *store) jevLearnScaled(chosen row, skipped []row, alpha float64) {
 	s.ensureJev()
 	now := time.Now().Unix()
 	bump := func(r row, sign float64) {
-		for _, f := range jevSignalFeatures(r, now) {
+		for _, f := range s.jevSignalFeatures(r, now) {
 			s.Jev.Weights[f] = clampWeight(s.Jev.Weights[f] + sign*alpha)
 		}
 	}
@@ -560,8 +581,7 @@ func jevRepoFeature(cwd string) string {
 		return ""
 	}
 	base := strings.ToLower(filepath.Base(cwd))
-	switch base {
-	case "", ".", "/", "tmp", "src", "home", "jon", "git", "code", "opt", "ra", "usr", "var":
+	if base == "" || base == "." || base == "/" {
 		return ""
 	}
 	return "repo:" + base
@@ -579,33 +599,99 @@ func jevLabelFeature(label string) string {
 	return "label:" + tok
 }
 
-var jevDomainWord = map[string]string{
-	"billing": "domain:billing", "stripe": "domain:billing", "amd": "domain:billing",
-	"claim": "domain:billing", "claims": "domain:billing", "rcm": "domain:billing", "invoice": "domain:billing",
-	"portal": "domain:portal", "kiosk": "domain:portal", "signage": "domain:portal", "frontend": "domain:portal",
-	"auth": "domain:auth", "oauth": "domain:auth", "login": "domain:auth", "vault": "domain:auth", "secret": "domain:auth",
-	"infra": "domain:infra", "docker": "domain:infra", "gpu": "domain:infra", "systemd": "domain:infra", "socket": "domain:infra", "deploy": "domain:infra",
-	"sync": "domain:sync", "mbsync": "domain:sync", "upstream": "domain:sync",
-	"jev": "domain:ai", "llm": "domain:ai", "model": "domain:ai",
-	"docs": "domain:docs", "kb": "domain:docs", "board": "domain:docs", "minutes": "domain:docs", "runbook": "domain:docs",
-	"ci": "domain:ci", "lint": "domain:ci", "regression": "domain:ci",
-	"mail": "domain:mail", "gmail": "domain:mail", "neomutt": "domain:mail", "neomd": "domain:mail",
-	"security": "domain:security", "hipaa": "domain:security", "phi": "domain:security",
-}
-
-func jevDomainFeatures(parts ...string) []string {
+// jevContentFeatures turns the pane's own words into features.
+// A new project name appears here with no code change.
+func jevContentFeatures(parts ...string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, part := range parts {
 		for _, w := range jevSplitWords(part) {
-			if dom, ok := jevDomainWord[w]; ok && !seen[dom] {
-				seen[dom] = true
-				out = append(out, dom)
+			if len(w) < 2 || jevGrammarWord(w) || seen[w] {
+				continue
+			}
+			seen[w] = true
+			out = append(out, "tok:"+w)
+			if len(out) >= 24 {
+				sort.Strings(out)
+				return out
 			}
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+func jevTextHasToken(text, word string) bool {
+	for _, w := range jevSplitWords(text) {
+		if w == word {
+			return true
+		}
+	}
+	return false
+}
+
+func jevValueSet(r row, feats []string) map[string]bool {
+	values := map[string]bool{}
+	for _, f := range feats {
+		_, val, ok := strings.Cut(f, ":")
+		if ok && val != "" && val != "yes" {
+			values[val] = true
+		}
+	}
+	if a := strings.ToLower(strings.TrimSpace(r.Agent)); a != "" && a != "unknown" && a != "none" {
+		values[a] = true
+	}
+	if sw := statusWord(r.Status); sw != "" {
+		values[sw] = true
+	}
+	if repo := jevRepoFeature(r.CWD); repo != "" {
+		_, val, _ := strings.Cut(repo, ":")
+		values[val] = true
+	}
+	return values
+}
+
+// jevAliasHit lets an old domain: weight or a tok: weight match a row that
+// carries the same word as an agent, a repo, or a term.
+func jevAliasHit(feature string, values map[string]bool) bool {
+	kind, val, ok := strings.Cut(feature, ":")
+	if !ok {
+		return false
+	}
+	switch kind {
+	case "tok", "label", "domain":
+		return values[val]
+	}
+	return false
+}
+
+// observeRows rebuilds how common each feature is in the current panes.
+// Common terms stay visible but start unchecked, so path noise is not trained
+// by accident.
+func (s *store) observeRows(rows []row, now int64) {
+	s.ensureJev()
+	freq := map[string]int{}
+	docs := 0
+	for _, r := range rows {
+		docs++
+		seen := map[string]bool{}
+		for _, f := range jevFeatures(r, now) {
+			if seen[f] {
+				continue
+			}
+			seen[f] = true
+			freq[f]++
+		}
+	}
+	s.Jev.DocFreq = freq
+	s.Jev.DocCount = docs
+}
+
+func (s *store) jevCommon(feature string) bool {
+	if s == nil || s.Jev == nil || s.Jev.DocCount < 4 || s.Jev.DocFreq == nil {
+		return false
+	}
+	return float64(s.Jev.DocFreq[feature])/float64(s.Jev.DocCount) >= 0.5
 }
 
 func jevSplitWords(s string) []string {
@@ -614,15 +700,12 @@ func jevSplitWords(s string) []string {
 	})
 }
 
-func jevVocabToken(word string) (string, bool) {
-	if dom, ok := jevDomainWord[word]; ok {
-		return dom, true
-	}
+// jevSchemaToken maps the picker's own status and time words.
+// It is not a topic list. Any other word becomes tok:<word>.
+func jevSchemaToken(word string) (string, bool) {
 	switch word {
 	case "blocked", "working", "done", "idle":
 		return "status:" + word, true
-	case "pi", "agy", "claude", "codex", "kimi", "cursor", "gemini":
-		return "agent:" + word, true
 	case "fresh", "recent":
 		return "age:fresh", true
 	case "stale", "old":
@@ -639,6 +722,10 @@ func jevVocabToken(word string) (string, bool) {
 		return "favorite:yes", true
 	}
 	return "", false
+}
+
+func jevGrammarWord(w string) bool {
+	return jevStopWord(w) || jevPreferWord(w) || jevDemoteWord(w) || w == "never"
 }
 
 func jevStopWord(w string) bool {
@@ -671,18 +758,35 @@ func jevDemoteWord(w string) bool {
 
 func resolveJevToken(word string, rowFeats []string) string {
 	word = strings.ToLower(strings.TrimSpace(word))
-	if word == "" || jevStopWord(word) || jevPreferWord(word) || jevDemoteWord(word) || word == "never" {
+	if word == "" || jevGrammarWord(word) || len(word) < 2 {
 		return ""
 	}
-	if f, ok := jevVocabToken(word); ok {
+	if f := matchRowFeature(word, rowFeats); f != "" {
 		return f
 	}
+	if f, ok := jevSchemaToken(word); ok {
+		return f
+	}
+	return "tok:" + word
+}
+
+func matchRowFeature(word string, rowFeats []string) string {
+	tok := ""
 	for _, rf := range rowFeats {
-		if strings.HasSuffix(rf, ":"+word) {
+		kind, val, ok := strings.Cut(rf, ":")
+		if !ok || val != word {
+			continue
+		}
+		switch kind {
+		case "status", "agent", "repo", "note", "remind", "favorite", "manual":
 			return rf
+		case "tok", "label", "domain":
+			if tok == "" {
+				tok = rf
+			}
 		}
 	}
-	return ""
+	return tok
 }
 
 func resolveJevWords(words []string, rowFeats []string) []string {
@@ -875,9 +979,14 @@ func (s *store) jevRuleBonus(r row, now int64) float64 {
 	if s.Jev == nil || len(s.Jev.Rules) == 0 {
 		return 0
 	}
+	feats := jevFeatures(r, now)
 	have := map[string]bool{}
-	for _, f := range jevFeatures(r, now) {
+	for _, f := range feats {
 		have[f] = true
+	}
+	values := jevValueSet(r, feats)
+	covers := func(feature string) bool {
+		return have[feature] || jevAliasHit(feature, values)
 	}
 	sum := 0.0
 	for _, rule := range s.Jev.Rules {
@@ -887,7 +996,7 @@ func (s *store) jevRuleBonus(r row, now int64) float64 {
 		if len(rule.Target) > 0 {
 			hit := false
 			for _, t := range rule.Target {
-				if have[t] {
+				if covers(t) {
 					hit = true
 					break
 				}

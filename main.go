@@ -1739,12 +1739,10 @@ func featureDescription(f string) string {
 			return "threads you never opened"
 		}
 		return val
-	case "label":
+	case "label", "tok", "domain":
 		return val
 	case "agent":
 		return val + " agent"
-	case "domain":
-		return val + " work"
 	case "repo":
 		return val + " repository"
 	case "visit":
@@ -2513,20 +2511,22 @@ type teachFeat struct {
 	on  bool
 }
 
-func teachDefaultOn(f string) bool {
+func teachDefaultOn(f string, st *store) bool {
 	kind, _, _ := strings.Cut(f, ":")
 	switch kind {
 	case "cadence", "visit", "age", "ws":
 		return false
+	case "tok", "label", "repo":
+		return st == nil || !st.jevCommon(f)
 	default:
 		return true
 	}
 }
 
-func teachFeatureChoices(r row, now int64) []teachFeat {
+func teachFeatureChoices(r row, st *store, now int64) []teachFeat {
 	var on, off []teachFeat
 	for _, f := range jevFeatures(r, now) {
-		item := teachFeat{key: f, on: teachDefaultOn(f)}
+		item := teachFeat{key: f, on: teachDefaultOn(f, st)}
 		if item.on {
 			on = append(on, item)
 		} else {
@@ -2542,7 +2542,7 @@ func featureChipLabel(f string) string {
 		return f
 	}
 	switch kind {
-	case "status", "agent", "domain", "repo", "label":
+	case "status", "agent", "domain", "repo", "label", "tok":
 		return val
 	case "age":
 		return "age " + val
@@ -2738,6 +2738,7 @@ func runPicker() int {
 	if err != nil {
 		frozen = &snapshot{}
 	}
+	st.observeRows(collectRows(frozen, st), time.Now().Unix())
 	tab := openTab(st)
 	sortMode := st.ActiveSort
 	if sortMode < 0 || sortMode >= sortCount {
@@ -3777,7 +3778,7 @@ func runPicker() int {
 				teachField = 0
 				teachPref = 0
 				teachRow = rows[sel]
-				teachFeats = teachFeatureChoices(teachRow, time.Now().Unix())
+				teachFeats = teachFeatureChoices(teachRow, st, time.Now().Unix())
 				teachFeatSel = 0
 				teachRank = sel
 				teachTotal = len(rows)

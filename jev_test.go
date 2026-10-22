@@ -260,7 +260,7 @@ func TestRenderTeachVisualPreferences(t *testing.T) {
 	}
 
 	fv := vimline.View{Label: "reason", Text: "high priority"}
-	feats := teachFeatureChoices(r, now)
+	feats := teachFeatureChoices(r, st, now)
 
 	// When pref is 0 (Prefer (+)), "Prefer (+)" chip should be highlighted
 	framePrefer := renderTeach(100, 24, []string{"Inbox"}, 0, r, 0, 0, feats, 0, fv, st, now)
@@ -306,10 +306,64 @@ func TestJevFeaturesCarryAgentRepoAndDomain(t *testing.T) {
 	for _, f := range jevFeatures(r, now) {
 		got[f] = true
 	}
-	for _, want := range []string{"status:blocked", "agent:pi", "repo:portal", "domain:billing", "domain:portal", "label:portal", "note:yes"} {
+	for _, want := range []string{"status:blocked", "agent:pi", "repo:portal", "tok:billing", "tok:stripe", "tok:portal", "label:portal", "note:yes"} {
 		if !got[want] {
 			t.Fatalf("missing %s in %v", want, got)
 		}
+	}
+	for f := range got {
+		if strings.HasPrefix(f, "domain:") {
+			t.Fatalf("static domain feature leaked: %s", f)
+		}
+	}
+}
+
+func TestUnknownWordBecomesAFeatureWithoutADictionary(t *testing.T) {
+	now := time.Now().Unix()
+	r := row{PaneID: "p", Label: "covenant-kiosk rollout", Status: "working", Agent: "agy", Last: now}
+	got := map[string]bool{}
+	for _, f := range jevFeatures(r, now) {
+		got[f] = true
+	}
+	if !got["tok:covenant"] || !got["tok:kiosk"] || !got["tok:rollout"] {
+		t.Fatalf("new project words missing: %v", got)
+	}
+
+	adj, rules := parseJevFeedback("prefer covenant over rollout", nil)
+	if len(rules) != 0 {
+		t.Fatalf("rules = %v", rules)
+	}
+	if adj["tok:covenant"] <= 0 || adj["tok:rollout"] >= 0 {
+		t.Fatalf("adjust = %v", adj)
+	}
+
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	st.applyJevDirective(adj, nil)
+	if st.jevWeight(r, now) <= st.jevWeight(row{PaneID: "q", Label: "rollout", Status: "working", Last: now}, now) {
+		t.Fatal("unknown word did not rank the named pane higher")
+	}
+}
+
+func TestCommonTokensStartUnchecked(t *testing.T) {
+	now := time.Now().Unix()
+	rows := []row{
+		{PaneID: "a", Label: "alpha billing", Status: "idle", CWD: "/work/alpha", Last: now},
+		{PaneID: "b", Label: "beta billing", Status: "idle", CWD: "/work/beta", Last: now},
+		{PaneID: "c", Label: "gamma billing", Status: "idle", CWD: "/work/gamma", Last: now},
+		{PaneID: "d", Label: "delta billing", Status: "idle", CWD: "/work/delta", Last: now},
+	}
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	st.observeRows(rows, now)
+	choices := teachFeatureChoices(rows[0], st, now)
+	on := map[string]bool{}
+	for _, c := range choices {
+		on[c.key] = c.on
+	}
+	if on["tok:billing"] {
+		t.Fatal("common term billing started checked")
+	}
+	if !on["tok:alpha"] {
+		t.Fatal("rare term alpha started unchecked")
 	}
 }
 
@@ -318,11 +372,11 @@ func TestParseBillingOverDocs(t *testing.T) {
 	if len(rules) != 0 {
 		t.Fatalf("rules = %v, want none", rules)
 	}
-	if adj["domain:billing"] <= 0 {
-		t.Fatalf("billing = %v, want positive", adj["domain:billing"])
+	if adj["tok:billing"] <= 0 {
+		t.Fatalf("billing = %v, want positive", adj["tok:billing"])
 	}
-	if adj["domain:docs"] >= 0 {
-		t.Fatalf("docs = %v, want negative", adj["domain:docs"])
+	if adj["tok:docs"] >= 0 {
+		t.Fatalf("docs = %v, want negative", adj["tok:docs"])
 	}
 	if _, ok := adj["label:prioritize"]; ok {
 		t.Fatal("polarity word became a feature")
@@ -348,8 +402,8 @@ func TestParseDemoteIdleUntilAfternoon(t *testing.T) {
 
 func TestTeachCreditAssignmentIgnoresUnchecked(t *testing.T) {
 	st := &store{Version: 1, Panes: map[string]*paneStat{}}
-	st.jevPreferSelected([]string{"status:blocked", "domain:billing"}, true)
-	if st.Jev.Weights["status:blocked"] <= 0 || st.Jev.Weights["domain:billing"] <= 0 {
+	st.jevPreferSelected([]string{"status:blocked", "tok:billing"}, true)
+	if st.Jev.Weights["status:blocked"] <= 0 || st.Jev.Weights["tok:billing"] <= 0 {
 		t.Fatalf("selected weights = %v", st.Jev.Weights)
 	}
 	if st.Jev.Weights["agent:pi"] != 0 || st.Jev.Weights["cadence:morning"] != 0 {
