@@ -94,9 +94,11 @@ type paneRec struct {
 	TabID              string `json:"tab_id"`
 	WorkspaceID        string `json:"workspace_id"`
 	AgentStatus        string `json:"agent_status"`
+	Agent              string `json:"agent,omitempty"`
 	TerminalTitle      string `json:"terminal_title"`
 	TerminalTitleStrip string `json:"terminal_title_stripped"`
 	CWD                string `json:"cwd"`
+	ForegroundCWD      string `json:"foreground_cwd,omitempty"`
 	Focused            bool   `json:"focused"`
 }
 
@@ -575,6 +577,9 @@ func focusPane(paneID string) error {
 type row struct {
 	PaneID        string
 	WorkspaceID   string
+	Workspace     string
+	Agent         string
+	CWD           string
 	Label         string
 	Note          string
 	Section       string
@@ -675,15 +680,27 @@ func collectRows(s *snapshot, st *store) []row {
 		if manualBlocked {
 			status = "blocked"
 		}
-		ws := ""
+		agent, cwd, ws, wsLabel := "", "", "", ""
 		for _, p := range s.Panes {
 			if p.PaneID == id {
 				ws = p.WorkspaceID
+				agent = p.Agent
+				cwd = p.CWD
+				if cwd == "" {
+					cwd = p.ForegroundCWD
+				}
+				break
+			}
+		}
+		for _, w := range s.Workspaces {
+			if w.WorkspaceID == ws {
+				wsLabel = w.Label
 				break
 			}
 		}
 		out = append(out, row{
-			PaneID: id, WorkspaceID: ws, Label: label, Note: note,
+			PaneID: id, WorkspaceID: ws, Workspace: wsLabel,
+			Agent: agent, CWD: cwd, Label: label, Note: note,
 			Visits: visits, Last: last, Status: status,
 			Fav: st.isFavorite(id), ManualBlocked: manualBlocked,
 			RemindAt: remindAt, Done: done, DoneAt: doneAt, DoneState: doneState,
@@ -842,15 +859,19 @@ func syncInboxRows(all []row, st *store, now int64) []row {
 			added = append(added, r)
 		}
 	}
-	if st.jevOn() {
-		// Jev puts the most important new arrival first. Existing rows keep
-		// their pinned positions, so reviewing never reshuffles the queue.
-		st.jevSortDesc(added, now)
-		front := make([]string, 0, len(added)+len(orderedIDs))
-		for _, r := range added {
-			front = append(front, r.PaneID)
+	if st.jevRanksInbox() {
+		// Rank the whole queue. Equal scores keep the previous order, so a
+		// review does not jump when nothing about priority changed.
+		inbox := make([]row, 0, len(orderedIDs)+len(added))
+		for _, id := range orderedIDs {
+			inbox = append(inbox, byID[id])
 		}
-		orderedIDs = append(front, orderedIDs...)
+		inbox = append(inbox, added...)
+		st.rankInbox(inbox, now)
+		orderedIDs = orderedIDs[:0]
+		for _, r := range inbox {
+			orderedIDs = append(orderedIDs, r.PaneID)
+		}
 	} else {
 		sortInbox(added, now)
 		for _, r := range added {
@@ -1374,7 +1395,8 @@ func allHelpEntries() []helpEntry {
 		{"ctrl-d / ctrl-u", "scroll half-page down / up"},
 		{"e", "mark done. Leaves current list. u undoes"},
 		{"u", "undo the last e, returning thread to queue"},
-		{"i", "teach Jev on selected thread with visual preference"},
+		{"i", "teach Jev: prefer, demote, pick features, or type a rule"},
+		{"space", "in teach: toggle the highlighted feature chip"},
 		{"J", "Jev dashboard: inspect and delete learned weights, see preview"},
 		{"z", "snooze with typed time (3h, 2w, tomorrow, clear) and return rules"},
 		{"n", "sticky note on selected thread, edited with vim keys"},
@@ -1492,15 +1514,16 @@ func renderHelp(width, height int, fv vimline.View, sel, scrollOffset int) strin
 type jevItem struct {
 	feature string
 	value   float64
-	section string // "FIRST", "BURY", "PROJ"
+	section string // "FIRST", "BURY", "PROJ", "RULE"
+	ruleID  string
 }
 
 func jevSelectableItems(st *store) []jevItem {
-	if st.Jev == nil || len(st.Jev.Weights) == 0 {
+	if st.Jev == nil || (len(st.Jev.Weights) == 0 && len(st.Jev.Rules) == 0) {
 		return nil
 	}
 	allWeights := sortedJevWeights(st)
-	var pos, neg, labels []jevItem
+	var pos, neg, labels, rules []jevItem
 	for _, w := range allWeights {
 		if strings.HasPrefix(w.feature, "label:") {
 			labels = append(labels, jevItem{feature: w.feature, value: w.value, section: "PROJ"})
@@ -1510,10 +1533,19 @@ func jevSelectableItems(st *store) []jevItem {
 			neg = append(neg, jevItem{feature: w.feature, value: w.value, section: "BURY"})
 		}
 	}
+	for _, rule := range st.Jev.Rules {
+		rules = append(rules, jevItem{
+			feature: rule.Text,
+			value:   rule.Sign * rule.Delta,
+			section: "RULE",
+			ruleID:  rule.ID,
+		})
+	}
 	var out []jevItem
 	out = append(out, pos...)
 	out = append(out, neg...)
 	out = append(out, labels...)
+	out = append(out, rules...)
 	return out
 }
 
@@ -1532,8 +1564,8 @@ func renderJev(width, height int, names []string, active int, items []jevItem, s
 		sc.emit(keyText + keyBold + "  Jev dashboard" + keyReset)
 		sc.emit("")
 		sc.emit(keyOverlay + "  Nothing learned yet." + keyReset)
-		sc.emit(keyOverlay + "  Press + on a row to teach Jev what to surface first." + keyReset)
-		sc.emit(keyOverlay + "  Press - to teach it what to bury." + keyReset)
+		sc.emit(keyOverlay + "  Press i on a row. Check the features that matter." + keyReset)
+		sc.emit(keyOverlay + "  Or type a rule, such as billing over docs." + keyReset)
 		sc.rule()
 		sc.emit(hintFooter("esc", "back"))
 		return sc.done()
@@ -1611,6 +1643,8 @@ func jevItemLine(item jevItem, selected bool, width int) string {
 		tag = keyStGood + "[FIRST] " + keyReset
 	case "BURY":
 		tag = keyStBad + "[BURY]  " + keyReset
+	case "RULE":
+		tag = keyAccentFg + "[RULE]  " + keyReset
 	default:
 		tag = keyAccentFg + "[PROJ]  " + keyReset
 	}
@@ -1707,7 +1741,38 @@ func featureDescription(f string) string {
 		return val
 	case "label":
 		return val
+	case "agent":
+		return val + " agent"
+	case "domain":
+		return val + " work"
+	case "repo":
+		return val + " repository"
+	case "visit":
+		switch val {
+		case "heavy":
+			return "frequently visited threads"
+		case "frequent":
+			return "regularly visited threads"
+		case "low":
+			return "rarely visited threads"
+		case "zero":
+			return "unvisited threads"
+		}
+	case "attention":
+		switch val {
+		case "waiting_on_human":
+			return "stuck waiting for you"
+		case "hot":
+			return "touched in the last 5 min"
+		}
+	case "cadence":
+		return val + " triage"
+	case "favorite":
+		return "starred favorite threads"
 	case "remind":
+		if val == "due" {
+			return "overdue reminders"
+		}
 		if val == "yes" {
 			return "threads with a reminder set"
 		}
@@ -1764,25 +1829,10 @@ func inboxTopScored(s *snapshot, st *store, n int) []jevRowScore {
 }
 
 func featureApplies(feature string, r row) bool {
-	kind, val, ok := strings.Cut(feature, ":")
-	if !ok {
-		return false
-	}
-	switch kind {
-	case "status":
-		return statusWord(r.Status) == val
-	case "age":
-		return jevAgeBucket(r, time.Now().Unix()) == feature
-	case "label":
-		if toks := strings.Fields(r.Label); len(toks) > 0 {
-			return "label:"+toks[0] == feature
+	for _, f := range jevFeatures(r, time.Now().Unix()) {
+		if f == feature {
+			return true
 		}
-	case "remind":
-		return r.RemindAt > 0
-	case "note":
-		return r.Note != ""
-	case "manual":
-		return r.ManualBlocked
 	}
 	return false
 }
@@ -1832,36 +1882,34 @@ func renderJevType(width, height int, names []string, active int, query string, 
 	return sc.done()
 }
 
-// jevApplyFeedback sets a feature weight from the typing input. A bare
-// word becomes a label feature. A prefix like status: or age: is kept.
+// jevApplyFeedback turns dashboard text into weights or conditional rules.
+// A bare word uses the known vocabulary. A sentence such as
+// "billing over docs" is a comparison, not one label.
 func jevApplyFeedback(st *store, text string, up bool) {
-	feature := strings.TrimSpace(strings.ToLower(text))
-	if feature == "" {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return
 	}
-	st.ensureJev()
-	for f := range st.Jev.Weights {
-		if f == feature || strings.HasSuffix(f, ":"+feature) {
-			feature = f
-			break
+	adj, rules := parseJevFeedback(text, nil)
+	if len(adj) == 0 && len(rules) == 0 {
+		feat := resolveJevToken(strings.ToLower(text), nil)
+		if feat == "" {
+			feat = "label:" + strings.ToLower(text)
+		}
+		sign := -0.5
+		if up {
+			sign = 0.5
+		}
+		adj = map[string]float64{feat: sign}
+	} else if !jevTextHasPolarity(text) && !up {
+		for f, d := range adj {
+			adj[f] = -abs64(d)
+		}
+		for i := range rules {
+			rules[i].Sign = -1
 		}
 	}
-	if !strings.Contains(feature, ":") {
-		feature = "label:" + feature
-	}
-	sign := -0.5
-	if up {
-		sign = 0.5
-	}
-	w := st.Jev.Weights[feature] + sign
-	if w > 1 {
-		w = 1
-	}
-	if w < -1 {
-		w = -1
-	}
-	st.Jev.Weights[feature] = w
-	st.Jev.Examples++
+	st.applyJevDirective(adj, rules)
 	_ = saveStore(st)
 }
 
@@ -2460,9 +2508,110 @@ func renderNote(width, height int, names []string, active int, fv vimline.View) 
 
 func teachPrefLabels() []string { return []string{"Prefer (+)", "Neutral", "Demote (-)"} }
 
-// renderTeach draws the 'i' teach dialog for the selected thread with visual preference selection.
-func renderTeach(width, height int, names []string, active int, r row, field, pref int, fv vimline.View, st *store, now int64) string {
-	return dialog(width, height, 14, names, active, func(sc *screen) {
+type teachFeat struct {
+	key string
+	on  bool
+}
+
+func teachDefaultOn(f string) bool {
+	kind, _, _ := strings.Cut(f, ":")
+	switch kind {
+	case "cadence", "visit", "age", "ws":
+		return false
+	default:
+		return true
+	}
+}
+
+func teachFeatureChoices(r row, now int64) []teachFeat {
+	var on, off []teachFeat
+	for _, f := range jevFeatures(r, now) {
+		item := teachFeat{key: f, on: teachDefaultOn(f)}
+		if item.on {
+			on = append(on, item)
+		} else {
+			off = append(off, item)
+		}
+	}
+	return append(on, off...)
+}
+
+func featureChipLabel(f string) string {
+	kind, val, ok := strings.Cut(f, ":")
+	if !ok {
+		return f
+	}
+	switch kind {
+	case "status", "agent", "domain", "repo", "label":
+		return val
+	case "age":
+		return "age " + val
+	case "visit":
+		return "visits " + val
+	case "attention":
+		if val == "waiting_on_human" {
+			return "waiting on you"
+		}
+		if val == "hot" {
+			return "just touched"
+		}
+	case "cadence":
+		return val
+	case "note":
+		return "note"
+	case "manual":
+		return "manual block"
+	case "remind":
+		if val == "due" {
+			return "overdue"
+		}
+		return "reminder"
+	case "favorite":
+		return "favorite"
+	}
+	return val
+}
+
+func teachChipLines(feats []teachFeat, sel int, focused bool, width int, weights map[string]float64) []string {
+	if len(feats) == 0 {
+		return []string{keyOverlay + "  no features on this thread" + keyReset}
+	}
+	labels := make([]string, len(feats))
+	for i, f := range feats {
+		mark := "[ ]"
+		if f.on {
+			mark = "[x]"
+		}
+		w := 0.0
+		if weights != nil {
+			w = weights[f.key]
+		}
+		labels[i] = fmt.Sprintf("%s %s %+.2f", mark, featureChipLabel(f.key), w)
+	}
+	highlight := sel
+	if !focused {
+		highlight = -1
+	}
+	return choiceLines(labels, highlight, width)
+}
+
+func enabledTeachFeatures(feats []teachFeat) []string {
+	var out []string
+	for _, f := range feats {
+		if f.on {
+			out = append(out, f.key)
+		}
+	}
+	return out
+}
+
+// renderTeach draws the 'i' teach dialog: preference, feature chips, and free text.
+func renderTeach(width, height int, names []string, active int, r row, field, pref int, feats []teachFeat, featSel int, fv vimline.View, st *store, now int64) string {
+	weights := map[string]float64{}
+	if st != nil && st.Jev != nil {
+		weights = st.Jev.Weights
+	}
+	return dialog(width, height, 22, names, active, func(sc *screen) {
 		sc.emit("")
 		sc.emit(keyText + keyBold + "  Teach Jev: " + keyReset + keyAccentFg + keyBold + r.Label + keyReset + keyOverlay + " (" + r.PaneID + ")" + keyReset)
 
@@ -2479,21 +2628,19 @@ func renderTeach(width, height int, names []string, active int, r row, field, pr
 		}
 		meta += keyOverlay + "  priority: " + keyReset + scoreColor + fmt.Sprintf("%+.2f", priority) + keyReset
 		sc.emit(meta)
-
-		feats := jevFeatures(r, now)
-		var featDesc []string
-		for _, f := range feats {
-			featDesc = append(featDesc, featureDescription(f))
-		}
-		sc.emit(keyOverlay + "  features: " + keyReset + keyText + strings.Join(featDesc, ", ") + keyReset)
+		sc.emit(keyOverlay + "  Checked chips get the plus or minus. Text can name a finer rule." + keyReset)
 		sc.emit("")
 		sc.emit(fieldTitle("Preference", field == 0))
 		for _, line := range choiceLines(teachPrefLabels(), pref, sc.width) {
 			sc.emit(line)
 		}
-		sc.emit(fieldTitle("Feedback / Reason (optional)", field == 1))
+		sc.emit(fieldTitle("Features to guide", field == 1))
+		for _, line := range teachChipLines(feats, featSel, field == 1, sc.width, weights) {
+			sc.emit(line)
+		}
+		sc.emit(fieldTitle("Instruction (optional)", field == 2))
 		sc.emit(renderField(fv, sc.width))
-	}, "h/l choose,j/k field,enter save,esc cancel")
+	}, "h/l choose,j/k field,space toggle,enter save,esc back")
 }
 
 func clipTail(s string, n int) string {
@@ -2623,6 +2770,8 @@ func runPicker() int {
 	teaching := false
 	teachField := 0
 	teachPref := 0
+	teachFeats := []teachFeat{}
+	teachFeatSel := 0
 	teachEd := vimline.New("")
 	teachRow := row{}
 	teachRank := 0
@@ -2671,18 +2820,19 @@ func runPicker() int {
 		now := time.Now()
 		nowUnix := now.Unix()
 
+		selected := enabledTeachFeatures(teachFeats)
 		intent := "neutral"
 		switch teachPref {
 		case 0:
 			intent = "prefer"
-			st.jevPrefer(teachRow, true)
+			st.jevPreferSelected(selected, true)
 		case 2:
 			intent = "demote"
-			st.jevPrefer(teachRow, false)
+			st.jevPreferSelected(selected, false)
 		default:
 			if text != "" {
 				lower := strings.ToLower(text)
-				if strings.Contains(lower, "block") || strings.Contains(lower, "wait") || strings.Contains(lower, "hold") {
+				if strings.Contains(lower, "block") || strings.Contains(lower, "wait") || strings.Contains(lower, "hold") || strings.Contains(lower, "until") || strings.Contains(lower, " over ") {
 					intent = "directive"
 				} else {
 					intent = "feedback"
@@ -2690,8 +2840,16 @@ func runPicker() int {
 			}
 		}
 
+		var ruleTexts []string
 		if text != "" {
-			jevApplyFeedback(st, text, teachPref != 2)
+			adj, rules := parseJevFeedback(text, jevFeatures(teachRow, nowUnix))
+			st.applyJevDirective(adj, rules)
+			for _, rule := range rules {
+				ruleTexts = append(ruleTexts, rule.Text)
+			}
+			if intent == "neutral" && (len(adj) > 0 || len(rules) > 0) {
+				intent = "directive"
+			}
 		}
 
 		cwd := ""
@@ -2740,6 +2898,8 @@ func runPicker() int {
 			InboxTotal: teachTotal,
 			Queue:      queueCtx,
 			Features:   jevFeatures(teachRow, nowUnix),
+			Selected:   selected,
+			RuleTexts:  ruleTexts,
 			Session: jevSessionContext{
 				ActiveTab:    views(st)[tab].Kind,
 				ActiveFilter: stateFilter,
@@ -2752,6 +2912,7 @@ func runPicker() int {
 		_ = recordJevTeaching(st, tRecord)
 		_ = saveStore(st)
 
+		taughtID := teachRow.PaneID
 		teaching = false
 		if teachPref == 0 {
 			status = "taught Jev: prefer " + teachRow.Label
@@ -2763,6 +2924,12 @@ func runPicker() int {
 			status = "saved teaching for " + teachRow.Label
 		}
 		rebuild()
+		for i, r := range allRows {
+			if r.PaneID == taughtID {
+				sel = i
+				break
+			}
+		}
 	}
 
 	// commitRemind parses the typed time and applies the snooze contract.
@@ -2801,7 +2968,7 @@ func runPicker() int {
 
 	// activeEd reports which vim editor owns the next key, if any.
 	activeEd := func() *vimline.Editor {
-		if teaching && teachField == 1 {
+		if teaching && teachField == 2 {
 			return teachEd
 		}
 		if showHelp && helpSearching {
@@ -2958,7 +3125,7 @@ func runPicker() int {
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
 		case teaching:
-			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachField, teachPref, teachEd.View("reason", teachField == 1), st, time.Now().Unix())
+			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachField, teachPref, teachFeats, teachFeatSel, teachEd.View("reason", teachField == 2), st, time.Now().Unix())
 		case creating:
 			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.View("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
 		default:
@@ -3119,7 +3286,11 @@ func runPicker() int {
 			case "enter":
 				if jevSel < len(items) {
 					st.ensureJev()
-					delete(st.Jev.Weights, items[jevSel].feature)
+					if items[jevSel].ruleID != "" {
+						st.removeJevRule(items[jevSel].ruleID)
+					} else {
+						delete(st.Jev.Weights, items[jevSel].feature)
+					}
 					_ = saveStore(st)
 					items = jevSelectableItems(st)
 					if jevSel >= len(items) {
@@ -3222,43 +3393,90 @@ func runPicker() int {
 			continue
 		}
 		if teaching && !showHelp {
+			switch key {
+			case "esc":
+				if teachField == 2 && teachEd.Mode() == vimline.ModeInsert {
+					teachEd.Feed(key)
+					continue
+				}
+				if teachField > 0 {
+					teachField--
+					continue
+				}
+				teaching = false
+				status = ""
+				continue
+			case "enter":
+				if teachField == 2 {
+					if teachEd.Feed(key) == vimline.ActAccept {
+						commitTeach()
+					}
+					continue
+				}
+				commitTeach()
+				continue
+			case "j", "down", "tab":
+				if teachField == 2 && teachEd.Mode() == vimline.ModeInsert {
+					teachEd.Feed(key)
+					continue
+				}
+				if teachField < 2 {
+					teachField++
+				}
+				continue
+			case "k", "up":
+				if teachField == 2 && teachEd.Mode() == vimline.ModeInsert {
+					teachEd.Feed(key)
+					continue
+				}
+				if teachField > 0 {
+					teachField--
+				}
+				continue
+			}
 			if teachField == 0 {
 				switch key {
 				case "h", "left":
 					teachPref = cycle(3, teachPref, -1)
 				case "l", "right":
 					teachPref = cycle(3, teachPref, 1)
-				case "j", "down", "tab":
-					teachField = 1
-				case "enter":
-					commitTeach()
-				case "esc", "q":
-					teaching = false
-					status = ""
 				}
 				continue
 			}
-			switch key {
-			case "esc":
-				if teachEd.Mode() == vimline.ModeInsert {
-					teachEd.Feed(key)
-				} else {
-					teachField = 0
+			if teachField == 1 {
+				n := len(teachFeats)
+				switch key {
+				case "h", "left":
+					if n > 0 {
+						teachFeatSel = cycle(n, teachFeatSel, -1)
+					}
+				case "l", "right":
+					if n > 0 {
+						teachFeatSel = cycle(n, teachFeatSel, 1)
+					}
+				case " ", "x":
+					if n > 0 && teachFeatSel >= 0 && teachFeatSel < n {
+						teachFeats[teachFeatSel].on = !teachFeats[teachFeatSel].on
+					}
+				case "a":
+					allOn := true
+					for _, f := range teachFeats {
+						if !f.on {
+							allOn = false
+							break
+						}
+					}
+					for i := range teachFeats {
+						teachFeats[i].on = !allOn
+					}
 				}
 				continue
-			case "k", "up":
-				if teachEd.Mode() != vimline.ModeInsert {
-					teachField = 0
-					continue
-				}
 			}
 			switch teachEd.Feed(key) {
 			case vimline.ActAccept:
 				commitTeach()
-			case vimline.ActCancel:
-				teachField = 0
-			case vimline.ActUp:
-				teachField = 0
+			case vimline.ActCancel, vimline.ActUp:
+				teachField = 1
 			}
 			continue
 		}
@@ -3506,6 +3724,11 @@ func runPicker() int {
 				status = "jump: " + err.Error()
 				continue
 			}
+			if views(st)[tab].Kind == "inbox" && sel < len(rows) {
+				st.ensureJev()
+				st.jevLearnScaled(rows[sel], rows[:sel], 0.02)
+				_ = saveStore(st)
+			}
 			return 0
 		case key == "?" && !searching:
 			showHelp = true
@@ -3554,6 +3777,8 @@ func runPicker() int {
 				teachField = 0
 				teachPref = 0
 				teachRow = rows[sel]
+				teachFeats = teachFeatureChoices(teachRow, time.Now().Unix())
+				teachFeatSel = 0
 				teachRank = sel
 				teachTotal = len(rows)
 				teachEd = vimline.New("")
@@ -3575,6 +3800,7 @@ func runPicker() int {
 				ps.DoneState = baselineState(liveStatusWord(frozen, r.PaneID))
 				st.removeFromInbox(r.PaneID)
 				if views(st)[tab].Kind == "inbox" {
+					st.ensureJev()
 					st.jevLearn(r, rows[:sel])
 				}
 				lastDoneID = r.PaneID

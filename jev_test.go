@@ -260,9 +260,10 @@ func TestRenderTeachVisualPreferences(t *testing.T) {
 	}
 
 	fv := vimline.View{Label: "reason", Text: "high priority"}
+	feats := teachFeatureChoices(r, now)
 
 	// When pref is 0 (Prefer (+)), "Prefer (+)" chip should be highlighted
-	framePrefer := renderTeach(100, 20, []string{"Inbox"}, 0, r, 0, 0, fv, st, now)
+	framePrefer := renderTeach(100, 24, []string{"Inbox"}, 0, r, 0, 0, feats, 0, fv, st, now)
 	plainPrefer := stripANSI(framePrefer)
 
 	if !strings.Contains(plainPrefer, "Teach Jev: portal-billing (w1:p1)") {
@@ -277,9 +278,129 @@ func TestRenderTeachVisualPreferences(t *testing.T) {
 	if !strings.Contains(plainPrefer, "h/l choose") || !strings.Contains(plainPrefer, "enter save") {
 		t.Fatalf("footer missing in frame:\n%s", plainPrefer)
 	}
+	if !strings.Contains(plainPrefer, "[x] blocked") || !strings.Contains(plainPrefer, "[x] billing") {
+		t.Fatalf("feature chips missing in frame:\n%s", plainPrefer)
+	}
+	if !strings.Contains(plainPrefer, "Features to guide") {
+		t.Fatalf("feature field missing in frame:\n%s", plainPrefer)
+	}
 
 	// Verify that the Prefer (+) chip is highlighted with keySelectBg in framePrefer
 	if !strings.Contains(framePrefer, keySelectBg) {
 		t.Fatalf("expected selected chip to have keySelectBg styling")
 	}
+}
+
+func TestJevFeaturesCarryAgentRepoAndDomain(t *testing.T) {
+	now := time.Now().Unix()
+	r := row{
+		PaneID: "w1:p1",
+		Label:  "portal billing",
+		Status: "blocked",
+		Agent:  "pi",
+		CWD:    "/home/jon/git/portal",
+		Note:   "waiting on stripe",
+		Last:   now,
+	}
+	got := map[string]bool{}
+	for _, f := range jevFeatures(r, now) {
+		got[f] = true
+	}
+	for _, want := range []string{"status:blocked", "agent:pi", "repo:portal", "domain:billing", "domain:portal", "label:portal", "note:yes"} {
+		if !got[want] {
+			t.Fatalf("missing %s in %v", want, got)
+		}
+	}
+}
+
+func TestParseBillingOverDocs(t *testing.T) {
+	adj, rules := parseJevFeedback("prioritize billing over docs", nil)
+	if len(rules) != 0 {
+		t.Fatalf("rules = %v, want none", rules)
+	}
+	if adj["domain:billing"] <= 0 {
+		t.Fatalf("billing = %v, want positive", adj["domain:billing"])
+	}
+	if adj["domain:docs"] >= 0 {
+		t.Fatalf("docs = %v, want negative", adj["domain:docs"])
+	}
+	if _, ok := adj["label:prioritize"]; ok {
+		t.Fatal("polarity word became a feature")
+	}
+}
+
+func TestParseDemoteIdleUntilAfternoon(t *testing.T) {
+	_, rules := parseJevFeedback("demote idle until afternoon", nil)
+	if len(rules) != 1 {
+		t.Fatalf("rules = %d, want 1", len(rules))
+	}
+	rule := rules[0]
+	if rule.Sign >= 0 {
+		t.Fatalf("sign = %v, want negative", rule.Sign)
+	}
+	if len(rule.When) != 1 || rule.When[0] != "cadence:morning" {
+		t.Fatalf("when = %v, want morning only", rule.When)
+	}
+	if len(rule.Target) != 1 || rule.Target[0] != "status:idle" {
+		t.Fatalf("target = %v, want status:idle", rule.Target)
+	}
+}
+
+func TestTeachCreditAssignmentIgnoresUnchecked(t *testing.T) {
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	st.jevPreferSelected([]string{"status:blocked", "domain:billing"}, true)
+	if st.Jev.Weights["status:blocked"] <= 0 || st.Jev.Weights["domain:billing"] <= 0 {
+		t.Fatalf("selected weights = %v", st.Jev.Weights)
+	}
+	if st.Jev.Weights["agent:pi"] != 0 || st.Jev.Weights["cadence:morning"] != 0 {
+		t.Fatalf("unchecked features were trained: %v", st.Jev.Weights)
+	}
+}
+
+func TestRuleBonusOnlyWhenCadenceMatches(t *testing.T) {
+	morning := time.Date(2026, 10, 22, 9, 0, 0, 0, time.Local).Unix()
+	afternoon := time.Date(2026, 10, 22, 15, 0, 0, 0, time.Local).Unix()
+	st := &store{Version: 1, Panes: map[string]*paneStat{}, Jev: &jevState{Weights: map[string]float64{}}}
+	_, rules := parseJevFeedback("demote idle until afternoon", nil)
+	st.applyJevDirective(nil, rules)
+	idle := row{PaneID: "a", Label: "notes", Status: "idle", Last: morning}
+	if st.jevRuleBonus(idle, morning) >= 0 {
+		t.Fatalf("morning bonus = %v, want negative", st.jevRuleBonus(idle, morning))
+	}
+	if st.jevRuleBonus(idle, afternoon) != 0 {
+		t.Fatalf("afternoon bonus = %v, want 0", st.jevRuleBonus(idle, afternoon))
+	}
+	if st.Jev.Weights["status:idle"] != 0 {
+		t.Fatal("until-rule also wrote a global weight")
+	}
+}
+
+func TestLocalWeightsReorderInbox(t *testing.T) {
+	t.Setenv("HERDR_RECALL_JEV", "off")
+	now := time.Now().Unix()
+	st := &store{
+		Version: 1, TabsInit: true, Tabs: defaultTabs(),
+		Panes: map[string]*paneStat{
+			"old": {Visits: 3, Last: now - 20, Label: "docs", InInbox: true},
+			"new": {Visits: 1, Last: now - 10, Label: "billing", InInbox: true},
+		},
+		InboxOrder: []string{"old", "new"},
+		Jev:        &jevState{Weights: map[string]float64{"status:blocked": 0.8}},
+	}
+	snap := &snapshot{Panes: []paneRec{
+		{PaneID: "old", AgentStatus: "idle"},
+		{PaneID: "new", AgentStatus: "blocked"},
+	}}
+	got := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	if len(got) < 2 || got[0].PaneID != "new" {
+		t.Fatalf("order = %v, want blocked billing first", paneIDs(got))
+	}
+}
+
+func paneIDs(rows []row) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.PaneID
+	}
+	return out
 }

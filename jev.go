@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // jev.go is the optional triage-priority module.
@@ -37,8 +39,21 @@ type jevState struct {
 	Scores    map[string]float64 `json:"scores,omitempty"`
 	ScoreKey  map[string]string  `json:"score_key,omitempty"`
 	Weights   map[string]float64 `json:"weights,omitempty"`
+	Rules     []jevRule          `json:"rules,omitempty"`
 	Examples  int                `json:"examples,omitempty"`
 	Teachings []jevTeaching      `json:"teachings,omitempty"`
+}
+
+// jevRule is a conditional preference. It fires only when the row matches
+// When, so "demote idle until afternoon" does not bury idle threads all day.
+type jevRule struct {
+	ID       string   `json:"id"`
+	Text     string   `json:"text,omitempty"`
+	When     []string `json:"when,omitempty"`
+	WhenMode string   `json:"when_mode,omitempty"` // all or any
+	Target   []string `json:"target,omitempty"`
+	Sign     float64  `json:"sign"`
+	Delta    float64  `json:"delta"`
 }
 
 func (s *store) ensureJev() {
@@ -137,9 +152,12 @@ func jevAsk(proxy, base, model string, r row) float64 {
 	payload := map[string]any{
 		"model": model,
 		"state": map[string]string{
-			"tab":    r.Label,
-			"status": statusWord(r.Status),
-			"note":   jevClip(r.Note, 600),
+			"tab":      r.Label,
+			"status":   statusWord(r.Status),
+			"note":     jevClip(r.Note, 600),
+			"agent":    r.Agent,
+			"cwd":      r.CWD,
+			"features": strings.Join(jevFeatures(r, time.Now().Unix()), " "),
 		},
 		"questions": map[string]any{
 			"triage": map[string]any{
@@ -210,11 +228,19 @@ func jevAgeBucket(r row, now int64) string {
 }
 
 // jevFeatures names the dimensions preference is learned over.
+// The set is curated. Raw words are not features, or one teaching would
+// poison every token that happened to sit on the row.
 func jevFeatures(r row, now int64) []string {
-	f := []string{
-		"status:" + statusWord(r.Status),
-		jevAgeBucket(r, now),
+	var f []string
+	if sw := statusWord(r.Status); sw != "" {
+		f = append(f, "status:"+sw)
 	}
+	if a := strings.ToLower(strings.TrimSpace(r.Agent)); a != "" && a != "unknown" && a != "none" {
+		f = append(f, "agent:"+a)
+	}
+	f = append(f, jevAgeBucket(r, now))
+	f = append(f, jevVisitFeature(r.Visits))
+	f = append(f, jevCadence(now))
 	if r.Note != "" {
 		f = append(f, "note:yes")
 	}
@@ -223,11 +249,57 @@ func jevFeatures(r row, now int64) []string {
 	}
 	if r.RemindAt > 0 {
 		f = append(f, "remind:yes")
+		if r.RemindAt <= now {
+			f = append(f, "remind:due")
+		}
 	}
-	if toks := strings.Fields(r.Label); len(toks) > 0 {
-		f = append(f, "label:"+strings.ToLower(toks[0]))
+	if r.Fav {
+		f = append(f, "favorite:yes")
 	}
-	return f
+	if repo := jevRepoFeature(r.CWD); repo != "" {
+		f = append(f, repo)
+	}
+	sw := statusWord(r.Status)
+	if (sw == "blocked" || sw == "done") && r.Last > 0 && now-r.Last > 30*60 {
+		f = append(f, "attention:waiting_on_human")
+	}
+	if r.Last > 0 && now-r.Last < 5*60 {
+		f = append(f, "attention:hot")
+	}
+	f = append(f, jevDomainFeatures(r.Label, r.Note, r.CWD, r.Workspace)...)
+	if lab := jevLabelFeature(r.Label); lab != "" {
+		f = append(f, lab)
+	}
+	sort.Strings(f)
+	out := f[:0]
+	prev := ""
+	for _, x := range f {
+		if x == prev || x == "" {
+			continue
+		}
+		prev = x
+		out = append(out, x)
+	}
+	return out
+}
+
+// jevSignalFeatures is the subset implicit actions may train. Time of day,
+// visit count, and "just touched" are context, not a reason to bury a project.
+func jevSignalFeatures(r row, now int64) []string {
+	var out []string
+	for _, f := range jevFeatures(r, now) {
+		kind, val, _ := strings.Cut(f, ":")
+		switch kind {
+		case "cadence", "visit", "age":
+			continue
+		case "attention":
+			if val == "hot" {
+				continue
+			}
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 func (s *store) jevWeight(r row, now int64) float64 {
@@ -250,28 +322,76 @@ func (s *store) jevPriority(r row, now int64) float64 {
 	if s.Jev.ScoreKey[r.PaneID] != jevRowKey(r) {
 		p = 0
 	}
-	return p + s.jevWeight(r, now)
+	return p + s.jevWeight(r, now) + s.jevRuleBonus(r, now) + jevUrgency(r, now)
+}
+
+// jevUrgency is a small cold-start prior. Learned weights can override it.
+func jevUrgency(r row, now int64) float64 {
+	if r.RemindAt > 0 && r.RemindAt <= now {
+		return 0.2
+	}
+	switch statusWord(r.Status) {
+	case "blocked":
+		return 0.15
+	case "done":
+		return 0.08
+	case "working":
+		return 0.02
+	}
+	return 0
+}
+
+// jevRanksInbox reports whether the queue should follow learned priority.
+func (s *store) jevRanksInbox() bool {
+	if s.jevOn() {
+		return true
+	}
+	if s.Jev == nil {
+		return false
+	}
+	if len(s.Jev.Rules) > 0 {
+		return true
+	}
+	for _, w := range s.Jev.Weights {
+		if w != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// rankInbox orders rows by priority. Equal scores keep the previous order.
+func (s *store) rankInbox(rows []row, now int64) {
+	prev := make(map[string]int, len(rows))
+	for i, r := range rows {
+		prev[r.PaneID] = i
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		pi, pj := s.jevPriority(rows[i], now), s.jevPriority(rows[j], now)
+		if pi != pj {
+			return pi > pj
+		}
+		return prev[rows[i].PaneID] < prev[rows[j].PaneID]
+	})
 }
 
 // jevLearn reinforces the chosen row and decays the rows skipped above it.
 // Alpha is small so a single action never reorders the world.
+// Learning is local. A nil Jev state stays nil so a caller that did not opt in
+// cannot start a weight map by accident.
 func (s *store) jevLearn(chosen row, skipped []row) {
-	if !s.jevOn() {
+	s.jevLearnScaled(chosen, skipped, 0.05)
+}
+
+func (s *store) jevLearnScaled(chosen row, skipped []row, alpha float64) {
+	if s.Jev == nil {
 		return
 	}
 	s.ensureJev()
 	now := time.Now().Unix()
-	const alpha = 0.05
 	bump := func(r row, sign float64) {
-		for _, f := range jevFeatures(r, now) {
-			w := s.Jev.Weights[f] + sign*alpha
-			if w > 1 {
-				w = 1
-			}
-			if w < -1 {
-				w = -1
-			}
-			s.Jev.Weights[f] = w
+		for _, f := range jevSignalFeatures(r, now) {
+			s.Jev.Weights[f] = clampWeight(s.Jev.Weights[f] + sign*alpha)
 		}
 	}
 	bump(chosen, 1)
@@ -285,22 +405,22 @@ func (s *store) jevLearn(chosen row, skipped []row) {
 // minus decays them. This is local weight math, so it works without the
 // decision proxy; only the arrival scoring needs the endpoint.
 func (s *store) jevPrefer(r row, up bool) {
+	s.jevPreferSelected(jevFeatures(r, time.Now().Unix()), up)
+}
+
+// jevPreferSelected applies a plus or minus only to the features the captain
+// checked. Unchecked features are not credited for this teaching.
+func (s *store) jevPreferSelected(features []string, up bool) {
+	if len(features) == 0 {
+		return
+	}
 	s.ensureJev()
-	now := time.Now().Unix()
-	const alpha = 0.1
 	sign := -1.0
 	if up {
-		sign = 1.0
+		sign = 1
 	}
-	for _, f := range jevFeatures(r, now) {
-		w := s.Jev.Weights[f] + sign*alpha
-		if w > 1 {
-			w = 1
-		}
-		if w < -1 {
-			w = -1
-		}
-		s.Jev.Weights[f] = w
+	for _, f := range features {
+		s.Jev.Weights[f] = clampWeight(s.Jev.Weights[f] + sign*0.1)
 	}
 	s.Jev.Examples++
 }
@@ -331,6 +451,8 @@ type jevTeaching struct {
 	InboxTotal  int               `json:"inbox_total"`
 	Queue       []jevQueueContext `json:"queue,omitempty"`
 	Features    []string          `json:"features"`
+	Selected    []string          `json:"selected,omitempty"`
+	RuleTexts   []string          `json:"rule_texts,omitempty"`
 	Session     jevSessionContext `json:"session"`
 }
 
@@ -394,4 +516,478 @@ func recordJevTeaching(st *store, t jevTeaching) error {
 	}
 	_, err = f.Write(append(b, '\n'))
 	return err
+}
+
+func clampWeight(w float64) float64 {
+	if w > 1 {
+		return 1
+	}
+	if w < -1 {
+		return -1
+	}
+	return w
+}
+
+func jevVisitFeature(v int64) string {
+	switch {
+	case v > 50:
+		return "visit:heavy"
+	case v >= 10:
+		return "visit:frequent"
+	case v > 0:
+		return "visit:low"
+	default:
+		return "visit:zero"
+	}
+}
+
+func jevCadence(now int64) string {
+	hr := time.Unix(now, 0).Local().Hour()
+	switch {
+	case hr >= 6 && hr < 12:
+		return "cadence:morning"
+	case hr >= 12 && hr < 18:
+		return "cadence:afternoon"
+	case hr >= 18:
+		return "cadence:evening"
+	default:
+		return "cadence:night"
+	}
+}
+
+func jevRepoFeature(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	base := strings.ToLower(filepath.Base(cwd))
+	switch base {
+	case "", ".", "/", "tmp", "src", "home", "jon", "git", "code", "opt", "ra", "usr", "var":
+		return ""
+	}
+	return "repo:" + base
+}
+
+func jevLabelFeature(label string) string {
+	toks := strings.Fields(label)
+	if len(toks) == 0 {
+		return ""
+	}
+	tok := strings.ToLower(toks[0])
+	if tok == "" {
+		return ""
+	}
+	return "label:" + tok
+}
+
+var jevDomainWord = map[string]string{
+	"billing": "domain:billing", "stripe": "domain:billing", "amd": "domain:billing",
+	"claim": "domain:billing", "claims": "domain:billing", "rcm": "domain:billing", "invoice": "domain:billing",
+	"portal": "domain:portal", "kiosk": "domain:portal", "signage": "domain:portal", "frontend": "domain:portal",
+	"auth": "domain:auth", "oauth": "domain:auth", "login": "domain:auth", "vault": "domain:auth", "secret": "domain:auth",
+	"infra": "domain:infra", "docker": "domain:infra", "gpu": "domain:infra", "systemd": "domain:infra", "socket": "domain:infra", "deploy": "domain:infra",
+	"sync": "domain:sync", "mbsync": "domain:sync", "upstream": "domain:sync",
+	"jev": "domain:ai", "llm": "domain:ai", "model": "domain:ai",
+	"docs": "domain:docs", "kb": "domain:docs", "board": "domain:docs", "minutes": "domain:docs", "runbook": "domain:docs",
+	"ci": "domain:ci", "lint": "domain:ci", "regression": "domain:ci",
+	"mail": "domain:mail", "gmail": "domain:mail", "neomutt": "domain:mail", "neomd": "domain:mail",
+	"security": "domain:security", "hipaa": "domain:security", "phi": "domain:security",
+}
+
+func jevDomainFeatures(parts ...string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, part := range parts {
+		for _, w := range jevSplitWords(part) {
+			if dom, ok := jevDomainWord[w]; ok && !seen[dom] {
+				seen[dom] = true
+				out = append(out, dom)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func jevSplitWords(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+func jevVocabToken(word string) (string, bool) {
+	if dom, ok := jevDomainWord[word]; ok {
+		return dom, true
+	}
+	switch word {
+	case "blocked", "working", "done", "idle":
+		return "status:" + word, true
+	case "pi", "agy", "claude", "codex", "kimi", "cursor", "gemini":
+		return "agent:" + word, true
+	case "fresh", "recent":
+		return "age:fresh", true
+	case "stale", "old":
+		return "age:old", true
+	case "morning", "afternoon", "evening", "night":
+		return "cadence:" + word, true
+	case "note", "notes":
+		return "note:yes", true
+	case "reminder", "remind":
+		return "remind:yes", true
+	case "overdue":
+		return "remind:due", true
+	case "favorite", "starred":
+		return "favorite:yes", true
+	}
+	return "", false
+}
+
+func jevStopWord(w string) bool {
+	switch w {
+	case "a", "an", "the", "this", "that", "these", "those", "thread", "threads", "pane", "panes",
+		"agent", "agents", "and", "or", "to", "for", "in", "on", "with", "of", "is", "are", "be",
+		"it", "my", "me", "than", "then", "just", "please", "because", "so", "from", "over",
+		"instead", "before", "ahead", "until", "when", "if", "during", "not", "now", "right",
+		"time", "show", "inbox", "always", "at", "by":
+		return true
+	}
+	return false
+}
+
+func jevPreferWord(w string) bool {
+	switch w {
+	case "prefer", "prioritize", "priority", "boost", "urgent", "important", "first", "surface", "sooner", "higher":
+		return true
+	}
+	return false
+}
+
+func jevDemoteWord(w string) bool {
+	switch w {
+	case "demote", "bury", "later", "ignore", "park", "lower", "downrank", "defer", "less":
+		return true
+	}
+	return false
+}
+
+func resolveJevToken(word string, rowFeats []string) string {
+	word = strings.ToLower(strings.TrimSpace(word))
+	if word == "" || jevStopWord(word) || jevPreferWord(word) || jevDemoteWord(word) || word == "never" {
+		return ""
+	}
+	if f, ok := jevVocabToken(word); ok {
+		return f
+	}
+	for _, rf := range rowFeats {
+		if strings.HasSuffix(rf, ":"+word) {
+			return rf
+		}
+	}
+	return ""
+}
+
+func resolveJevWords(words []string, rowFeats []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, w := range words {
+		f := resolveJevToken(w, rowFeats)
+		if f == "" || seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+	}
+	return out
+}
+
+func normalizeJevText(text string) string {
+	raw := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '-' {
+			return unicode.ToLower(r)
+		}
+		return ' '
+	}, text)
+	return strings.Join(strings.Fields(raw), " ")
+}
+
+func jevTextHasPolarity(text string) bool {
+	for _, w := range strings.Fields(normalizeJevText(text)) {
+		if jevPreferWord(w) || jevDemoteWord(w) || w == "never" {
+			return true
+		}
+	}
+	return false
+}
+
+func jevPolarity(raw string) float64 {
+	preferN, demoteN := 0, 0
+	for _, w := range strings.Fields(raw) {
+		if jevPreferWord(w) {
+			preferN++
+		}
+		if jevDemoteWord(w) || w == "never" {
+			demoteN++
+		}
+	}
+	if preferN > demoteN {
+		return 1
+	}
+	if demoteN > preferN {
+		return -1
+	}
+	return 0
+}
+
+func jevUntilWhen(word string) []string {
+	switch word {
+	case "afternoon":
+		return []string{"cadence:morning"}
+	case "evening":
+		return []string{"cadence:morning", "cadence:afternoon"}
+	case "night", "tonight":
+		return []string{"cadence:morning", "cadence:afternoon", "cadence:evening"}
+	case "morning":
+		return []string{"cadence:night"}
+	default:
+		return nil
+	}
+}
+
+func splitJevContext(raw string) (body, cond string, ok bool) {
+	for _, p := range []string{"when ", "if ", "during "} {
+		if strings.HasPrefix(raw, p) {
+			fields := strings.Fields(raw[len(p):])
+			var condF, bodyF []string
+			seenPol := false
+			for _, f := range fields {
+				if !seenPol && (jevPreferWord(f) || jevDemoteWord(f) || f == "never") {
+					seenPol = true
+					bodyF = append(bodyF, f)
+					continue
+				}
+				if !seenPol {
+					condF = append(condF, f)
+				} else {
+					bodyF = append(bodyF, f)
+				}
+			}
+			if len(condF) == 0 || len(bodyF) == 0 {
+				return "", "", false
+			}
+			return strings.Join(bodyF, " "), strings.Join(condF, " "), true
+		}
+	}
+	for _, sep := range []string{" when ", " if ", " during "} {
+		if i := strings.Index(raw, sep); i >= 0 {
+			return raw[:i], raw[i+len(sep):], true
+		}
+	}
+	return "", "", false
+}
+
+// parseJevFeedback turns free text into weight deltas and conditional rules.
+// Unknown words are ignored unless they match a feature already on the row.
+func parseJevFeedback(text string, rowFeats []string) (map[string]float64, []jevRule) {
+	raw := normalizeJevText(text)
+	if raw == "" {
+		return nil, nil
+	}
+	sign := jevPolarity(raw)
+
+	if i := strings.Index(raw, " until "); i >= 0 {
+		subject := resolveJevWords(strings.Fields(raw[:i]), rowFeats)
+		rest := strings.Fields(raw[i+len(" until "):])
+		var when []string
+		if len(rest) > 0 {
+			when = jevUntilWhen(rest[0])
+			if len(when) == 0 {
+				when = resolveJevWords(rest[:1], rowFeats)
+			}
+		}
+		if sign == 0 {
+			sign = -1
+		}
+		if len(subject) > 0 && len(when) > 0 {
+			mode := "all"
+			if len(when) > 1 {
+				mode = "any"
+			}
+			return nil, []jevRule{{
+				Text:     strings.TrimSpace(text),
+				When:     when,
+				WhenMode: mode,
+				Target:   subject,
+				Sign:     sign,
+				Delta:    0.25,
+			}}
+		}
+	}
+
+	if body, cond, ok := splitJevContext(raw); ok {
+		when := resolveJevWords(strings.Fields(cond), rowFeats)
+		target := resolveJevWords(strings.Fields(body), rowFeats)
+		if sign == 0 {
+			sign = 1
+		}
+		if len(when) > 0 && len(target) > 0 {
+			return nil, []jevRule{{
+				Text:     strings.TrimSpace(text),
+				When:     when,
+				WhenMode: "all",
+				Target:   target,
+				Sign:     sign,
+				Delta:    0.25,
+			}}
+		}
+	}
+
+	for _, sep := range []string{" over ", " instead of ", " ahead of ", " before "} {
+		if i := strings.Index(raw, sep); i >= 0 {
+			left := resolveJevWords(strings.Fields(raw[:i]), rowFeats)
+			right := resolveJevWords(strings.Fields(raw[i+len(sep):]), rowFeats)
+			adj := map[string]float64{}
+			for _, f := range left {
+				adj[f] += 0.2
+			}
+			for _, f := range right {
+				adj[f] -= 0.2
+			}
+			if len(adj) > 0 {
+				return adj, nil
+			}
+		}
+	}
+
+	if sign == 0 {
+		return nil, nil
+	}
+	feats := resolveJevWords(strings.Fields(raw), rowFeats)
+	if len(feats) == 0 {
+		return nil, nil
+	}
+	adj := map[string]float64{}
+	for _, f := range feats {
+		adj[f] = sign * 0.2
+	}
+	return adj, nil
+}
+
+func (s *store) jevRuleBonus(r row, now int64) float64 {
+	if s.Jev == nil || len(s.Jev.Rules) == 0 {
+		return 0
+	}
+	have := map[string]bool{}
+	for _, f := range jevFeatures(r, now) {
+		have[f] = true
+	}
+	sum := 0.0
+	for _, rule := range s.Jev.Rules {
+		if !jevRuleMatches(rule, have) {
+			continue
+		}
+		if len(rule.Target) > 0 {
+			hit := false
+			for _, t := range rule.Target {
+				if have[t] {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				continue
+			}
+		}
+		sum += rule.Sign * rule.Delta
+	}
+	return sum
+}
+
+func jevRuleMatches(rule jevRule, have map[string]bool) bool {
+	if len(rule.When) == 0 {
+		return true
+	}
+	if rule.WhenMode == "any" {
+		for _, w := range rule.When {
+			if have[w] {
+				return true
+			}
+		}
+		return false
+	}
+	for _, w := range rule.When {
+		if !have[w] {
+			return false
+		}
+	}
+	return true
+}
+
+func jevRuleID(rule jevRule) string {
+	w := append([]string{}, rule.When...)
+	t := append([]string{}, rule.Target...)
+	sort.Strings(w)
+	sort.Strings(t)
+	mode := rule.WhenMode
+	if mode == "" {
+		mode = "all"
+	}
+	sum := sha1.Sum([]byte(mode + "|" + strings.Join(w, ",") + "|" + strings.Join(t, ",") + "|" + fmt.Sprintf("%g", rule.Sign)))
+	return hex.EncodeToString(sum[:6])
+}
+
+func (s *store) addJevRule(rule jevRule) {
+	s.ensureJev()
+	if rule.WhenMode == "" {
+		rule.WhenMode = "all"
+	}
+	if rule.Delta == 0 {
+		rule.Delta = 0.25
+	}
+	if rule.Sign == 0 {
+		rule.Sign = 1
+	}
+	rule.ID = jevRuleID(rule)
+	for i := range s.Jev.Rules {
+		if s.Jev.Rules[i].ID == rule.ID {
+			d := s.Jev.Rules[i].Delta + rule.Delta
+			if d > 0.8 {
+				d = 0.8
+			}
+			s.Jev.Rules[i].Delta = d
+			if rule.Text != "" {
+				s.Jev.Rules[i].Text = rule.Text
+			}
+			return
+		}
+	}
+	if len(s.Jev.Rules) >= 40 {
+		s.Jev.Rules = s.Jev.Rules[1:]
+	}
+	s.Jev.Rules = append(s.Jev.Rules, rule)
+}
+
+func (s *store) removeJevRule(id string) {
+	if s.Jev == nil {
+		return
+	}
+	out := s.Jev.Rules[:0]
+	for _, rule := range s.Jev.Rules {
+		if rule.ID != id {
+			out = append(out, rule)
+		}
+	}
+	s.Jev.Rules = out
+}
+
+func (s *store) applyJevDirective(adj map[string]float64, rules []jevRule) {
+	if len(adj) == 0 && len(rules) == 0 {
+		return
+	}
+	s.ensureJev()
+	for f, d := range adj {
+		s.Jev.Weights[f] = clampWeight(s.Jev.Weights[f] + d)
+	}
+	for _, rule := range rules {
+		s.addJevRule(rule)
+	}
+	s.Jev.Examples++
 }

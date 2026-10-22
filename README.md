@@ -42,7 +42,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `n` | set or edit a sticky note on the selected thread |
 | `!` | toggle manual `blocked` override on the selected thread |
 | `m` | mark or unmark the selected thread as a favorite (`*`) |
-| `i` | teach Jev on the selected thread with visual preference (Prefer/Neutral/Demote) |
+| `i` | teach Jev: prefer or demote, check feature chips, or type a rule |
 | `J` | inspect and correct Jev learned feature weights |
 | `b` / `w` / `i` / `d` / `a` | filter by status: blocked, working, idle, done, or all |
 | `/` | search tab names and sticky notes, with vim editing |
@@ -91,17 +91,20 @@ Jev is optional. With no decision proxy on the box and no `HERDR_RECALL_JEV`
 override, the picker behaves exactly as it does without this section.
 
 When Jev is present, each new Inbox arrival is asked one question: should the
-captain triage this thread before the others right now. New arrivals are then
-placed at the front of the queue, most important first. Existing rows keep
-their pinned positions, so reviewing a thread never reshuffles the queue.
+captain triage this thread before the others right now. If Jev has a score
+or any local learning, the Inbox is ranked by that priority. Equal scores
+keep the previous order, so a review does not jump when nothing changed.
 
-Preference is learned locally. Acting on an Inbox row reinforces its features
-(status, note, age, label) and decays the features of the rows skipped above
-it, so the ordering drifts toward what you actually handle first.
+Preference is learned locally and does not need the decision proxy.
+Opening or marking a thread done reinforces its stable signals and decays
+the rows skipped above it. Time of day and visit count are not trained by
+those implicit actions.
 
-Explicit feedback is faster: `+` on a row tells Jev to rank threads like it
-higher,  tells it to rank them lower. The bump is double the implicit
-rate. It works without the decision proxy, since the weights are local.
+`i` is the explicit path. Prefer, Neutral, and Demote apply only to the
+checked feature chips. Uncheck a chip when that signal should not get the
+credit. Free text can name a comparison (`billing over docs`) or a
+conditional rule (`demote idle until afternoon`). The raw text is also
+stored for later review.
 
 Press `J` to inspect what Jev has learned. Weights sort by impact,
 positive green and negative red. Enter clears one, ctrl+u clears all.
@@ -120,7 +123,8 @@ for this cycle. A sticky note from `n` sits beside the name.
 ![triage inbox](assets/showcase-inbox.png)
 
 `i` opens teach mode on the selected thread. Prefer, Neutral, and Demote are
-chips. An optional reason is saved with the choice.
+chips. Feature chips sit under them. An optional instruction is saved with
+the choice.
 
 ![teach Jev](assets/showcase-teach.png)
 
