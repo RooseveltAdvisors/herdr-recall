@@ -51,3 +51,26 @@ func TestEDrainsInboxOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenTabRestoresSavedTab(t *testing.T) {
+	st := &store{Version: 1, TabsInit: true, Tabs: defaultTabs()}
+	// Live store: active_tab 2 is Recent. Reopen must not force Inbox.
+	st.ActiveTab = 2
+	got := openTab(st)
+	if viewName(st, views(st)[got]) != "Recent" {
+		t.Fatalf("reopen = %s, want Recent", viewName(st, views(st)[got]))
+	}
+	// A fresh store has no saved tab. First open is Inbox.
+	fresh := &store{Version: 1, TabsInit: true, Tabs: defaultTabs()}
+	got = openTab(fresh)
+	if viewName(fresh, views(fresh)[got]) != "Inbox" {
+		t.Fatalf("first open = %s, want Inbox", viewName(fresh, views(fresh)[got]))
+	}
+	// Favorites is index 0, which looks unset until a session saves the flag.
+	st.ActiveTab = 0
+	st.ActiveTabSet = true
+	got = openTab(st)
+	if viewName(st, views(st)[got]) != "Favorites" {
+		t.Fatalf("favorites reopen = %s, want Favorites", viewName(st, views(st)[got]))
+	}
+}

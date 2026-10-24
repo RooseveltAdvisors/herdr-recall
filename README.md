@@ -121,7 +121,7 @@ The CLI can do the same: `herdr-recall jev` lists, `jev reset` clears,
 Designed frames of the picker. Live terminal captures follow below.
 The social card is [assets/og.png](assets/og.png).
 
-Inbox is the default view. A coloured dot plus a coloured word marks status:
+The first open is Inbox. Later opens restore the tab you left. A coloured dot plus a coloured word marks status:
 red blocked, yellow working, teal done, green idle. `e` marks a thread done
 for this cycle. A sticky note from `n` sits beside the name.
 

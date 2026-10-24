@@ -203,6 +203,7 @@ type store struct {
 	Tabs         []customTab          `json:"tabs,omitempty"`
 	InboxOrder   []string             `json:"inbox_order,omitempty"`
 	ActiveTab    int                  `json:"active_tab,omitempty"`
+	ActiveTabSet bool                 `json:"active_tab_set,omitempty"`
 	ActiveSort   int                  `json:"active_sort,omitempty"`
 	ActiveState  string               `json:"active_state,omitempty"`
 	ActiveQuery  string               `json:"active_query,omitempty"`
@@ -344,14 +345,22 @@ func viewNames(st *store) []string {
 	return names
 }
 
+// openTab restores the tab the captain left. A fresh store still opens
+// Inbox. Index 0 is both "unset" and Favorites, so Favorites sticks only
+// after a session has saved active_tab_set.
 func openTab(st *store) int {
 	vs := views(st)
+	inbox := 0
 	for i, v := range vs {
 		if v.Kind == "inbox" {
-			return i
+			inbox = i
+			break
 		}
 	}
-	return 0
+	if (st.ActiveTabSet || st.ActiveTab > 0) && st.ActiveTab >= 0 && st.ActiveTab < len(vs) {
+		return st.ActiveTab
+	}
+	return inbox
 }
 
 func saveStore(s *store) error {
@@ -2806,6 +2815,7 @@ func runPicker() int {
 	}
 	persistView := func(rows []row) {
 		st.ActiveTab = tab
+		st.ActiveTabSet = true
 		st.ActiveSort = sortMode
 		st.ActiveState = stateFilter
 		st.ActiveQuery = searchEd.String()
