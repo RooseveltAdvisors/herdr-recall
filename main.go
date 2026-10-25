@@ -348,6 +348,84 @@ func viewNames(st *store) []string {
 // openTab restores the tab the captain left. A fresh store still opens
 // Inbox. Index 0 is both "unset" and Favorites, so Favorites sticks only
 // after a session has saved active_tab_set.
+// tabJumpLetters maps a browse letter to a tab index. Fixed tabs keep
+// i, r, f, m, and a. A custom tab takes the first free letter of its name.
+func tabJumpLetters(st *store) map[string]int {
+	vs := views(st)
+	out := map[string]int{}
+	claim := func(letter string, idx int) {
+		if letter == "" {
+			return
+		}
+		if _, taken := out[letter]; taken {
+			return
+		}
+		out[letter] = idx
+	}
+	for i, v := range vs {
+		switch v.Kind {
+		case "inbox":
+			claim("i", i)
+		case "favorites":
+			claim("f", i)
+		case "all":
+			claim("a", i)
+		default:
+			name := strings.ToLower(viewName(st, v))
+			switch name {
+			case "recent":
+				claim("r", i)
+			case "most used":
+				claim("m", i)
+			default:
+				for _, r := range name {
+					if r < 'a' || r > 'z' {
+						continue
+					}
+					s := string(r)
+					if _, taken := out[s]; taken {
+						continue
+					}
+					claim(s, i)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+func registerGoChords(d *keys.Dispatcher, st *store) {
+	chords := map[string]string{"g": "goto-top"}
+	jumps := tabJumpLetters(st)
+	var hint []string
+	seen := map[string]bool{}
+	add := func(letter string) {
+		idx, ok := jumps[letter]
+		if !ok || seen[letter] {
+			return
+		}
+		seen[letter] = true
+		chords[letter] = fmt.Sprintf("goto:%d", idx)
+		hint = append(hint, letter+" "+viewName(st, views(st)[idx]))
+	}
+	for _, letter := range []string{"i", "r", "f", "m", "a"} {
+		add(letter)
+	}
+	var extra []string
+	for letter := range jumps {
+		if !seen[letter] {
+			extra = append(extra, letter)
+		}
+	}
+	sort.Strings(extra)
+	for _, letter := range extra {
+		add(letter)
+	}
+	hint = append(hint, "g top")
+	d.Register("g", chords, strings.Join(hint, "  "))
+}
+
 func openTab(st *store) int {
 	vs := views(st)
 	inbox := 0
@@ -1400,20 +1478,22 @@ func allHelpEntries() []helpEntry {
 	return []helpEntry{
 		{"enter", "focus / switch to selected pane directly"},
 		{"j / k / arrows", "move one row, or N rows with a count (e.g. 3j)"},
-		{"g / G", "jump to first / last row"},
+		{"gg / G", "jump to first / last row"},
+		{"g i / g r / g f / g m / g a", "jump to Inbox, Recent, Favorites, Most used, All"},
+		{"left / right", "switch tabs"},
 		{"ctrl-d / ctrl-u", "scroll half-page down / up"},
-		{"e", "mark done. Leaves current list. u undoes"},
-		{"u", "undo the last e, returning thread to queue"},
+		{"e", "mark done. Leaves current list. z undoes"},
+		{"z / u", "undo the last e, returning thread to queue"},
 		{"i", "teach Jev: prefer, demote, pick features, or type a rule"},
 		{"space", "in teach: toggle the highlighted feature chip"},
 		{"J", "Jev dashboard: inspect and delete learned weights, see preview"},
-		{"z", "snooze with typed time (3h, 2w, tomorrow, clear) and return rules"},
+		{"h", "remind with typed time (3h, 2w, tomorrow, clear) and return rules"},
 		{"n", "sticky note on selected thread, edited with vim keys"},
 		{"!", "toggle manual blocked override on selected thread"},
 		{"m", "mark or unmark favorite star (*)"},
 		{"b w i d a", "filter status: blocked, working, idle, done, all"},
 		{"/", "search tab names and sticky notes, with vim editing"},
-		{"h / l / arrows", "switch tabs (Inbox, Favorites, Recent, Most used, All)"},
+		{"left / right", "switch tabs. h and l do not"},
 		{"s", "on All and Favorites: cycle sort order"},
 		{"t c / t r / t x", "create, revise, or delete a custom tab"},
 		{"?", "open or close this searchable help overlay"},
@@ -2249,9 +2329,9 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	if fv.Focused {
 		emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "esc", "browse", "ctrl+c", "close"))
 	} else {
-		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "J", "jev", "z", "remind", "n", "note", "!", "block", "/", "search"))
+		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "J", "jev", "h", "remind", "n", "note", "!", "block", "/", "search"))
 	}
-	extra := "h/l tabs   m mark   u undo   b/w/i/d/a states   t c/r/x tab   ? help"
+	extra := "arrows tabs   g i/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
 	}
@@ -3645,14 +3725,35 @@ func runPicker() int {
 			}
 			continue
 		}
-		// Tab mutations live behind the shared chord dispatcher, the way vim
-		// gates structure behind : and tmux gates create behind prefix+c.
+		// Tab mutations and tab jumps live behind the shared chord dispatcher.
+		registerGoChords(tabKeys, st)
 		if a, r := tabKeys.Feed(key); r != keys.Pass {
 			if r == keys.Consumed {
-				if _, hint, ok := tabKeys.Pending(); ok {
-					status = "tab: " + hint
+				if p, hint, ok := tabKeys.Pending(); ok {
+					if p == "g" {
+						status = "go: " + hint
+					} else {
+						status = "tab: " + hint
+					}
 				} else {
 					status = ""
+				}
+				continue
+			}
+			if a.Name == "goto-top" {
+				sel = 0
+				status = ""
+				continue
+			}
+			if idx, ok := strings.CutPrefix(a.Name, "goto:"); ok {
+				n, err := strconv.Atoi(idx)
+				vs := views(st)
+				if err == nil && n >= 0 && n < len(vs) {
+					tab = n
+					sel = 0
+					scrollOffset = 0
+					status = viewName(st, vs[n])
+					rebuild()
 				}
 				continue
 			}
@@ -3753,12 +3854,12 @@ func runPicker() int {
 			jevScrollOffset = 0
 			jevTyping = false
 			jevEd = vimline.New("")
-		case (key == "left" || key == "right" || (key == "h" || key == "l") && !searching) && !showHelp:
+		case (key == "left" || key == "right") && !searching && !showHelp:
 			nTabs := len(views(st))
 			if nTabs < 1 {
 				nTabs = 1
 			}
-			if key == "left" || key == "h" {
+			if key == "left" {
 				tab = (tab + nTabs - 1) % nTabs
 			} else {
 				tab = (tab + 1) % nTabs
@@ -3815,7 +3916,7 @@ func runPicker() int {
 					st.jevLearn(r, rows[:sel])
 				}
 				lastDoneID = r.PaneID
-				status = "done: " + r.Label + " (u undo)"
+				status = "done: " + r.Label + " (z undo)"
 			} else {
 				ps.Done = false
 				lastDoneID = ""
@@ -3824,9 +3925,8 @@ func runPicker() int {
 			}
 			_ = saveStore(st)
 			rebuild()
-		case key == "u" && !searching && !showHelp:
-			// Undo the last e, the way vim's u undoes the last change. The
-			// row returns to the list it left.
+		case (key == "z" || key == "u") && !searching && !showHelp:
+			// z is undo. u stays as the vim alias.
 			if lastDoneID == "" {
 				break
 			}
@@ -3839,7 +3939,7 @@ func runPicker() int {
 				_ = saveStore(st)
 				rebuild()
 			}
-		case key == "z" && !searching && !showHelp:
+		case key == "h" && !searching && !showHelp:
 			if len(rows) == 0 {
 				break
 			}

@@ -52,6 +52,27 @@ func TestEDrainsInboxOnly(t *testing.T) {
 	}
 }
 
+func TestTabJumpLetters(t *testing.T) {
+	st := &store{Version: 1, TabsInit: true, Tabs: append(defaultTabs(), customTab{Name: "Infra"})}
+	got := tabJumpLetters(st)
+	name := func(letter string) string {
+		idx, ok := got[letter]
+		if !ok {
+			t.Fatalf("missing letter %s in %v", letter, got)
+		}
+		return viewName(st, views(st)[idx])
+	}
+	if name("i") != "Inbox" || name("r") != "Recent" || name("f") != "Favorites" || name("m") != "Most used" || name("a") != "All" {
+		t.Fatalf("fixed tabs = %v", got)
+	}
+	if name("n") != "Infra" {
+		t.Fatalf("custom letter = %s, want Infra", name("n"))
+	}
+	if _, stolen := got["i"]; !stolen || name("i") != "Inbox" {
+		t.Fatal("custom tab stole i")
+	}
+}
+
 func TestOpenTabRestoresSavedTab(t *testing.T) {
 	st := &store{Version: 1, TabsInit: true, Tabs: defaultTabs()}
 	// Live store: active_tab 2 is Recent. Reopen must not force Inbox.

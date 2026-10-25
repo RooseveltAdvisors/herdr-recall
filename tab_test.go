@@ -123,7 +123,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 	if strings.Contains(plain, "[sort:") {
 		t.Fatalf("inbox should not show a sort pill:\n%s", plain)
 	}
-	for _, want := range []string{"! idle", "● vendor-reply", "waiting on db migration", "e done", "z remind", "n note"} {
+	for _, want := range []string{"! idle", "● vendor-reply", "waiting on db migration", "e done", "h remind", "n note"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("inbox frame missing %q:\n%s", want, plain)
 		}

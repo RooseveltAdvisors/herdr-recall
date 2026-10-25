@@ -231,9 +231,9 @@ func TestHelpEntriesSearchableAndJInFooter(t *testing.T) {
 		{"teach", "i"},
 		{"enter", "enter"},
 		{"ctrl-d", "ctrl-d / ctrl-u"},
-		{"snooze", "z"},
+		{"remind", "h"},
 		{"note", "n"},
-		{"undo", "u"},
+		{"undo", "z"},
 		{"filter", "b w i d a"},
 	}
 

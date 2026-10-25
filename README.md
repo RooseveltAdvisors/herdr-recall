@@ -16,13 +16,13 @@ Done is not mute: any new agent activity brings the thread back to `Inbox`.
 The row leaves the list you are looking at, on every tab, the way Superhuman
 archives out of whatever view you are triaging. On the reference tabs the
 limit is applied after done rows are hidden, so a limit of 50 always shows 50
-live rows instead of losing slots to hidden ones. `u` undoes the last `e` and
+live rows instead of losing slots to hidden ones. `z` undoes the last `e` and
 the row returns to the top of the list. A thread also returns on its own when
 its agent does something new. A snoozed row is different: it keeps its `~`
 badge and stays visible until the reminder is due.
 Viewing a pane is you reading, not the agent moving, so it never returns a thread and never moves the pinned queue.
 Press `e` again on that row to undo.
-Press `z` to snooze a thread (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`).
+Press `h` to snooze a thread (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`).
 The snooze carries a return rule: `If no reply` breaks early on new agent activity, `Regardless` keeps the timer.
 Press `n` to leave a one-line sticky note beside the tab name.
 Press `!` to toggle a manual `blocked` override when a thread is waiting on something outside Herdr's detector.
@@ -33,12 +33,14 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | --- | ------ |
 | `prefix+k` | open the recall and triage popup |
 | `j` / `k` / `↑` / `↓` | move one row, or N rows with a count such as `3j` |
-| `g` / `G` | jump to the first / last row |
+| `gg` / `G` | jump to the first / last row |
+| `g` then `i` / `r` / `f` / `m` / `a` | jump to Inbox, Recent, Favorites, Most used, All |
+| `←` / `→` | switch tabs. `h` and `l` do not |
 | `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
-| `h` / `l` / `←` / `→` | switch tabs (`Favorites`, `Inbox`, `Recent`, `Most used`, `All`) |
 | `enter` | focus the selected pane directly via Herdr socket |
-| `e` | mark done. The row leaves the current list. `u` undoes |
-| `z` | snooze with a typed time (`3h`, `2w`, `1d12h`, `tomorrow`, `clear`) and a return rule: `If no reply` (default) or `Regardless` |
+| `e` | mark done. The row leaves the current list. `z` undoes |
+| `h` | snooze with a typed time (`3h`, `2w`, `1d12h`, `tomorrow`, `clear`) and a return rule: `If no reply` (default) or `Regardless` |
+| `z` | undo the last `e`. `u` does the same |
 | `n` | set or edit a sticky note on the selected thread |
 | `!` | toggle manual `blocked` override on the selected thread |
 | `m` | mark or unmark the selected thread as a favorite (`*`) |
