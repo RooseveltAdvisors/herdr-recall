@@ -20,6 +20,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -281,7 +283,67 @@ func configDir() string {
 
 func statePath() string { return filepath.Join(configDir(), "recall.json") }
 
+// lastStoreStamp is the modtime (Unix nanoseconds) of recall.json the last
+// time this process loaded or saved it. A long-lived picker compares it before
+// touching shared state so a concurrent hook or CLI write is never overwritten
+// by a stale copy.
+var lastStoreStamp atomic.Int64
+
+func stampStore() {
+	if fi, err := os.Stat(statePath()); err == nil {
+		lastStoreStamp.Store(fi.ModTime().UnixNano())
+	}
+}
+
+// refreshStore adopts on-disk writes made by hook or CLI processes since this
+// process last loaded or saved recall.json. It reloads only when the file
+// changed, so rows stay frozen while no other writer ran.
+func refreshStore(st *store) *store {
+	fi, err := os.Stat(statePath())
+	if err != nil || fi.ModTime().UnixNano() == lastStoreStamp.Load() {
+		return st
+	}
+	return loadStore()
+}
+
+// storeLock serializes read-modify-write cycles on recall.json across the
+// long-lived picker and the short-lived hook and CLI processes. Without it the
+// last full-file write wins and erases concurrent visits, un-done threads, and
+// prune results.
+type storeLock struct{ f *os.File }
+
+func lockPath() string { return filepath.Join(configDir(), "recall.lock") }
+
+func (l *storeLock) acquire() error {
+	if l.f != nil {
+		return nil
+	}
+	if err := os.MkdirAll(configDir(), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return err
+	}
+	l.f = f
+	return nil
+}
+
+func (l *storeLock) release() {
+	if l.f == nil {
+		return
+	}
+	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
+	_ = l.f.Close()
+	l.f = nil
+}
+
 func loadStore() *store {
+	defer stampStore()
 	s := &store{Version: 1, Panes: map[string]*paneStat{}}
 	b, err := os.ReadFile(statePath())
 	if err != nil {
@@ -466,7 +528,11 @@ func saveStore(s *store) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, statePath())
+	if err := os.Rename(tmp, statePath()); err != nil {
+		return err
+	}
+	stampStore()
+	return nil
 }
 
 // prune drops history for panes that are closed. A live pane keeps its triage
@@ -543,6 +609,11 @@ func recordFocus() (string, error) {
 		return "", fmt.Errorf("no focused pane in snapshot")
 	}
 	label := paneLabel(snap, id)
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		return "", err
+	}
+	defer lk.release()
 	st := loadStore()
 	now := time.Now().Unix()
 	ps := st.ensurePane(id)
@@ -2954,6 +3025,11 @@ func runPicker() int {
 	tty.WriteString("\x1b[?25l")
 
 	st := loadStore()
+	// Recall state is shared with hook and CLI processes. Hold the store lock
+	// while mutating and reload when another writer changed the file, so a
+	// picker save can never erase a concurrent visit, un-done thread, or prune.
+	lk := &storeLock{}
+	defer lk.release()
 	searchEd := vimline.New(st.ActiveQuery)
 	sel := 0
 	status := ""
@@ -3033,6 +3109,19 @@ func runPicker() int {
 		allRows = rowsFor(frozen, st, vs[tab], sortMode)
 	}
 	rebuild()
+	// resync adopts another writer's on-disk update before this event is
+	// handled, keeping the row the captain is pointing at selected by pane ID.
+	resync := func() {
+		if lk.acquire() != nil {
+			return
+		}
+		fresh := refreshStore(st)
+		if fresh == st {
+			return
+		}
+		st = fresh
+		rebuild()
+	}
 	if st.ActivePaneID != "" {
 		cur := filterByState(allRows, stateFilter)
 		if q := strings.TrimSpace(searchEd.String()); q != "" {
@@ -3325,6 +3414,7 @@ func runPicker() int {
 	}
 
 	for {
+		resync()
 		rows := filterByState(allRows, stateFilter)
 		if q := strings.TrimSpace(searchEd.String()); q != "" {
 			rows = filterRows(rows, q)
@@ -3395,6 +3485,9 @@ func runPicker() int {
 			frame = renderFrame(rows, sel, scrollOffset, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
 		tty.WriteString(frame)
+		// The lock is dropped while waiting for input so hooks never stall
+		// behind an idle picker, and re-taken before the next mutation.
+		lk.release()
 
 		var key string
 		if ed := activeEd(); ed != nil && ed.PendingJ() {
@@ -3417,10 +3510,12 @@ func runPicker() int {
 				}
 				key = k
 			case sc := <-jevCh:
+				resync()
 				applyJev(sc)
 				continue
 			}
 		}
+		resync()
 		if key == "" {
 			continue
 		}
@@ -4350,6 +4445,12 @@ func main() {
 		if len(os.Args) < 3 {
 			os.Exit(2)
 		}
+		lk := &storeLock{}
+		if err := lk.acquire(); err != nil {
+			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+			os.Exit(1)
+		}
+		defer lk.release()
 		st := loadStore()
 		added := st.toggleFavorite(os.Args[2])
 		if err := saveStore(st); err != nil {
@@ -4375,6 +4476,11 @@ func main() {
 		}
 		switch os.Args[2] {
 		case "reset":
+			lk := &storeLock{}
+			if err := lk.acquire(); err == nil {
+				defer lk.release()
+				st = loadStore()
+			}
 			if len(os.Args) > 3 {
 				// reset one feature
 				st.ensureJev()
