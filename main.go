@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -266,7 +267,17 @@ type view struct {
 	Idx  int
 }
 
+var (
+	configDirOnce sync.Once
+	configDirVal  string
+)
+
 func configDir() string {
+	configDirOnce.Do(func() { configDirVal = resolveConfigDir() })
+	return configDirVal
+}
+
+func resolveConfigDir() string {
 	if v := os.Getenv("HERDR_PLUGIN_CONFIG_DIR"); v != "" {
 		return v
 	}
@@ -360,13 +371,16 @@ func (l *storeLock) release() {
 
 func (l *storeLock) held() bool { return l.f != nil }
 
-func loadStore() *store {
+func loadStore() (*store, error) {
 	b, err := os.ReadFile(statePath())
 	if err != nil {
-		return &store{Version: 1, Panes: map[string]*paneStat{}}
+		if os.IsNotExist(err) {
+			return &store{Version: 1, Panes: map[string]*paneStat{}}, nil
+		}
+		return nil, err
 	}
 	stampStore(b)
-	return parseStore(b)
+	return parseStore(b), nil
 }
 
 func parseStore(b []byte) *store {
@@ -634,7 +648,10 @@ func recordFocus() (string, error) {
 		return "", err
 	}
 	defer lk.release()
-	st := loadStore()
+	st, err := loadStore()
+	if err != nil {
+		return "", err
+	}
 	now := time.Now().Unix()
 	ps := st.ensurePane(id)
 	ps.Visits++
@@ -3069,7 +3086,11 @@ func runPicker() int {
 	// for the whole session. It cannot drift and the frame is screenshot-exact.
 	tty.WriteString("\x1b[?25l")
 
-	st := loadStore()
+	st, err := loadStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+		return 1
+	}
 	// Recall state is shared with hook and CLI processes. Hold the store lock
 	// while mutating and reload when another writer changed the file, so a
 	// picker save can never erase a concurrent visit, un-done thread, or prune.
@@ -4412,7 +4433,11 @@ func openPicker() int {
 }
 
 func renderOnce() int {
-	st := loadStore()
+	st, err := loadStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+		return 1
+	}
 	snap, err := loadSnapshot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "recall: snapshot: %v\n", err)
@@ -4486,7 +4511,12 @@ func main() {
 			os.Exit(1)
 		}
 	case "stats":
-		b, _ := json.MarshalIndent(loadStore(), "", "  ")
+		st, err := loadStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(st, "", "  ")
 		fmt.Println(string(b))
 	case "favorite":
 		if len(os.Args) < 3 {
@@ -4498,7 +4528,11 @@ func main() {
 			os.Exit(1)
 		}
 		defer lk.release()
-		st := loadStore()
+		st, err := loadStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+			os.Exit(1)
+		}
 		added := st.toggleFavorite(os.Args[2])
 		if err := saveStore(st); err != nil {
 			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
@@ -4510,7 +4544,11 @@ func main() {
 			fmt.Println("favorite removed")
 		}
 	case "jev":
-		st := loadStore()
+		st, err := loadStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+			os.Exit(1)
+		}
 		if len(os.Args) < 3 {
 			// list
 			for _, w := range sortedJevWeights(st) {
@@ -4529,7 +4567,11 @@ func main() {
 				os.Exit(1)
 			}
 			defer lk.release()
-			st = loadStore()
+			st, err = loadStore()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+				os.Exit(1)
+			}
 			feature := ""
 			if len(os.Args) > 3 {
 				feature = os.Args[3]

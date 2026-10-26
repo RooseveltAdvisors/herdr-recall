@@ -10,11 +10,21 @@ import (
 	"time"
 )
 
+func mustLoad(t *testing.T) *store {
+	t.Helper()
+	s, err := loadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 // useTempConfig isolates recall state in a temp dir and resets the process
 // fingerprint, so tests never touch the live plugin config directory.
 func useTempConfig(t *testing.T) {
 	t.Helper()
 	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	configDirOnce = sync.Once{}
 	lastStoreFP.Store("")
 }
 
@@ -33,12 +43,12 @@ func writeStoreDirect(t *testing.T, s *store) {
 
 func TestRefreshStoreKeepsStoreWhenNoExternalWrite(t *testing.T) {
 	useTempConfig(t)
-	st := loadStore()
+	st := mustLoad(t)
 	st.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
 	if err := saveStore(st); err != nil {
 		t.Fatal(err)
 	}
-	held := loadStore()
+	held := mustLoad(t)
 	if fresh := refreshStore(held); fresh != held {
 		t.Fatal("refresh with no external write must keep the in-memory store")
 	}
@@ -46,14 +56,14 @@ func TestRefreshStoreKeepsStoreWhenNoExternalWrite(t *testing.T) {
 
 func TestRefreshStoreAdoptsExternalWrites(t *testing.T) {
 	useTempConfig(t)
-	st := loadStore()
+	st := mustLoad(t)
 	st.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
 	if err := saveStore(st); err != nil {
 		t.Fatal(err)
 	}
-	held := loadStore() // the picker's long-lived in-memory store
+	held := mustLoad(t) // the picker's long-lived in-memory store
 
-	ext := loadStore()
+	ext := mustLoad(t)
 	ext.Panes["w1:p1"].Visits++
 	ext.Panes["w2:p9"] = &paneStat{Visits: 3, Last: 123, Label: "hook"}
 	writeStoreDirect(t, ext)
@@ -76,18 +86,18 @@ func TestRefreshStoreAdoptsExternalWrites(t *testing.T) {
 // picker's save.
 func TestStalePickerSaveCannotClobberHookWrite(t *testing.T) {
 	useTempConfig(t)
-	seed := loadStore()
+	seed := mustLoad(t)
 	for i := 0; i < 250; i++ {
 		seed.Panes["dead:"+string(rune(i))] = &paneStat{Label: "dead"}
 	}
 	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
-	pickerStore := loadStore() // picker opens
+	pickerStore := mustLoad(t) // picker opens
 
 	// A hook fires while the picker is open: records a visit and prunes.
 	live := map[string]bool{"w1:p23": true}
-	hook := loadStore()
+	hook := mustLoad(t)
 	hp := hook.ensurePane("w1:p23")
 	hp.Visits++
 	hp.Last = time.Now().Unix()
@@ -109,7 +119,7 @@ func TestStalePickerSaveCannotClobberHookWrite(t *testing.T) {
 	}
 	lk.release()
 
-	final := loadStore()
+	final := mustLoad(t)
 	if !final.Panes["w1:p7S"].Done {
 		t.Fatal("picker mutation lost")
 	}
@@ -131,19 +141,19 @@ func TestStalePickerSaveCannotClobberHookWrite(t *testing.T) {
 // external write that reuses the previous modtime must still be picked up.
 func TestRefreshStoreAdoptsWriteWithSameMtime(t *testing.T) {
 	useTempConfig(t)
-	st := loadStore()
+	st := mustLoad(t)
 	st.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
 	if err := saveStore(st); err != nil {
 		t.Fatal(err)
 	}
-	held := loadStore()
+	held := mustLoad(t)
 	fi, err := os.Stat(statePath())
 	if err != nil {
 		t.Fatal(err)
 	}
 	same := fi.ModTime()
 
-	ext := loadStore()
+	ext := mustLoad(t)
 	ext.Panes["w1:p1"].Visits++
 	writeStoreDirect(t, ext)
 	if err := os.Chtimes(statePath(), same, same); err != nil {
@@ -164,13 +174,13 @@ func TestRefreshStoreAdoptsWriteWithSameMtime(t *testing.T) {
 // store survives and no empty store is saved over the real one.
 func TestRefreshStoreKeepsStoreWhenStateUnreadable(t *testing.T) {
 	useTempConfig(t)
-	st := loadStore()
+	st := mustLoad(t)
 	st.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
 	st.Favorites = []string{"w1:p1"}
 	if err := saveStore(st); err != nil {
 		t.Fatal(err)
 	}
-	held := loadStore()
+	held := mustLoad(t)
 
 	if err := os.Remove(statePath()); err != nil {
 		t.Fatal(err)
@@ -192,7 +202,7 @@ func TestRefreshStoreKeepsStoreWhenStateUnreadable(t *testing.T) {
 	if err := saveStore(fresh); err != nil {
 		t.Fatal(err)
 	}
-	final := loadStore()
+	final := mustLoad(t)
 	if final.Panes["w1:p1"] == nil || len(final.Favorites) != 1 {
 		t.Fatalf("an empty store was saved over the real one: %+v", final)
 	}
@@ -203,7 +213,7 @@ func TestRefreshStoreKeepsStoreWhenStateUnreadable(t *testing.T) {
 // the applied keypress must still target B's pane ID.
 func TestResyncKeepsSelectionOnSamePane(t *testing.T) {
 	useTempConfig(t)
-	st := loadStore()
+	st := mustLoad(t)
 	st.Panes["w1:pA"] = &paneStat{Label: "A", Last: 300}
 	st.Panes["w1:pB"] = &paneStat{Label: "B", Last: 200}
 	st.Panes["w1:pC"] = &paneStat{Label: "C", Last: 100}
@@ -213,14 +223,14 @@ func TestResyncKeepsSelectionOnSamePane(t *testing.T) {
 	frozen := &snapshot{Panes: []paneRec{
 		{PaneID: "w1:pA"}, {PaneID: "w1:pB"}, {PaneID: "w1:pC"},
 	}}
-	held := loadStore()
+	held := mustLoad(t)
 	rows := rowsFor(frozen, held, view{Kind: "all"}, sortDefault)
 	if len(rows) != 3 || rows[0].PaneID != "w1:pA" || rows[1].PaneID != "w1:pB" || rows[2].PaneID != "w1:pC" {
 		t.Fatalf("setup order = %v, want [A B C]", rows)
 	}
 	sel := 1 // the cursor sits on B
 
-	ext := loadStore()
+	ext := mustLoad(t)
 	ext.Panes["w1:pC"].Last = 400
 	writeStoreDirect(t, ext)
 
@@ -249,7 +259,7 @@ func TestResyncKeepsSelectionOnSamePane(t *testing.T) {
 // before the first frame's resync. The selection must still name B.
 func TestFirstResyncKeepsRestoreAnchor(t *testing.T) {
 	useTempConfig(t)
-	st := loadStore()
+	st := mustLoad(t)
 	st.Panes["w1:pA"] = &paneStat{Label: "A", Last: 300}
 	st.Panes["w1:pB"] = &paneStat{Label: "B", Last: 200}
 	st.Panes["w1:pC"] = &paneStat{Label: "C", Last: 100}
@@ -261,14 +271,14 @@ func TestFirstResyncKeepsRestoreAnchor(t *testing.T) {
 		{PaneID: "w1:pA"}, {PaneID: "w1:pB"}, {PaneID: "w1:pC"},
 	}}
 
-	held := loadStore()
+	held := mustLoad(t)
 	rows := rowsFor(frozen, held, view{Kind: "all"}, sortDefault)
 	sel := pinSel(rows, 0, held.ActivePaneID)
 	if rows[sel].PaneID != "w1:pB" {
 		t.Fatalf("restore pinned %q, want %q", rows[sel].PaneID, "w1:pB")
 	}
 
-	ext := loadStore()
+	ext := mustLoad(t)
 	ext.Panes["w1:pC"].Last = 400
 	writeStoreDirect(t, ext)
 
@@ -295,7 +305,7 @@ func TestFirstResyncKeepsRestoreAnchor(t *testing.T) {
 // leave recall.json byte-identical instead of writing unlocked.
 func TestCLIWriterRefusesWriteWithoutLock(t *testing.T) {
 	useTempConfig(t)
-	seed := loadStore()
+	seed := mustLoad(t)
 	seed.TabsInit = true
 	seed.ensureJev()
 	seed.Jev.Weights = map[string]float64{"label:docs": 0.5}
@@ -329,7 +339,7 @@ func TestCLIWriterRefusesWriteWithoutLock(t *testing.T) {
 // that now fails closed.
 func TestJevResetClearsLearnings(t *testing.T) {
 	useTempConfig(t)
-	seed := loadStore()
+	seed := mustLoad(t)
 	seed.TabsInit = true
 	seed.ensureJev()
 	seed.Jev.Weights = map[string]float64{"label:docs": 0.5}
@@ -339,8 +349,54 @@ func TestJevResetClearsLearnings(t *testing.T) {
 	if out, err := exec.Command("go", "run", ".", "jev", "reset").CombinedOutput(); err != nil {
 		t.Fatalf("jev reset: %v: %s", err, out)
 	}
-	if got := loadStore(); got.Jev == nil || len(got.Jev.Weights) != 0 {
+	if got := mustLoad(t); got.Jev == nil || len(got.Jev.Weights) != 0 {
 		t.Fatalf("learnings not cleared: %+v", got.Jev)
+	}
+}
+
+// TestWritersRefuseToPersistOnReadError is the empty-on-read-error
+// regression: a state file that is present but unreadable must never be
+// erased by a writer that would adopt an empty store.
+func TestWritersRefuseToPersistOnReadError(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	seed.Favorites = []string{"w1:p1"}
+	seed.ensureJev()
+	seed.Jev.Weights = map[string]float64{"label:docs": 0.5}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(statePath(), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(statePath(), 0o600)
+	if _, err := os.ReadFile(statePath()); err == nil {
+		t.Skip("cannot make the state file unreadable")
+	}
+	if st, err := loadStore(); err == nil {
+		t.Fatalf("loadStore adopted a store on a read error: %+v", st)
+	}
+	for _, args := range [][]string{{"favorite", "w1:p2"}, {"jev", "reset"}} {
+		argv := append([]string{"run", "."}, args...)
+		if out, err := exec.Command("go", argv...).CombinedOutput(); err == nil {
+			t.Fatalf("%v wrote despite the unreadable state file: %s", args, out)
+		}
+	}
+	if err := os.Chmod(statePath(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("a writer erased recall.json after a read error")
 	}
 }
 
@@ -348,7 +404,7 @@ func TestJevResetClearsLearnings(t *testing.T) {
 // read-modify-write cycles under the lock must not lose an update.
 func TestStoreLockSerializesConcurrentWriters(t *testing.T) {
 	useTempConfig(t)
-	if err := saveStore(loadStore()); err != nil {
+	if err := saveStore(mustLoad(t)); err != nil {
 		t.Fatal(err)
 	}
 	const writers = 32
@@ -363,7 +419,11 @@ func TestStoreLockSerializesConcurrentWriters(t *testing.T) {
 				return
 			}
 			defer lk.release()
-			s := loadStore()
+			s, err := loadStore()
+			if err != nil {
+				t.Error(err)
+				return
+			}
 			s.ensurePane("w1:p1").Visits++
 			if err := saveStore(s); err != nil {
 				t.Error(err)
@@ -371,7 +431,7 @@ func TestStoreLockSerializesConcurrentWriters(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if got := loadStore().Panes["w1:p1"].Visits; got != writers {
+	if got := mustLoad(t).Panes["w1:p1"].Visits; got != writers {
 		t.Fatalf("lost updates under concurrency: visits=%d, want %d", got, writers)
 	}
 }
