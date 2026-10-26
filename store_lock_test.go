@@ -26,6 +26,7 @@ func useTempConfig(t *testing.T) {
 	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
 	configDirOnce = sync.Once{}
 	lastStoreFP.Store("")
+	loadFailed.Store(false)
 }
 
 // writeStoreDirect simulates a write from another process: it replaces the
@@ -199,12 +200,61 @@ func TestRefreshStoreKeepsStoreWhenStateUnreadable(t *testing.T) {
 	if err := os.Remove(statePath()); err != nil {
 		t.Fatal(err)
 	}
+	if got := refreshStore(fresh); got != fresh {
+		t.Fatal("refresh must keep the in-memory store when the state file is gone")
+	}
 	if err := saveStore(fresh); err != nil {
 		t.Fatal(err)
 	}
 	final := mustLoad(t)
 	if final.Panes["w1:p1"] == nil || len(final.Favorites) != 1 {
 		t.Fatalf("an empty store was saved over the real one: %+v", final)
+	}
+}
+
+// TestPickerDoesNotPersistAfterFailedRefresh is the fail-closed regression on
+// the picker writer path: a mid-session refresh that hits a real read error
+// must stop the picker from persisting a stale store over a concurrent hook
+// write.
+func TestPickerDoesNotPersistAfterFailedRefresh(t *testing.T) {
+	useTempConfig(t)
+	st := mustLoad(t)
+	st.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(st); err != nil {
+		t.Fatal(err)
+	}
+	picker := mustLoad(t)
+
+	hook := mustLoad(t)
+	hook.Panes["w1:p1"].Visits++
+	hook.Panes["w1:p9"] = &paneStat{Visits: 3, Last: 123, Label: "hook"}
+	writeStoreDirect(t, hook)
+
+	if err := os.Chmod(statePath(), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(statePath(), 0o600)
+	if _, err := os.ReadFile(statePath()); err == nil {
+		t.Skip("cannot make the state file unreadable")
+	}
+	if got := refreshStore(picker); got != picker {
+		t.Fatal("refresh must keep the in-memory store on a read error")
+	}
+
+	picker.ActiveQuery = "typed"
+	if err := saveStore(picker); err == nil {
+		t.Fatal("the picker persisted a stale store after a failed refresh")
+	}
+
+	if err := os.Chmod(statePath(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	final := mustLoad(t)
+	if final.Panes["w1:p1"] == nil || final.Panes["w1:p1"].Visits != 2 {
+		t.Fatalf("hook visit erased: %+v", final.Panes["w1:p1"])
+	}
+	if final.Panes["w1:p9"] == nil {
+		t.Fatal("hook pane erased")
 	}
 }
 

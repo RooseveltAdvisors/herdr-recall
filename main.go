@@ -9,6 +9,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 
 	"fmt"
 	"github.com/RooseveltAdvisors/vimline"
@@ -302,6 +303,11 @@ func statePath() string { return filepath.Join(configDir(), "recall.json") }
 // modtime is still adopted.
 var lastStoreFP atomic.Value // string
 
+// loadFailed records that the last read of recall.json hit a real error, so
+// the in-memory store is unproven against disk and must not be written back
+// over whatever is there.
+var loadFailed atomic.Bool
+
 func hashStore(b []byte) string {
 	sum := sha256.Sum256(b)
 	return string(sum[:])
@@ -324,8 +330,10 @@ func currentFP() string {
 func refreshStore(st *store) *store {
 	b, err := os.ReadFile(statePath())
 	if err != nil {
+		loadFailed.Store(!os.IsNotExist(err))
 		return st
 	}
+	loadFailed.Store(false)
 	if hashStore(b) == currentFP() {
 		return st
 	}
@@ -374,11 +382,13 @@ func (l *storeLock) held() bool { return l.f != nil }
 func loadStore() (*store, error) {
 	b, err := os.ReadFile(statePath())
 	if err != nil {
+		loadFailed.Store(!os.IsNotExist(err))
 		if os.IsNotExist(err) {
 			return &store{Version: 1, Panes: map[string]*paneStat{}}, nil
 		}
 		return nil, err
 	}
+	loadFailed.Store(false)
 	stampStore(b)
 	return parseStore(b), nil
 }
@@ -550,6 +560,9 @@ func openTab(st *store) int {
 }
 
 func saveStore(s *store) error {
+	if loadFailed.Load() {
+		return errors.New("recall.json unreadable")
+	}
 	dir := configDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
