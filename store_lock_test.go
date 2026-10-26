@@ -159,6 +159,45 @@ func TestRefreshStoreAdoptsWriteWithSameMtime(t *testing.T) {
 	}
 }
 
+// TestRefreshStoreKeepsStoreWhenStateUnreadable pins the empty-on-error
+// regression: when the state file cannot be read mid-session, the in-memory
+// store survives and no empty store is saved over the real one.
+func TestRefreshStoreKeepsStoreWhenStateUnreadable(t *testing.T) {
+	useTempConfig(t)
+	st := loadStore()
+	st.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	st.Favorites = []string{"w1:p1"}
+	if err := saveStore(st); err != nil {
+		t.Fatal(err)
+	}
+	held := loadStore()
+
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fresh := refreshStore(held)
+	if fresh != held {
+		t.Fatal("refresh must keep the in-memory store when the state file cannot be read")
+	}
+	if fresh.Panes["w1:p1"] == nil || fresh.Panes["w1:p1"].Visits != 1 {
+		t.Fatalf("in-memory store lost: %+v", fresh.Panes)
+	}
+
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveStore(fresh); err != nil {
+		t.Fatal(err)
+	}
+	final := loadStore()
+	if final.Panes["w1:p1"] == nil || len(final.Favorites) != 1 {
+		t.Fatalf("an empty store was saved over the real one: %+v", final)
+	}
+}
+
 // TestResyncKeepsSelectionOnSamePane is the wrong-pane regression: rows
 // [A,B,C] with the cursor on B, an external write re-sorts to [C,A,B], and
 // the applied keypress must still target B's pane ID.
@@ -198,10 +237,56 @@ func TestResyncKeepsSelectionOnSamePane(t *testing.T) {
 	if len(next) != 3 || next[0].PaneID != "w1:pC" || next[1].PaneID != "w1:pA" || next[2].PaneID != "w1:pB" {
 		t.Fatalf("external resort = %v, want [C A B]", next)
 	}
-	sel = anchorSel(rows, next, sel)
+	sel = anchorSel(rows, next, sel, held.ActivePaneID)
 	target := next[sel].PaneID
 	if target != rows[1].PaneID || target != "w1:pB" {
 		t.Fatalf("key press targeted %q, want %q", target, "w1:pB")
+	}
+}
+
+// TestFirstResyncKeepsRestoreAnchor models the startup window: the picker
+// opens on ActivePaneID=B in [A,B,C] and a hook write re-sorts to [C,A,B]
+// before the first frame's resync. The selection must still name B.
+func TestFirstResyncKeepsRestoreAnchor(t *testing.T) {
+	useTempConfig(t)
+	st := loadStore()
+	st.Panes["w1:pA"] = &paneStat{Label: "A", Last: 300}
+	st.Panes["w1:pB"] = &paneStat{Label: "B", Last: 200}
+	st.Panes["w1:pC"] = &paneStat{Label: "C", Last: 100}
+	st.ActivePaneID = "w1:pB"
+	if err := saveStore(st); err != nil {
+		t.Fatal(err)
+	}
+	frozen := &snapshot{Panes: []paneRec{
+		{PaneID: "w1:pA"}, {PaneID: "w1:pB"}, {PaneID: "w1:pC"},
+	}}
+
+	held := loadStore()
+	rows := rowsFor(frozen, held, view{Kind: "all"}, sortDefault)
+	sel := pinSel(rows, 0, held.ActivePaneID)
+	if rows[sel].PaneID != "w1:pB" {
+		t.Fatalf("restore pinned %q, want %q", rows[sel].PaneID, "w1:pB")
+	}
+
+	ext := loadStore()
+	ext.Panes["w1:pC"].Last = 400
+	writeStoreDirect(t, ext)
+
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	fresh := refreshStore(held)
+	if fresh == held {
+		t.Fatal("resync must adopt the external write")
+	}
+	next := rowsFor(frozen, fresh, view{Kind: "all"}, sortDefault)
+	if len(next) != 3 || next[0].PaneID != "w1:pC" || next[1].PaneID != "w1:pA" || next[2].PaneID != "w1:pB" {
+		t.Fatalf("external resort = %v, want [C A B]", next)
+	}
+	if got := anchorSel(nil, next, sel, fresh.ActivePaneID); next[got].PaneID != "w1:pB" {
+		t.Fatalf("first resync moved the selection to %q, want %q", next[got].PaneID, "w1:pB")
 	}
 }
 

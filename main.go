@@ -313,12 +313,13 @@ func currentFP() string {
 func refreshStore(st *store) *store {
 	b, err := os.ReadFile(statePath())
 	if err != nil {
-		b = nil
+		return st
 	}
 	if hashStore(b) == currentFP() {
 		return st
 	}
-	return loadStore()
+	stampStore(b)
+	return parseStore(b)
 }
 
 // storeLock serializes read-modify-write cycles on recall.json across the
@@ -360,13 +361,16 @@ func (l *storeLock) release() {
 func (l *storeLock) held() bool { return l.f != nil }
 
 func loadStore() *store {
-	s := &store{Version: 1, Panes: map[string]*paneStat{}}
 	b, err := os.ReadFile(statePath())
 	if err != nil {
-		stampStore(nil)
-		return s
+		return &store{Version: 1, Panes: map[string]*paneStat{}}
 	}
 	stampStore(b)
+	return parseStore(b)
+}
+
+func parseStore(b []byte) *store {
+	s := &store{Version: 1, Panes: map[string]*paneStat{}}
 	if err := json.Unmarshal(b, s); err != nil || s.Panes == nil {
 		s = &store{Version: 1, Panes: map[string]*paneStat{}}
 	}
@@ -2179,23 +2183,30 @@ func filterRows(rows []row, query string) []row {
 	return out
 }
 
-// anchorSel returns the index in next of the pane the cursor holds in cur.
-func anchorSel(cur, next []row, sel int) int {
-	if sel >= 0 && sel < len(cur) {
-		id := cur[sel].PaneID
-		for i, r := range next {
-			if r.PaneID == id {
-				return i
-			}
+// pinSel returns the index of paneID in rows, or sel clamped into rows.
+func pinSel(rows []row, sel int, paneID string) int {
+	for i, r := range rows {
+		if r.PaneID == paneID {
+			return i
 		}
 	}
-	if sel >= len(next) {
-		sel = len(next) - 1
+	if sel >= len(rows) {
+		sel = len(rows) - 1
 	}
 	if sel < 0 {
 		sel = 0
 	}
 	return sel
+}
+
+// anchorSel returns the index in next of the pane the cursor holds in cur.
+// With no row at sel the fallback pane pins the selection.
+func anchorSel(cur, next []row, sel int, fallback string) int {
+	id := fallback
+	if sel >= 0 && sel < len(cur) {
+		id = cur[sel].PaneID
+	}
+	return pinSel(next, sel, id)
 }
 
 func formatLabelWithNote(label, note, remind string, labelW int, selected, due bool) string {
@@ -3151,9 +3162,12 @@ func runPicker() int {
 		return out
 	}
 	rebase := func(cur []row) []row {
+		if cur != nil {
+			cur = visible()
+		}
 		rebuild()
 		next := visible()
-		sel = anchorSel(cur, next, sel)
+		sel = anchorSel(cur, next, sel, st.ActivePaneID)
 		return next
 	}
 	rebuild()
@@ -3170,21 +3184,18 @@ func runPicker() int {
 		return visible()
 	}
 	if st.ActivePaneID != "" {
-		for i, r := range visible() {
-			if r.PaneID == st.ActivePaneID {
-				sel = i
-				break
-			}
-		}
+		sel = pinSel(visible(), sel, st.ActivePaneID)
 	}
-	saveSt := func() {
+	saveSt := func() bool {
 		if !lk.held() {
 			status = "not saved: recall.lock unavailable"
-			return
+			return false
 		}
 		if err := saveStore(st); err != nil {
 			status = "not saved: " + err.Error()
+			return false
 		}
+		return true
 	}
 	persistView := func(list []row) {
 		st.ActiveTab = tab
@@ -3294,26 +3305,23 @@ func runPicker() int {
 		}
 
 		_ = recordJevTeaching(st, tRecord)
-		saveSt()
+		saved := saveSt()
 
 		taughtID := teachRow.PaneID
 		teaching = false
-		if teachPref == 0 {
-			status = "taught Jev: prefer " + teachRow.Label
-		} else if teachPref == 2 {
-			status = "taught Jev: demote " + teachRow.Label
-		} else if text != "" {
-			status = "taught Jev: " + clip(text, 28)
-		} else {
-			status = "saved teaching for " + teachRow.Label
-		}
-		rebuild()
-		for i, r := range allRows {
-			if r.PaneID == taughtID {
-				sel = i
-				break
+		if saved {
+			if teachPref == 0 {
+				status = "taught Jev: prefer " + teachRow.Label
+			} else if teachPref == 2 {
+				status = "taught Jev: demote " + teachRow.Label
+			} else if text != "" {
+				status = "taught Jev: " + clip(text, 28)
+			} else {
+				status = "saved teaching for " + teachRow.Label
 			}
 		}
+		rebuild()
+		sel = pinSel(visible(), sel, taughtID)
 	}
 
 	// commitRemind parses the typed time and applies the snooze contract.
@@ -3695,8 +3703,9 @@ func runPicker() int {
 					txt := strings.TrimSpace(remindEd.String())
 					if _, ok, _ := duration.Parse(txt, time.Now()); ok {
 						if st.pinSnoozePick(txt) {
-							saveSt()
-							status = "pinned quick pick: " + txt
+							if saveSt() {
+								status = "pinned quick pick: " + txt
+							}
 							remindField = pickField
 							picks = st.getSnoozePicks()
 							remindSel = indexOf(picks, txt)
@@ -3778,8 +3787,9 @@ func runPicker() int {
 				} else if remindField == pickField && len(picks) > 1 {
 					removed := picks[remindSel]
 					st.removeSnoozePick(remindSel)
-					saveSt()
-					status = "removed quick pick: " + removed
+					if saveSt() {
+						status = "removed quick pick: " + removed
+					}
 					picks = st.getSnoozePicks()
 					if remindSel >= len(picks) {
 						remindSel = len(picks) - 1
@@ -3957,9 +3967,10 @@ func runPicker() int {
 					v := views(st)[tab]
 					if v.Kind == "custom" {
 						st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
-						saveSt()
+						if saveSt() {
+							status = "deleted " + confirmName
+						}
 						tab = 0
-						status = "deleted " + confirmName
 						rebuild()
 					}
 				}
