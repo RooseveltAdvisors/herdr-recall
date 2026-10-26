@@ -7,6 +7,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 
 	"fmt"
@@ -283,24 +284,38 @@ func configDir() string {
 
 func statePath() string { return filepath.Join(configDir(), "recall.json") }
 
-// lastStoreStamp is the modtime (Unix nanoseconds) of recall.json the last
-// time this process loaded or saved it. A long-lived picker compares it before
-// touching shared state so a concurrent hook or CLI write is never overwritten
-// by a stale copy.
-var lastStoreStamp atomic.Int64
+// lastStoreFP is the content fingerprint of recall.json the last time this
+// process loaded or saved it. A long-lived picker compares it before touching
+// shared state so a concurrent hook or CLI write is never overwritten by a
+// stale copy. The bytes decide, so an external write that reuses a coarse
+// modtime is still adopted.
+var lastStoreFP atomic.Value // string
 
-func stampStore() {
-	if fi, err := os.Stat(statePath()); err == nil {
-		lastStoreStamp.Store(fi.ModTime().UnixNano())
+func hashStore(b []byte) string {
+	sum := sha256.Sum256(b)
+	return string(sum[:])
+}
+
+func stampStore(b []byte) {
+	lastStoreFP.Store(hashStore(b))
+}
+
+func currentFP() string {
+	if v := lastStoreFP.Load(); v != nil {
+		return v.(string)
 	}
+	return ""
 }
 
 // refreshStore adopts on-disk writes made by hook or CLI processes since this
 // process last loaded or saved recall.json. It reloads only when the file
-// changed, so rows stay frozen while no other writer ran.
+// content changed, so rows stay frozen while no other writer ran.
 func refreshStore(st *store) *store {
-	fi, err := os.Stat(statePath())
-	if err != nil || fi.ModTime().UnixNano() == lastStoreStamp.Load() {
+	b, err := os.ReadFile(statePath())
+	if err != nil {
+		b = nil
+	}
+	if hashStore(b) == currentFP() {
 		return st
 	}
 	return loadStore()
@@ -342,20 +357,22 @@ func (l *storeLock) release() {
 	l.f = nil
 }
 
+func (l *storeLock) held() bool { return l.f != nil }
+
 func loadStore() *store {
-	defer stampStore()
 	s := &store{Version: 1, Panes: map[string]*paneStat{}}
 	b, err := os.ReadFile(statePath())
 	if err != nil {
+		stampStore(nil)
 		return s
 	}
+	stampStore(b)
 	if err := json.Unmarshal(b, s); err != nil || s.Panes == nil {
 		s = &store{Version: 1, Panes: map[string]*paneStat{}}
 	}
 	if !s.TabsInit {
 		s.Tabs = defaultTabs()
 		s.TabsInit = true
-		_ = saveStore(s)
 	}
 	// Later was inserted at index 2. Shift a saved index so Recent stays Recent.
 	if s.Version < 2 {
@@ -363,7 +380,6 @@ func loadStore() *store {
 			s.ActiveTab++
 		}
 		s.Version = 2
-		_ = saveStore(s)
 	}
 	// Bump persisted 20 limits to 50 so Most used fills the popup.
 	for i := range s.Tabs {
@@ -531,7 +547,7 @@ func saveStore(s *store) error {
 	if err := os.Rename(tmp, statePath()); err != nil {
 		return err
 	}
-	stampStore()
+	stampStore(b)
 	return nil
 }
 
@@ -2105,7 +2121,6 @@ func jevApplyFeedback(st *store, text string, up bool) {
 		}
 	}
 	st.applyJevDirective(adj, rules)
-	_ = saveStore(st)
 }
 
 type jevWeight struct {
@@ -2162,6 +2177,25 @@ func filterRows(rows []row, query string) []row {
 		}
 	}
 	return out
+}
+
+// anchorSel returns the index in next of the pane the cursor holds in cur.
+func anchorSel(cur, next []row, sel int) int {
+	if sel >= 0 && sel < len(cur) {
+		id := cur[sel].PaneID
+		for i, r := range next {
+			if r.PaneID == id {
+				return i
+			}
+		}
+	}
+	if sel >= len(next) {
+		sel = len(next) - 1
+	}
+	if sel < 0 {
+		sel = 0
+	}
+	return sel
 }
 
 func formatLabelWithNote(label, note, remind string, labelW int, selected, due bool) string {
@@ -3098,6 +3132,7 @@ func runPicker() int {
 	newSort, newOnly, newWhere := "newest", "", ""
 	newLimit := 20
 	var allRows []row
+	var rows []row
 	rebuild := func() {
 		vs := views(st)
 		if tab >= len(vs) {
@@ -3108,42 +3143,59 @@ func runPicker() int {
 		}
 		allRows = rowsFor(frozen, st, vs[tab], sortMode)
 	}
+	visible := func() []row {
+		out := filterByState(allRows, stateFilter)
+		if q := strings.TrimSpace(searchEd.String()); q != "" {
+			out = filterRows(out, q)
+		}
+		return out
+	}
+	rebase := func(cur []row) []row {
+		rebuild()
+		next := visible()
+		sel = anchorSel(cur, next, sel)
+		return next
+	}
 	rebuild()
 	// resync adopts another writer's on-disk update before this event is
 	// handled, keeping the row the captain is pointing at selected by pane ID.
-	resync := func() {
+	resync := func(cur []row) []row {
 		if lk.acquire() != nil {
-			return
+			return visible()
 		}
-		fresh := refreshStore(st)
-		if fresh == st {
-			return
+		if fresh := refreshStore(st); fresh != st {
+			st = fresh
+			return rebase(cur)
 		}
-		st = fresh
-		rebuild()
+		return visible()
 	}
 	if st.ActivePaneID != "" {
-		cur := filterByState(allRows, stateFilter)
-		if q := strings.TrimSpace(searchEd.String()); q != "" {
-			cur = filterRows(cur, q)
-		}
-		for i, r := range cur {
+		for i, r := range visible() {
 			if r.PaneID == st.ActivePaneID {
 				sel = i
 				break
 			}
 		}
 	}
-	persistView := func(rows []row) {
+	saveSt := func() {
+		if !lk.held() {
+			status = "not saved: recall.lock unavailable"
+			return
+		}
+		if err := saveStore(st); err != nil {
+			status = "not saved: " + err.Error()
+		}
+	}
+	persistView := func(list []row) {
 		st.ActiveTab = tab
 		st.ActiveTabSet = true
 		st.ActiveSort = sortMode
 		st.ActiveState = stateFilter
 		st.ActiveQuery = searchEd.String()
-		if sel >= 0 && sel < len(rows) {
-			st.ActivePaneID = rows[sel].PaneID
+		if sel >= 0 && sel < len(list) {
+			st.ActivePaneID = list[sel].PaneID
 		}
-		_ = saveStore(st)
+		saveSt()
 	}
 
 	// commitTeach records full real-time teaching context and applies feedback.
@@ -3242,7 +3294,7 @@ func runPicker() int {
 		}
 
 		_ = recordJevTeaching(st, tRecord)
-		_ = saveStore(st)
+		saveSt()
 
 		taughtID := teachRow.PaneID
 		teaching = false
@@ -3293,7 +3345,7 @@ func runPicker() int {
 		} else {
 			status = "no reminder set: " + remindLabel
 		}
-		_ = saveStore(st)
+		saveSt()
 		reminding = false
 		rebuild()
 	}
@@ -3306,7 +3358,7 @@ func runPicker() int {
 		ps.Done = false
 		st.addToInbox(remindPaneID)
 		status = "reminder cleared: " + remindLabel
-		_ = saveStore(st)
+		saveSt()
 		reminding = false
 		remindHas = false
 		remindExisting = 0
@@ -3397,28 +3449,12 @@ func runPicker() int {
 			st.Jev.ScoreKey[id] = v.key
 		}
 		st.Jev.Proxy = jevProxyBin()
-		_ = saveStore(st)
-		activePane := ""
-		if sel >= 0 && sel < len(allRows) {
-			activePane = allRows[sel].PaneID
-		}
-		rebuild()
-		if activePane != "" {
-			for i, r := range allRows {
-				if r.PaneID == activePane {
-					sel = i
-					break
-				}
-			}
-		}
+		saveSt()
+		rows = rebase(rows)
 	}
 
 	for {
-		resync()
-		rows := filterByState(allRows, stateFilter)
-		if q := strings.TrimSpace(searchEd.String()); q != "" {
-			rows = filterRows(rows, q)
-		}
+		rows = resync(rows)
 		if sel >= len(rows) {
 			sel = len(rows) - 1
 		}
@@ -3510,12 +3546,12 @@ func runPicker() int {
 				}
 				key = k
 			case sc := <-jevCh:
-				resync()
+				rows = resync(rows)
 				applyJev(sc)
 				continue
 			}
 		}
-		resync()
+		rows = resync(rows)
 		if key == "" {
 			continue
 		}
@@ -3638,7 +3674,7 @@ func runPicker() int {
 					} else {
 						delete(st.Jev.Weights, items[jevSel].feature)
 					}
-					_ = saveStore(st)
+					saveSt()
 					items = jevSelectableItems(st)
 					if jevSel >= len(items) {
 						jevSel = max(0, len(items)-1)
@@ -3659,7 +3695,7 @@ func runPicker() int {
 					txt := strings.TrimSpace(remindEd.String())
 					if _, ok, _ := duration.Parse(txt, time.Now()); ok {
 						if st.pinSnoozePick(txt) {
-							_ = saveStore(st)
+							saveSt()
 							status = "pinned quick pick: " + txt
 							remindField = pickField
 							picks = st.getSnoozePicks()
@@ -3742,7 +3778,7 @@ func runPicker() int {
 				} else if remindField == pickField && len(picks) > 1 {
 					removed := picks[remindSel]
 					st.removeSnoozePick(remindSel)
-					_ = saveStore(st)
+					saveSt()
 					status = "removed quick pick: " + removed
 					picks = st.getSnoozePicks()
 					if remindSel >= len(picks) {
@@ -3865,7 +3901,7 @@ func runPicker() int {
 				} else {
 					status = "note cleared: " + rows[sel].Label
 				}
-				_ = saveStore(st)
+				saveSt()
 				noting = false
 				rebuild()
 			case vimline.ActOut, vimline.ActCancel:
@@ -3921,7 +3957,7 @@ func runPicker() int {
 					v := views(st)[tab]
 					if v.Kind == "custom" {
 						st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
-						_ = saveStore(st)
+						saveSt()
 						tab = 0
 						status = "deleted " + confirmName
 						rebuild()
@@ -3958,7 +3994,7 @@ func runPicker() int {
 					}
 					status = "created " + name
 				}
-				_ = saveStore(st)
+				saveSt()
 				creating = false
 				editing = false
 				sel = 0
@@ -4197,7 +4233,7 @@ func runPicker() int {
 				st.addToInbox(r.PaneID)
 				status = "moved to inbox: " + r.Label
 			}
-			_ = saveStore(st)
+			saveSt()
 			rebuild()
 		case (key == "z" || key == "u") && !searching && !showHelp:
 			// z is undo. u stays as the vim alias.
@@ -4210,7 +4246,7 @@ func runPicker() int {
 				st.addToInbox(lastDoneID)
 				status = "undone"
 				lastDoneID = ""
-				_ = saveStore(st)
+				saveSt()
 				rebuild()
 			}
 		case key == "h" && !searching && !showHelp:
@@ -4264,7 +4300,7 @@ func runPicker() int {
 			} else {
 				status = "cleared manual blocked: " + r.Label
 			}
-			_ = saveStore(st)
+			saveSt()
 			rebuild()
 		case key == "/" && !searching:
 			searching = true
@@ -4321,7 +4357,7 @@ func runPicker() int {
 				} else {
 					status = "unmarked favorite: " + rows[sel].Label
 				}
-				_ = saveStore(st)
+				saveSt()
 				rebuild()
 			}
 		case key == "ctrl-u":
@@ -4477,21 +4513,31 @@ func main() {
 		switch os.Args[2] {
 		case "reset":
 			lk := &storeLock{}
-			if err := lk.acquire(); err == nil {
-				defer lk.release()
-				st = loadStore()
+			if err := lk.acquire(); err != nil {
+				fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+				os.Exit(1)
 			}
+			defer lk.release()
+			st = loadStore()
+			feature := ""
 			if len(os.Args) > 3 {
-				// reset one feature
-				st.ensureJev()
-				delete(st.Jev.Weights, os.Args[3])
-				fmt.Println("cleared:", os.Args[3])
+				feature = os.Args[3]
+			}
+			st.ensureJev()
+			if feature != "" {
+				delete(st.Jev.Weights, feature)
 			} else {
-				st.ensureJev()
 				st.Jev.Weights = map[string]float64{}
+			}
+			if err := saveStore(st); err != nil {
+				fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+				os.Exit(1)
+			}
+			if feature != "" {
+				fmt.Println("cleared:", feature)
+			} else {
 				fmt.Println("all learnings cleared")
 			}
-			_ = saveStore(st)
 		case "scores":
 			if st.Jev != nil {
 				for id, sc := range st.Jev.Scores {
