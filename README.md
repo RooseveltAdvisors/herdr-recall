@@ -98,9 +98,8 @@ land at the front. Rows already in the queue keep their order. Pressing `e`
 archives the selected row only.
 
 Preference is learned locally and does not need the decision proxy.
-Opening or marking a thread done reinforces its stable signals and decays
-the rows skipped above it. Time of day and visit count are not trained by
-those implicit actions.
+Opening a row can reinforce it. Pressing `e` does not. `e` only archives
+the selected row, so it teaches nothing.
 
 `i` is the explicit path. Prefer, Neutral, and Demote apply only to the
 checked feature chips. Uncheck a chip when that signal should not get the

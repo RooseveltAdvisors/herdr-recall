@@ -3907,10 +3907,7 @@ func runPicker() int {
 				ps.SnoozeState = ""
 				ps.DoneState = baselineState(liveStatusWord(frozen, r.PaneID))
 				st.removeFromInbox(r.PaneID)
-				if views(st)[tab].Kind == "inbox" {
-					st.ensureJev()
-					st.jevLearn(r, rows[:sel])
-				}
+				// e archives. It is neutral, so it does not teach Jev.
 				lastDoneID = r.PaneID
 				status = "done: " + r.Label + " (z undo)"
 			} else {

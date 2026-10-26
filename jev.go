@@ -23,10 +23,8 @@ import (
 // should the captain triage this thread before the others right now. The
 // answer orders new arrivals, most important first.
 //
-// Preference learning is local and needs no endpoint. Every time the captain
-// acts on an Inbox row, its features are reinforced and the features of the
-// rows skipped above it are decayed, so the ordering drifts toward what this
-// captain actually handles first.
+// Preference learning is local and needs no endpoint. Opening a row can
+// reinforce it. Pressing e does not. e only archives, so it teaches nothing.
 //
 // The module is optional by contract. With no proxy on the box and no
 // HERDR_RECALL_JEV override, every function here is a no-op and the picker
