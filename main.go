@@ -946,19 +946,15 @@ func syncInboxRows(all []row, st *store, now int64) []row {
 			added = append(added, r)
 		}
 	}
-	if st.jevRanksInbox() {
-		// Rank the whole queue. Equal scores keep the previous order, so a
-		// review does not jump when nothing about priority changed.
-		inbox := make([]row, 0, len(orderedIDs)+len(added))
-		for _, id := range orderedIDs {
-			inbox = append(inbox, byID[id])
+	if st.jevOn() {
+		// Only new arrivals may land at the front. Rows already in the queue
+		// keep their order, so e archives one row and does not shuffle the rest.
+		st.jevSortDesc(added, now)
+		front := make([]string, 0, len(added)+len(orderedIDs))
+		for _, r := range added {
+			front = append(front, r.PaneID)
 		}
-		inbox = append(inbox, added...)
-		st.rankInbox(inbox, now)
-		orderedIDs = orderedIDs[:0]
-		for _, r := range inbox {
-			orderedIDs = append(orderedIDs, r.PaneID)
-		}
+		orderedIDs = append(front, orderedIDs...)
 	} else {
 		sortInbox(added, now)
 		for _, r := range added {

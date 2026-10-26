@@ -93,9 +93,9 @@ Jev is optional. With no decision proxy on the box and no `HERDR_RECALL_JEV`
 override, the picker behaves exactly as it does without this section.
 
 When Jev is present, each new Inbox arrival is asked one question: should the
-captain triage this thread before the others right now. If Jev has a score
-or any local learning, the Inbox is ranked by that priority. Equal scores
-keep the previous order, so a review does not jump when nothing changed.
+captain triage this thread before the others right now. A new arrival can
+land at the front. Rows already in the queue keep their order. Pressing `e`
+archives the selected row only.
 
 Preference is learned locally and does not need the decision proxy.
 Opening or marking a thread done reinforces its stable signals and decays

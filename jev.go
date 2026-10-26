@@ -362,40 +362,6 @@ func jevUrgency(r row, now int64) float64 {
 	return 0
 }
 
-// jevRanksInbox reports whether the queue should follow learned priority.
-func (s *store) jevRanksInbox() bool {
-	if s.jevOn() {
-		return true
-	}
-	if s.Jev == nil {
-		return false
-	}
-	if len(s.Jev.Rules) > 0 {
-		return true
-	}
-	for _, w := range s.Jev.Weights {
-		if w != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// rankInbox orders rows by priority. Equal scores keep the previous order.
-func (s *store) rankInbox(rows []row, now int64) {
-	prev := make(map[string]int, len(rows))
-	for i, r := range rows {
-		prev[r.PaneID] = i
-	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		pi, pj := s.jevPriority(rows[i], now), s.jevPriority(rows[j], now)
-		if pi != pj {
-			return pi > pj
-		}
-		return prev[rows[i].PaneID] < prev[rows[j].PaneID]
-	})
-}
-
 // jevLearn reinforces the chosen row and decays the rows skipped above it.
 // Alpha is small so a single action never reorders the world.
 // Learning is local. A nil Jev state stays nil so a caller that did not opt in

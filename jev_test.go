@@ -429,25 +429,30 @@ func TestRuleBonusOnlyWhenCadenceMatches(t *testing.T) {
 	}
 }
 
-func TestLocalWeightsReorderInbox(t *testing.T) {
-	t.Setenv("HERDR_RECALL_JEV", "off")
+func TestArchiveDoesNotReorderInbox(t *testing.T) {
+	t.Setenv("HERDR_RECALL_JEV", "/bin/true")
 	now := time.Now().Unix()
 	st := &store{
 		Version: 1, TabsInit: true, Tabs: defaultTabs(),
 		Panes: map[string]*paneStat{
-			"old": {Visits: 3, Last: now - 20, Label: "docs", InInbox: true},
-			"new": {Visits: 1, Last: now - 10, Label: "billing", InInbox: true},
+			"a": {Visits: 1, Last: now - 30, Label: "docs", InInbox: true},
+			"b": {Visits: 1, Last: now - 20, Label: "billing", InInbox: true},
+			"c": {Visits: 1, Last: now - 10, Label: "portal", InInbox: true},
 		},
-		InboxOrder: []string{"old", "new"},
-		Jev:        &jevState{Weights: map[string]float64{"status:blocked": 0.8}},
+		InboxOrder: []string{"a", "b", "c"},
+		Jev:        &jevState{Weights: map[string]float64{"status:blocked": 0.9, "label:portal": 0.8}},
 	}
 	snap := &snapshot{Panes: []paneRec{
-		{PaneID: "old", AgentStatus: "idle"},
-		{PaneID: "new", AgentStatus: "blocked"},
+		{PaneID: "a", AgentStatus: "idle"},
+		{PaneID: "b", AgentStatus: "working"},
+		{PaneID: "c", AgentStatus: "blocked"},
 	}}
+	st.Panes["b"].Done = true
+	st.Panes["b"].DoneState = "working"
+	st.removeFromInbox("b")
 	got := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
-	if len(got) < 2 || got[0].PaneID != "new" {
-		t.Fatalf("order = %v, want blocked billing first", paneIDs(got))
+	if strings.Join(paneIDs(got), ",") != "a,c" {
+		t.Fatalf("order = %v, want a,c", paneIDs(got))
 	}
 }
 
