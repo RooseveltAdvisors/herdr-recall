@@ -1715,7 +1715,7 @@ func renderJev(width, height int, names []string, active int, items []jevItem, s
 	}
 
 	sc.rule()
-	sc.emit(hintFooter("enter", "clear", "D", "clear all", "esc", "back"))
+	sc.emit(hintFooter("enter", "clear one", "esc", "back"))
 	return sc.done()
 }
 
@@ -3379,10 +3379,6 @@ func runPicker() int {
 					}
 					rebuild()
 				}
-			case "D":
-				confirmName = "all Jev learnings"
-				confirmSel = 1
-				showJev = false
 			}
 			continue
 		}
@@ -3625,20 +3621,13 @@ func runPicker() int {
 				confirmSel = cycle(2, confirmSel, 1)
 			case "enter":
 				if confirmSel == 0 {
-					if confirmName == "all Jev learnings" {
-						st.ensureJev()
-						st.Jev.Weights = map[string]float64{}
+					v := views(st)[tab]
+					if v.Kind == "custom" {
+						st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
 						_ = saveStore(st)
-						status = "all Jev learnings cleared"
-					} else {
-						v := views(st)[tab]
-						if v.Kind == "custom" {
-							st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
-							_ = saveStore(st)
-							tab = 0
-							status = "deleted " + confirmName
-							rebuild()
-						}
+						tab = 0
+						status = "deleted " + confirmName
+						rebuild()
 					}
 				}
 				confirmName = ""

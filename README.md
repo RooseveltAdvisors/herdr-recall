@@ -113,9 +113,8 @@ becomes a chip with no code change. Terms that sit on most panes start
 unchecked, so path noise does not get the credit.
 
 Press `J` to inspect what Jev has learned. Weights sort by impact,
-positive green and negative red. Enter clears one, ctrl+u clears all.
-The CLI can do the same: `herdr-recall jev` lists, `jev reset` clears,
-`jev reset status:blocked` clears one, `jev scores` shows the API scores.
+positive green and negative red. Enter clears the one weight under the cursor.
+There is no key that clears every weight.
 
 ## Showcase
 
