@@ -98,10 +98,10 @@ land at the front. Rows already in the queue keep their order. Pressing `e`
 archives the selected row only.
 
 Preference is learned locally and does not need the decision proxy.
-Opening a row can reinforce it. Pressing `e` does not. `e` only archives
-the selected row, so it teaches nothing.
+Only the `i` teach dialog writes weights. Opening a row does not.
+Pressing `e` does not. `e` only archives the selected row.
 
-`i` is the explicit path. Prefer, Neutral, and Demote apply only to the
+`i` is the only teach path. Prefer, Neutral, and Demote apply only to the
 checked feature chips. Uncheck a chip when that signal should not get the
 credit. Free text can name a comparison (`billing over docs`) or a
 conditional rule (`demote idle until afternoon`). The raw text is also

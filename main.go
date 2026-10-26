@@ -1650,7 +1650,7 @@ func renderJev(width, height int, names []string, active int, items []jevItem, s
 		sc.emit("")
 		sc.emit(keyOverlay + "  Nothing learned yet." + keyReset)
 		sc.emit(keyOverlay + "  Press i on a row. Check the features that matter." + keyReset)
-		sc.emit(keyOverlay + "  Or type a rule, such as billing over docs." + keyReset)
+		sc.emit(keyOverlay + "  Type the rule in that dialog, such as billing over docs." + keyReset)
 		sc.rule()
 		sc.emit(hintFooter("esc", "back"))
 		return sc.done()
@@ -1715,7 +1715,7 @@ func renderJev(width, height int, names []string, active int, items []jevItem, s
 	}
 
 	sc.rule()
-	sc.emit(hintFooter("enter", "clear", "i", "teach", "D", "clear all", "esc", "back"))
+	sc.emit(hintFooter("enter", "clear", "D", "clear all", "esc", "back"))
 	return sc.done()
 }
 
@@ -3333,14 +3333,9 @@ func runPicker() int {
 			}
 			if jevTyping {
 				switch key {
-				case "+", "=":
-					jevApplyFeedback(st, jevEd.Text(), true)
+				case "+", "=", "-":
+					status = "teach with i on a row"
 					jevTyping = false
-					rebuild()
-				case "-":
-					jevApplyFeedback(st, jevEd.Text(), false)
-					jevTyping = false
-					rebuild()
 				case "esc":
 					jevTyping = false
 				default:
@@ -3350,8 +3345,7 @@ func runPicker() int {
 			}
 			switch key {
 			case "i":
-				jevTyping = true
-				jevEd = vimline.New("")
+				status = "teach with i on a row"
 			case "esc", "q":
 				showJev = false
 			case "j", "down":
@@ -3831,11 +3825,6 @@ func runPicker() int {
 				// keep the frame open with the reason instead of failing silently
 				status = "jump: " + err.Error()
 				continue
-			}
-			if views(st)[tab].Kind == "inbox" && sel < len(rows) {
-				st.ensureJev()
-				st.jevLearnScaled(rows[sel], rows[:sel], 0.02)
-				_ = saveStore(st)
 			}
 			return 0
 		case key == "?" && !searching:
