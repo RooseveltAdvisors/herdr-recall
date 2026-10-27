@@ -329,7 +329,70 @@ func stampStore(b []byte) {
 // be folded in without dropping the operator's edit.
 var lastSynced atomic.Value // string
 
-var fieldGone = struct{}{}
+// storeUnit names one conflict unit: a pane entry or a top-level store field.
+type storeUnit struct {
+	pane  string
+	field string
+}
+
+// changedUnits reports the units where want differs from base.
+func changedUnits(base, want map[string]any) map[storeUnit]bool {
+	out := map[storeUnit]bool{}
+	basePanes, _ := base["panes"].(map[string]any)
+	wantPanes, _ := want["panes"].(map[string]any)
+	for id, bv := range basePanes {
+		if !reflect.DeepEqual(bv, wantPanes[id]) {
+			out[storeUnit{pane: id}] = true
+		}
+	}
+	for id := range wantPanes {
+		if _, ok := basePanes[id]; !ok {
+			out[storeUnit{pane: id}] = true
+		}
+	}
+	for k, bv := range base {
+		if k == "panes" {
+			continue
+		}
+		if !reflect.DeepEqual(bv, want[k]) {
+			out[storeUnit{field: k}] = true
+		}
+	}
+	for k := range want {
+		if k == "panes" {
+			continue
+		}
+		if _, ok := base[k]; !ok {
+			out[storeUnit{field: k}] = true
+		}
+	}
+	return out
+}
+
+// applyUnits copies whole pane entries and top-level fields from src onto dst.
+func applyUnits(dst, src map[string]any, units map[storeUnit]bool) {
+	dstPanes, _ := dst["panes"].(map[string]any)
+	srcPanes, _ := src["panes"].(map[string]any)
+	for u := range units {
+		if u.pane != "" {
+			if dstPanes == nil {
+				dstPanes = map[string]any{}
+				dst["panes"] = dstPanes
+			}
+			if v, ok := srcPanes[u.pane]; ok {
+				dstPanes[u.pane] = v
+			} else {
+				delete(dstPanes, u.pane)
+			}
+			continue
+		}
+		if v, ok := src[u.field]; ok {
+			dst[u.field] = v
+		} else {
+			delete(dst, u.field)
+		}
+	}
+}
 
 func storeFields(s *store) map[string]any {
 	m := map[string]any{}
@@ -345,57 +408,6 @@ func syncedFields() map[string]any {
 		_ = json.Unmarshal([]byte(v.(string)), &m)
 	}
 	return m
-}
-
-func diffFields(base, want map[string]any, prefix string, out map[string]any) {
-	path := func(k string) string {
-		if prefix == "" {
-			return k
-		}
-		return prefix + "/" + k
-	}
-	for k, bv := range base {
-		wv, ok := want[k]
-		if !ok {
-			out[path(k)] = fieldGone
-			continue
-		}
-		bm, bok := bv.(map[string]any)
-		wm, wok := wv.(map[string]any)
-		if bok && wok {
-			diffFields(bm, wm, path(k), out)
-			continue
-		}
-		if !reflect.DeepEqual(bv, wv) {
-			out[path(k)] = wv
-		}
-	}
-	for k, wv := range want {
-		if _, ok := base[k]; !ok {
-			out[path(k)] = wv
-		}
-	}
-}
-
-func applyFields(m map[string]any, patch map[string]any) {
-	for p, v := range patch {
-		parts := strings.Split(p, "/")
-		node := m
-		for _, part := range parts[:len(parts)-1] {
-			child, ok := node[part].(map[string]any)
-			if !ok {
-				child = map[string]any{}
-				node[part] = child
-			}
-			node = child
-		}
-		leaf := parts[len(parts)-1]
-		if v == fieldGone {
-			delete(node, leaf)
-			continue
-		}
-		node[leaf] = v
-	}
 }
 
 func currentFP() string {
@@ -490,17 +502,23 @@ func (w *storeWriter) note() string {
 	return "pending save: " + w.pend.Error() + " (esc discards)"
 }
 
-// adopt folds an external store into the session. The pending change is
-// reapplied so an external sync can never drop it, and its fields win over
-// the sync's. base is the last synced state, taken before the adoption.
+// adopt folds an external store into the session at pane and top-level field
+// granularity. A unit the external write touched while the operator has a
+// pending change there refuses the adoption and the pending change wins over
+// the sync; otherwise the pending change is reapplied wholesale over the
+// adopted store. base is the last synced state, taken before the adoption.
 func (w *storeWriter) adopt(st, fresh *store, base map[string]any) *store {
 	if !w.pending() {
 		return fresh
 	}
-	patch := map[string]any{}
-	diffFields(base, storeFields(st), "", patch)
+	pending := changedUnits(base, storeFields(st))
+	for u := range changedUnits(base, storeFields(fresh)) {
+		if pending[u] {
+			return st
+		}
+	}
 	merged := storeFields(fresh)
-	applyFields(merged, patch)
+	applyUnits(merged, storeFields(st), pending)
 	out := &store{}
 	if b, err := json.Marshal(merged); err == nil {
 		_ = json.Unmarshal(b, out)
@@ -513,6 +531,11 @@ func (w *storeWriter) adopt(st, fresh *store, base map[string]any) *store {
 func (w *storeWriter) close(st *store) bool {
 	if !w.pending() {
 		return true
+	}
+	if !w.lk.held() {
+		if w.lk.acquire() != nil {
+			return false
+		}
 	}
 	return w.persist(st) == nil
 }
