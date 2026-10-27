@@ -271,38 +271,35 @@ type view struct {
 var (
 	configDirOnce sync.Once
 	configDirVal  string
-	configDirErr  error
 )
 
-func configDir() (string, error) {
-	configDirOnce.Do(func() {
-		configDirVal, configDirErr = resolveConfigDir()
-	})
-	return configDirVal, configDirErr
+func configDir() string {
+	configDirOnce.Do(func() { configDirVal = resolveConfigDir() })
+	return configDirVal
 }
 
-func resolveConfigDir() (string, error) {
+// resolveConfigDir answers with the herdr CLI directory and falls back to
+// the deterministic encoded layout herdr uses. Cross-process serialization
+// holds while every process resolves one directory: the memo plus this
+// byte-identical fallback give that on this platform, and a herdr layout
+// whose real config dir differs from the encoded fallback would still split
+// writers.
+func resolveConfigDir() string {
 	if v := os.Getenv("HERDR_PLUGIN_CONFIG_DIR"); v != "" {
-		return v, nil
+		return v
 	}
 	out, err := herdr("plugin", "config-dir", pluginID)
-	if err != nil {
-		return "", err
+	if err == nil {
+		if d := strings.TrimSpace(string(out)); d != "" {
+			return d
+		}
 	}
-	d := strings.TrimSpace(string(out))
-	if d == "" {
-		return "", errors.New("herdr plugin config-dir: empty")
-	}
-	return d, nil
+	enc := strings.ReplaceAll(pluginID, "R", "%52")
+	enc = strings.ReplaceAll(enc, "A", "%41")
+	return filepath.Join(os.Getenv("HOME"), ".config", "herdr", "plugins", "config", enc)
 }
 
-func statePath() (string, error) {
-	dir, err := configDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "recall.json"), nil
-}
+func statePath() string { return filepath.Join(configDir(), "recall.json") }
 
 // lastStoreFP is the content fingerprint of recall.json the last time this
 // process loaded or saved it. A long-lived picker compares it before touching
@@ -336,11 +333,7 @@ func currentFP() string {
 // process last loaded or saved recall.json. It reloads only when the file
 // content changed, so rows stay frozen while no other writer ran.
 func refreshStore(st *store) *store {
-	sp, err := statePath()
-	if err != nil {
-		return st
-	}
-	b, err := os.ReadFile(sp)
+	b, err := os.ReadFile(statePath())
 	if err != nil {
 		loadFailed.Store(!os.IsNotExist(err))
 		return st
@@ -354,35 +347,22 @@ func refreshStore(st *store) *store {
 }
 
 // storeLock serializes read-modify-write cycles on recall.json across the
-// long-lived picker and the short-lived hook and CLI processes. Without it the
-// last full-file write wins and erases concurrent visits, un-done threads, and
+// long-lived picker and the short-lived hook and CLI processes, while they
+// resolve one config directory (see resolveConfigDir). Without it the last
+// full-file write wins and erases concurrent visits, un-done threads, and
 // prune results.
 type storeLock struct{ f *os.File }
 
-func lockPath() (string, error) {
-	dir, err := configDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "recall.lock"), nil
-}
+func lockPath() string { return filepath.Join(configDir(), "recall.lock") }
 
 func (l *storeLock) acquire() error {
 	if l.f != nil {
 		return nil
 	}
-	dir, err := configDir()
-	if err != nil {
+	if err := os.MkdirAll(configDir(), 0o700); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	lp, err := lockPath()
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(lp, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
@@ -405,44 +385,39 @@ func (l *storeLock) release() {
 
 func (l *storeLock) held() bool { return l.f != nil }
 
-// storeWriter persists recall state fail-closed: a refused write is dropped
-// by reloading the store from disk so no later write can carry it, and a
-// failed reload blocks persistence until the state is proven again.
+// storeWriter persists recall state and tracks a refused change as pending:
+// the change stays in memory for the automatic retry, and only the
+// operator's discard drops it.
 type storeWriter struct {
-	lk    *storeLock
-	block error
+	lk   *storeLock
+	pend error
 }
 
-// persist writes st and returns the store to keep. A non-nil error means the
-// write was refused; the returned store is the reloaded one when the refused
-// mutation could be dropped.
-func (w *storeWriter) persist(st *store) (*store, error) {
-	err := w.block
-	if err == nil {
-		if !w.lk.held() {
-			err = errors.New("recall.lock unavailable")
-		} else if e := saveStore(st); e != nil {
-			err = e
-		} else {
-			return st, nil
-		}
+func (w *storeWriter) persist(st *store) error {
+	var err error
+	switch {
+	case !w.lk.held():
+		err = errors.New("recall.lock unavailable")
+	default:
+		err = saveStore(st)
 	}
-	if w.lk.acquire() == nil {
-		if fresh, e := loadStore(); e == nil {
-			w.block = nil
-			return fresh, err
-		}
+	w.pend = err
+	return err
+}
+
+func (w *storeWriter) pending() bool { return w.pend != nil }
+
+func (w *storeWriter) discard(st *store) (*store, error) {
+	fresh, err := loadStore()
+	if err != nil {
+		return st, err
 	}
-	w.block = err
-	return st, err
+	w.pend = nil
+	return fresh, nil
 }
 
 func loadStore() (*store, error) {
-	sp, err := statePath()
-	if err != nil {
-		return nil, err
-	}
-	b, err := os.ReadFile(sp)
+	b, err := os.ReadFile(statePath())
 	if err != nil {
 		loadFailed.Store(!os.IsNotExist(err))
 		if os.IsNotExist(err) {
@@ -625,26 +600,18 @@ func saveStore(s *store) error {
 	if loadFailed.Load() {
 		return errors.New("recall.json unreadable")
 	}
-	dir, err := configDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(configDir(), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	sp, err := statePath()
-	if err != nil {
-		return err
-	}
-	tmp := sp + ".tmp"
+	tmp := statePath() + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, sp); err != nil {
+	if err := os.Rename(tmp, statePath()); err != nil {
 		return err
 	}
 	stampStore(b)
@@ -3290,16 +3257,18 @@ func runPicker() int {
 		sel = pinSel(visible(), sel, st.ActivePaneID)
 	}
 	writer := &storeWriter{lk: lk}
+	pendingNote := ""
 	saveSt := func() bool {
-		next, err := writer.persist(st)
-		if next != st {
-			st = next
-			rows = rebase(rows)
-		}
+		err := writer.persist(st)
 		if err != nil {
-			status = "not saved: " + err.Error()
+			pendingNote = "pending save: " + err.Error() + " (esc discards)"
+			status = pendingNote
 			return false
 		}
+		if status == pendingNote {
+			status = ""
+		}
+		pendingNote = ""
 		return true
 	}
 	persistView := func(list []row) {
@@ -4226,8 +4195,17 @@ func runPicker() int {
 		switch {
 		case key == "esc":
 			// esc unwinds one thing per press, the same ladder the field
-			// uses: the search words go first, then the status filter, then
-			// the picker closes.
+			// uses: a pending change first, then the search words, then the
+			// status filter, then the picker closes.
+			if writer.pending() {
+				if fresh, err := writer.discard(st); err == nil {
+					st = fresh
+					rows = rebase(rows)
+					pendingNote = ""
+					status = ""
+				}
+				continue
+			}
 			if strings.TrimSpace(searchEd.Text()) != "" {
 				searchEd = vimline.New("")
 				status = ""

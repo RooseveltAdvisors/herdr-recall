@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,8 +16,8 @@ func TestPathProbe(t *testing.T) {
 	if os.Getenv("RECALL_PATHS_PROBE") == "" {
 		t.Skip("probe helper for the child-process path tests")
 	}
-	fmt.Println("lock:", lockFile(t))
-	fmt.Println("state:", stateFile(t))
+	fmt.Println("lock:", lockPath())
+	fmt.Println("state:", statePath())
 }
 
 func probeEnv(overrides ...string) []string {
@@ -65,8 +65,8 @@ func runPathProbe(t *testing.T, env []string) (string, string) {
 // lock and the state file resolve into the same config directory.
 func TestLockAndStatePathShareConfigDir(t *testing.T) {
 	useTempConfig(t)
-	if filepath.Dir(lockFile(t)) != filepath.Dir(stateFile(t)) {
-		t.Fatalf("lockPath %q and statePath %q must resolve into one directory", lockFile(t), stateFile(t))
+	if filepath.Dir(lockPath()) != filepath.Dir(statePath()) {
+		t.Fatalf("lockPath %q and statePath %q must resolve into one directory", lockPath(), statePath())
 	}
 }
 
@@ -91,10 +91,10 @@ func TestConfigDirStableWhenHerdrFlaps(t *testing.T) {
 	}
 }
 
-// TestWriterFailsClosedWhenConfigDirUnresolvable pins the no-fallback rule:
-// with the override unset and the herdr CLI failing, a writer must error and
-// recall.json must stay untouched instead of splitting onto another path.
-func TestWriterFailsClosedWhenConfigDirUnresolvable(t *testing.T) {
+// TestWriterFallsBackWhenConfigDirUnresolvable pins the ruled fallback: a
+// failing herdr CLI resolution must not drop a capture, the writer resolves
+// the deterministic encoded directory and saves there.
+func TestWriterFallsBackWhenConfigDirUnresolvable(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "herdr-recall")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v: %s", err, out)
@@ -103,29 +103,24 @@ func TestWriterFailsClosedWhenConfigDirUnresolvable(t *testing.T) {
 	enc := strings.ReplaceAll(pluginID, "R", "%52")
 	enc = strings.ReplaceAll(enc, "A", "%41")
 	state := filepath.Join(home, ".config", "herdr", "plugins", "config", enc, "recall.json")
-	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	before := []byte(`{"version":1,"tabs_init":true,"panes":{"w1:p1":{"visits":1,"label":"one"}},"favorites":["w1:p1"]}`)
-	if err := os.WriteFile(state, before, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "herdr"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"favorite", "w1:p2"}, {"jev", "reset"}} {
-		cmd := exec.Command(bin, args...)
-		cmd.Env = probeEnv("HOME="+home, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-		if out, err := cmd.CombinedOutput(); err == nil {
-			t.Fatalf("%v wrote despite the unresolvable config dir: %s", args, out)
-		}
+	cmd := exec.Command(bin, "favorite", "w1:p2")
+	cmd.Env = probeEnv("HOME="+home, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("favorite must capture despite the failing config-dir CLI: %v: %s", err, out)
 	}
-	after, err := os.ReadFile(state)
+	b, err := os.ReadFile(state)
 	if err != nil {
+		t.Fatalf("the fallback state file: %v", err)
+	}
+	var st store
+	if err := json.Unmarshal(b, &st); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("recall.json was rewritten despite the unresolvable config dir")
+	if !st.isFavorite("w1:p2") {
+		t.Fatal("the capture did not land at the fallback state file")
 	}
 }
