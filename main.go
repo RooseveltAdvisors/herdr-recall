@@ -318,6 +318,11 @@ var loadFailed atomic.Bool
 // reach disk until a clean reload proves the state again.
 var saveTaint atomic.Bool
 
+// stateVanished marks the state file as gone on this process's watch. A file
+// that reappears missing panes this process holds is a recreation, not a
+// writer's continuation, so the held dataset wins and lands on the next save.
+var stateVanished atomic.Bool
+
 func hashStore(b []byte) string {
 	sum := sha256.Sum256(b)
 	return string(sum[:])
@@ -334,6 +339,27 @@ func currentFP() string {
 	return ""
 }
 
+// pinned reports whether the pane carries state no writer may drop: a note,
+// a manual block, a reminder, or a favorite. prune keeps these, so a file
+// missing a pinned pane this process holds is a recreation, not a
+// continuation.
+func (s *store) pinned(id string) bool {
+	ps := s.Panes[id]
+	return s.isFavorite(id) || ps != nil && (ps.Note != "" || ps.ManualBlocked || ps.RemindAt > 0)
+}
+
+// dropsHeld reports whether fresh is missing panes this process holds. A
+// vanished watch makes any missing pane a recreation, so the held dataset
+// wins: it is the only copy left.
+func dropsHeld(fresh, held *store) bool {
+	for id := range held.Panes {
+		if fresh.Panes[id] == nil && (stateVanished.Load() || held.pinned(id)) {
+			return true
+		}
+	}
+	return false
+}
+
 // refreshStore adopts on-disk writes made by hook or CLI processes since this
 // process last loaded or saved recall.json. It reloads only when the file
 // content changed, so rows stay frozen while no other writer ran.
@@ -341,6 +367,9 @@ func refreshStore(st *store) *store {
 	b, err := os.ReadFile(statePath())
 	if err != nil {
 		loadFailed.Store(!os.IsNotExist(err))
+		if os.IsNotExist(err) {
+			stateVanished.Store(true)
+		}
 		return st
 	}
 	if hashStore(b) == currentFP() {
@@ -353,6 +382,10 @@ func refreshStore(st *store) *store {
 		return st
 	}
 	loadFailed.Store(false)
+	if dropsHeld(fresh, st) {
+		return st
+	}
+	stateVanished.Store(false)
 	stampStore(b)
 	return fresh
 }
@@ -718,6 +751,7 @@ func saveStore(s *store) error {
 	if err := os.Rename(tmp, statePath()); err != nil {
 		return err
 	}
+	stateVanished.Store(false)
 	stampStore(b)
 	return nil
 }
@@ -741,9 +775,7 @@ func (s *store) prune(live map[string]bool, keep int) {
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ts > all[j].ts })
 	for _, e := range all[keep:] {
-		ps := s.Panes[e.id]
-		keepPin := ps != nil && (ps.Note != "" || ps.ManualBlocked || ps.RemindAt > 0)
-		if !s.isFavorite(e.id) && !keepPin {
+		if !s.pinned(e.id) {
 			delete(s.Panes, e.id)
 		}
 	}
@@ -3319,6 +3351,7 @@ func runPicker() int {
 	newLimit := 20
 	var allRows []row
 	var rows []row
+	pointedID := ""
 	rebuild := func() {
 		vs := views(st)
 		if tab >= len(vs) {
@@ -3374,6 +3407,16 @@ func runPicker() int {
 		}
 		status = note.clear(status)
 		return true
+	}
+	// pointed reports whether the pane the drawn cursor pointed at is still
+	// the row under the cursor. A key never acts on the neighbor the clamp
+	// picked when the pointed pane left the list.
+	pointed := func() bool {
+		if pointedID == "" || (sel >= 0 && sel < len(rows) && rows[sel].PaneID == pointedID) {
+			return true
+		}
+		status = "row left the list"
+		return false
 	}
 	persistView := func(list []row) {
 		st.ActiveTab = tab
@@ -3674,6 +3717,10 @@ func runPicker() int {
 		if maxS := max(0, len(rows)-vis); scrollOffset > maxS {
 			scrollOffset = maxS
 		}
+		pointedID = ""
+		if sel < len(rows) {
+			pointedID = rows[sel].PaneID
+		}
 		var frame string
 		switch {
 		case showHelp:
@@ -3748,6 +3795,9 @@ func runPicker() int {
 				fmt.Fprintf(f, "key=%q tab=%d searching=%v rows=%d sel=%d\n", key, tab, searching, len(rows), sel)
 				f.Close()
 			}
+		}
+		if key == "\x03" || key == "ctrl-c" {
+			return 0
 		}
 		half := max(1, (h-3)/2)
 		if showHelp {
@@ -4095,6 +4145,9 @@ func runPicker() int {
 		if searching && !showHelp {
 			switch searchEd.Feed(key) {
 			case vimline.ActAccept:
+				if !pointed() {
+					break
+				}
 				if len(rows) > 0 {
 					target := rows[sel].PaneID
 					tty.WriteString("\x1b[2J\x1b[H")
@@ -4320,6 +4373,9 @@ func runPicker() int {
 				sel++
 			}
 		case key == "enter":
+			if !pointed() {
+				break
+			}
 			if dbgEnter := os.Getenv("RECALL_DEBUG"); dbgEnter != "" {
 				f, _ := os.OpenFile("/tmp/recall-enter.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 				if f != nil {
@@ -4383,6 +4439,9 @@ func runPicker() int {
 			status = "sort: " + activeSortLabel(st, v, sortMode)
 			rebuild()
 		case key == "i" && !searching && !showHelp && !showJev:
+			if !pointed() {
+				break
+			}
 			if len(rows) > 0 && sel < len(rows) {
 				teaching = true
 				teachField = 0
@@ -4395,6 +4454,9 @@ func runPicker() int {
 				teachEd = vimline.New("")
 			}
 		case key == "e" && !searching && !showHelp:
+			if !pointed() {
+				break
+			}
 			if len(rows) == 0 {
 				break
 			}
@@ -4435,6 +4497,9 @@ func runPicker() int {
 			lastDoneID = undoDone(st, lastDoneID, saveSt)
 			rebuild()
 		case key == "h" && !searching && !showHelp:
+			if !pointed() {
+				break
+			}
 			if len(rows) == 0 {
 				break
 			}
@@ -4464,6 +4529,9 @@ func runPicker() int {
 			remindLabel = rows[sel].Label
 			status = ""
 		case key == "n" && !searching && !showHelp:
+			if !pointed() {
+				break
+			}
 			if len(rows) == 0 {
 				break
 			}
@@ -4473,6 +4541,9 @@ func runPicker() int {
 			noteEd = vimline.New(rows[sel].Note)
 			status = ""
 		case key == "!" && !searching && !showHelp:
+			if !pointed() {
+				break
+			}
 			if len(rows) == 0 {
 				break
 			}
@@ -4536,6 +4607,9 @@ func runPicker() int {
 			stateFilter = ""
 			searchEd = vimline.New("")
 		case key == "m" && !searching:
+			if !pointed() {
+				break
+			}
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
 				if st.toggleFavorite(id) {

@@ -31,6 +31,7 @@ func useTempConfig(t *testing.T) {
 	lastStoreFP.Store("")
 	loadFailed.Store(false)
 	saveTaint.Store(false)
+	stateVanished.Store(false)
 }
 
 // writeStoreDirect simulates a write from another process: it replaces the
@@ -420,6 +421,113 @@ func TestPickerKeepsAndRematerializesStateWhenFileGone(t *testing.T) {
 	}
 	if len(final.Favorites) != 1 {
 		t.Fatalf("favorites must survive the gap: %v", final.Favorites)
+	}
+}
+
+// TestPickerKeepsDatasetWhenFileRecreated pins picker-wins-after-vanish: a
+// recreated recall.json that drops panes the picker holds is a recreation, not
+// a writer's continuation, so the picker keeps its dataset and the next save
+// writes the full store. A recreation is recognised two ways: it drops a
+// pinned pane no writer may drop, or the picker watched the file vanish.
+func TestPickerKeepsDatasetWhenFileRecreated(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		watch bool
+		pin   bool
+	}{
+		{"recreation dropping a pinned pane", false, true},
+		{"recreation after a watched vanish", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			seed := mustLoad(t)
+			seed.TabsInit = true
+			seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+			seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
+			seed.Panes["w1:p3"] = &paneStat{Visits: 3, Label: "three"}
+			if tc.pin {
+				seed.Panes["w1:p1"].Note = "pinned"
+			}
+			if err := saveStore(seed); err != nil {
+				t.Fatal(err)
+			}
+
+			st := mustLoad(t)
+			st.Panes["w1:p3"].Visits = 4
+			if err := os.Remove(statePath()); err != nil {
+				t.Fatal(err)
+			}
+			if tc.watch {
+				if got := refreshStore(st); got != st {
+					t.Fatal("refresh must keep the in-memory store when the file vanishes")
+				}
+			}
+			// A hook's honest fresh-store write recreates the file from one pane.
+			writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
+				"w1:p9": {Visits: 1, Label: "hook"},
+			}})
+
+			if got := refreshStore(st); got != st {
+				t.Fatal("the recreated file must not replace the picker's dataset")
+			}
+			if err := saveStore(st); err != nil {
+				t.Fatalf("the picker's save must re-materialize the full store: %v", err)
+			}
+			final := mustLoad(t)
+			for _, id := range []string{"w1:p1", "w1:p2", "w1:p3"} {
+				if final.Panes[id] == nil {
+					t.Fatalf("dataset pane %s was dropped: %+v", id, final.Panes)
+				}
+			}
+			if final.Panes["w1:p3"].Visits != 4 {
+				t.Fatalf("dataset change lost: %+v", final.Panes["w1:p3"])
+			}
+
+			// The episode is over once the dataset lands: a writer's write is
+			// adopted again, so a prune stays pruned.
+			hook := mustLoad(t)
+			delete(hook.Panes, "w1:p2")
+			hook.Panes["w1:p1"].Visits++
+			writeStoreDirect(t, hook)
+			if got := refreshStore(final); got == final {
+				t.Fatal("a writer's write must be adopted again after the dataset lands")
+			}
+		})
+	}
+}
+
+// TestPickerAdoptsSupersetAfterVanish pins the other half of the rule: a
+// recreated file that holds everything the picker holds and more is another
+// saver writing more, not less, so the picker adopts it normally.
+func TestPickerAdoptsSupersetAfterVanish(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	st := mustLoad(t)
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if got := refreshStore(st); got != st {
+		t.Fatal("refresh must keep the in-memory store when the file vanishes")
+	}
+	writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
+		"w1:p1": {Visits: 1, Label: "one"},
+		"w1:p2": {Visits: 2, Label: "two"},
+		"w1:p9": {Visits: 5, Label: "hook"},
+	}})
+
+	fresh := refreshStore(st)
+	if fresh == st {
+		t.Fatal("a superset recreation must be adopted normally")
+	}
+	if fresh.Panes["w1:p9"] == nil || fresh.Panes["w1:p9"].Visits != 5 {
+		t.Fatalf("the adopted superset lost the other saver's pane: %+v", fresh.Panes)
 	}
 }
 
