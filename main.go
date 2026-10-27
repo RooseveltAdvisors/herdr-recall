@@ -503,22 +503,16 @@ func (w *storeWriter) note() string {
 }
 
 // adopt folds an external store into the session at pane and top-level field
-// granularity. A unit the external write touched while the operator has a
-// pending change there refuses the adoption and the pending change wins over
-// the sync; otherwise the pending change is reapplied wholesale over the
-// adopted store. base is the last synced state, taken before the adoption.
+// granularity. The external store is adopted entirely and the pending change
+// is overlaid wholesale: a conflicting unit keeps the operator's version while
+// every disjoint external unit lands. base is the last synced state, taken
+// before the adoption.
 func (w *storeWriter) adopt(st, fresh *store, base map[string]any) *store {
 	if !w.pending() {
 		return fresh
 	}
-	pending := changedUnits(base, storeFields(st))
-	for u := range changedUnits(base, storeFields(fresh)) {
-		if pending[u] {
-			return st
-		}
-	}
 	merged := storeFields(fresh)
-	applyUnits(merged, storeFields(st), pending)
+	applyUnits(merged, storeFields(st), changedUnits(base, storeFields(st)))
 	out := &store{}
 	if b, err := json.Marshal(merged); err == nil {
 		_ = json.Unmarshal(b, out)

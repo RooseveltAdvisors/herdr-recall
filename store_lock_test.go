@@ -525,7 +525,10 @@ func TestPendingChangeRetriesOrDiscards(t *testing.T) {
 // TestAdoptionRefusesSameUnitWrite pins the conflict rule: an external write
 // on a unit the operator changed refuses the adoption, the pending change
 // wins, and the pending note stays.
-func TestAdoptionRefusesSameUnitWrite(t *testing.T) {
+// TestAdoptionKeepsPendingAndAdoptsDisjoint pins the overlay rule: a
+// conflicting unit keeps the operator's version while every disjoint
+// external unit still lands.
+func TestAdoptionKeepsPendingAndAdoptsDisjoint(t *testing.T) {
 	useTempConfig(t)
 	seed := mustLoad(t)
 	seed.TabsInit = true
@@ -554,11 +557,11 @@ func TestAdoptionRefusesSameUnitWrite(t *testing.T) {
 	if kept.Panes["w1:p1"].Note != "typed" {
 		t.Fatalf("the pending change was lost: %q", kept.Panes["w1:p1"].Note)
 	}
-	if kept.Panes["w1:p2"].Visits != 1 {
-		t.Fatalf("the refused adoption still took the sync: %d", kept.Panes["w1:p2"].Visits)
+	if kept.Panes["w1:p2"].Visits != 6 {
+		t.Fatalf("the disjoint external write was dropped: %d", kept.Panes["w1:p2"].Visits)
 	}
 	if w.note() == "" {
-		t.Fatal("the refused adoption must keep the pending note")
+		t.Fatal("the adoption must keep the pending note until a real save")
 	}
 
 	st2 := mustLoad(t)
@@ -568,11 +571,68 @@ func TestAdoptionRefusesSameUnitWrite(t *testing.T) {
 	}
 	hook2 := mustLoad(t)
 	hook2.Favorites = []string{"w1:p2"}
+	hook2.Panes["w1:p2"].Visits += 3
 	writeStoreDirect(t, hook2)
 	base = syncedFields()
 	kept = w.adopt(st2, refreshStore(st2), base)
 	if len(kept.Favorites) != 2 {
 		t.Fatalf("the pending favorites change was lost: %v", kept.Favorites)
+	}
+	if kept.Panes["w1:p2"].Visits != 9 {
+		t.Fatalf("the disjoint external write was dropped: %d", kept.Panes["w1:p2"].Visits)
+	}
+}
+
+// TestSaveAfterConflictAdoptionKeepsExternalWrites pins the traced failure:
+// the save after an adoption that overlapped the pending change must not
+// erase the disjoint hook writes or prune deletions.
+func TestSaveAfterConflictAdoptionKeepsExternalWrites(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "old"}
+	seed.Panes["w1:p2"] = &paneStat{Visits: 1, Label: "two"}
+	seed.Panes["w1:dead"] = &paneStat{Label: "dead"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	w := &storeWriter{lk: lk}
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
+	if err := w.persist(st); err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+
+	hook := mustLoad(t)
+	hook.Panes["w1:p1"].Visits++
+	hook.Panes["w1:p2"].Visits += 5
+	delete(hook.Panes, "w1:dead")
+	writeStoreDirect(t, hook)
+
+	base := syncedFields()
+	st = w.adopt(st, refreshStore(st), base)
+
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	if err := w.persist(st); err != nil {
+		t.Fatalf("save after the adoption: %v", err)
+	}
+	final := mustLoad(t)
+	if final.Panes["w1:p1"].Note != "typed" {
+		t.Fatalf("the pending change must persist: %q", final.Panes["w1:p1"].Note)
+	}
+	if final.Panes["w1:p1"].Visits != 1 {
+		t.Fatalf("the conflicting unit must keep the operator version wholesale: %d", final.Panes["w1:p1"].Visits)
+	}
+	if final.Panes["w1:p2"].Visits != 6 {
+		t.Fatalf("the disjoint hook write was erased: %d", final.Panes["w1:p2"].Visits)
+	}
+	if final.Panes["w1:dead"] != nil {
+		t.Fatal("the hook prune was erased")
 	}
 }
 
