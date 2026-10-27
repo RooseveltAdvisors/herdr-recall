@@ -295,6 +295,14 @@ func loadStore() *store {
 		s.TabsInit = true
 		_ = saveStore(s)
 	}
+	// Later was inserted at index 2. Shift a saved index so Recent stays Recent.
+	if s.Version < 2 {
+		if s.ActiveTab >= 2 {
+			s.ActiveTab++
+		}
+		s.Version = 2
+		_ = saveStore(s)
+	}
 	// Bump persisted 20 limits to 50 so Most used fills the popup.
 	for i := range s.Tabs {
 		if s.Tabs[i].Limit == 20 {
@@ -312,7 +320,7 @@ func defaultTabs() []customTab {
 }
 
 func views(st *store) []view {
-	out := []view{{Kind: "favorites"}, {Kind: "inbox"}}
+	out := []view{{Kind: "favorites"}, {Kind: "inbox"}, {Kind: "later"}}
 	for i := range st.Tabs {
 		out = append(out, view{Kind: "custom", Idx: i})
 	}
@@ -324,6 +332,8 @@ func viewName(st *store, v view) string {
 	switch v.Kind {
 	case "inbox":
 		return "Inbox"
+	case "later":
+		return "Later"
 	case "all":
 		return "All"
 	case "favorites":
@@ -366,6 +376,8 @@ func tabJumpLetters(st *store) map[string]int {
 		switch v.Kind {
 		case "inbox":
 			claim("i", i)
+		case "later":
+			claim("l", i)
 		case "favorites":
 			claim("f", i)
 		case "all":
@@ -409,7 +421,7 @@ func registerGoChords(d *keys.Dispatcher, st *store) {
 		chords[letter] = fmt.Sprintf("goto:%d", idx)
 		hint = append(hint, letter+" "+viewName(st, views(st)[idx]))
 	}
-	for _, letter := range []string{"i", "r", "f", "m", "a"} {
+	for _, letter := range []string{"i", "l", "r", "f", "m", "a"} {
 		add(letter)
 	}
 	var extra []string
@@ -1036,6 +1048,20 @@ func rowsForInner(all []row, s *snapshot, st *store, v view, mode int, now int64
 	switch v.Kind {
 	case "inbox":
 		return syncInboxRows(all, st, now)
+	case "later":
+		var later []row
+		for _, r := range all {
+			if r.RemindAt > 0 {
+				later = append(later, r)
+			}
+		}
+		sort.SliceStable(later, func(i, j int) bool {
+			if later[i].RemindAt != later[j].RemindAt {
+				return later[i].RemindAt < later[j].RemindAt
+			}
+			return later[i].PaneID < later[j].PaneID
+		})
+		return later
 	case "favorites":
 		var list []row
 		for _, r := range all {
@@ -1475,7 +1501,7 @@ func allHelpEntries() []helpEntry {
 		{"enter", "focus / switch to selected pane directly"},
 		{"j / k / arrows", "move one row, or N rows with a count (e.g. 3j)"},
 		{"gg / G", "jump to first / last row"},
-		{"g i / g r / g f / g m / g a", "jump to Inbox, Recent, Favorites, Most used, All"},
+		{"g i / g l / g r / g f / g m / g a", "jump to Inbox, Later, Recent, Favorites, Most used, All"},
 		{"left / right", "switch tabs"},
 		{"ctrl-d / ctrl-u", "scroll half-page down / up"},
 		{"e", "mark done. Leaves current list. z undoes"},
@@ -2370,6 +2396,8 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			emit(keyOverlay + "  Inbox zero. All active threads are triaged." + keyReset)
 		case len(names) > 0 && names[active] == "Favorites":
 			emit(keyOverlay + "  Nothing pinned. Press m on a pane to mark it." + keyReset)
+		case len(names) > 0 && names[active] == "Later":
+			emit(keyOverlay + "  No reminders. Press h on a pane to set one." + keyReset)
 		default:
 			emit(keyOverlay + "  No panes in this tab." + keyReset)
 		}
@@ -2380,7 +2408,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	} else {
 		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "J", "jev", "h", "remind", "n", "note", "!", "block", "/", "search"))
 	}
-	extra := "arrows tabs   g i/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
+	extra := "arrows tabs   g i/l/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
 	}
@@ -3794,7 +3822,13 @@ func runPicker() int {
 					status = "saved " + name
 				} else {
 					st.Tabs = append(st.Tabs, ct)
-					tab = len(views(st)) - 2
+					tab = 0
+					for i, v := range views(st) {
+						if v.Kind == "custom" && v.Idx == len(st.Tabs)-1 {
+							tab = i
+							break
+						}
+					}
 					status = "created " + name
 				}
 				_ = saveStore(st)

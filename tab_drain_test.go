@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,7 +63,7 @@ func TestTabJumpLetters(t *testing.T) {
 		}
 		return viewName(st, views(st)[idx])
 	}
-	if name("i") != "Inbox" || name("r") != "Recent" || name("f") != "Favorites" || name("m") != "Most used" || name("a") != "All" {
+	if name("i") != "Inbox" || name("l") != "Later" || name("r") != "Recent" || name("f") != "Favorites" || name("m") != "Most used" || name("a") != "All" {
 		t.Fatalf("fixed tabs = %v", got)
 	}
 	if name("n") != "Infra" {
@@ -73,10 +74,31 @@ func TestTabJumpLetters(t *testing.T) {
 	}
 }
 
+func TestLaterListsOnlyReminders(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{
+		Version: 2, TabsInit: true, Tabs: defaultTabs(),
+		Panes: map[string]*paneStat{
+			"soon": {Label: "soon", RemindAt: now + 100, Last: now},
+			"due":  {Label: "due", RemindAt: now - 10, Last: now},
+			"none": {Label: "none", Last: now},
+		},
+	}
+	snap := &snapshot{Panes: []paneRec{
+		{PaneID: "soon", AgentStatus: "idle"},
+		{PaneID: "due", AgentStatus: "idle"},
+		{PaneID: "none", AgentStatus: "working"},
+	}}
+	got := rowsFor(snap, st, view{Kind: "later"}, sortDefault)
+	if strings.Join(paneIDs(got), ",") != "due,soon" {
+		t.Fatalf("later = %v, want due then soon", paneIDs(got))
+	}
+}
+
 func TestOpenTabRestoresSavedTab(t *testing.T) {
 	st := &store{Version: 1, TabsInit: true, Tabs: defaultTabs()}
-	// Live store: active_tab 2 is Recent. Reopen must not force Inbox.
-	st.ActiveTab = 2
+	// After Later was inserted, Recent is index 3. A saved 3 reopens Recent.
+	st.ActiveTab = 3
 	got := openTab(st)
 	if viewName(st, views(st)[got]) != "Recent" {
 		t.Fatalf("reopen = %s, want Recent", viewName(st, views(st)[got]))

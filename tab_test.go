@@ -83,7 +83,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 		},
 	}
 	gotOrder := strings.Join(viewNames(st), ",")
-	wantOrder := "Favorites,Inbox,Recent,Most used,All"
+	wantOrder := "Favorites,Inbox,Later,Recent,Most used,All"
 	if gotOrder != wantOrder {
 		t.Fatalf("tab order = %q, want %q", gotOrder, wantOrder)
 	}
@@ -153,7 +153,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 
 	// Snoozed pane renders ~ in All tab, and All shows [sort: Most recent].
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
-	allPlain := stripANSI(renderFrame(all, 0, 0, vimline.View{Label: "/"}, "", 100, 18, viewNames(st), 4, "both", ""))
+	allPlain := stripANSI(renderFrame(all, 0, 0, vimline.View{Label: "/"}, "", 100, 18, viewNames(st), 5, "both", ""))
 	if !strings.Contains(allPlain, "\u25f7") || !strings.Contains(allPlain, "[sort: Most recent]") {
 		t.Fatalf("expected reminder icon and [sort: Most recent] pill in All:\n%s", allPlain)
 	}
@@ -195,7 +195,7 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 	if len(recent) > 0 && recent[0].PaneID == "notes" {
 		t.Fatal("old favorite was pinned to the top of Recent")
 	}
-	frame := renderFrame(recent, 0, 0, vimline.View{Label: "/"}, "", 90, 16, viewNames(st), 2, "last", "")
+	frame := renderFrame(recent, 0, 0, vimline.View{Label: "/"}, "", 90, 16, viewNames(st), 3, "last", "")
 	plain := stripANSI(frame)
 	if !strings.Contains(strings.Split(plain, "\n")[0], "Recent") {
 		t.Fatalf("tab bar missing:\n%s", plain)
@@ -210,7 +210,7 @@ func TestCustomTabsDoNotPinFavorites(t *testing.T) {
 	if len(all) != 26 {
 		t.Fatalf("all len = %d", len(all))
 	}
-	allFrame := renderFrame(all, 20, 0, vimline.View{Label: "/"}, "", 90, 14, viewNames(st), 4, "both", "", activeSortLabel(st, view{Kind: "all"}, sortDefault))
+	allFrame := renderFrame(all, 20, 0, vimline.View{Label: "/"}, "", 90, 14, viewNames(st), 5, "both", "", activeSortLabel(st, view{Kind: "all"}, sortDefault))
 	if strings.Count(allFrame, "\n") >= 14 {
 		t.Fatalf("All tab emitted %d newlines for height 14, which scrolls the tab bar off", strings.Count(allFrame, "\n"))
 	}
