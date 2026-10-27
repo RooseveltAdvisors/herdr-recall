@@ -389,6 +389,58 @@ func TestCLIWriterRefusesWriteWithoutLock(t *testing.T) {
 	}
 }
 
+// TestWriterRefusesWhenLockProvesPriorLife pins the proven prior life rule:
+// recall.lock beside a missing recall.json refuses the write and creates no
+// file, a bare first run still creates state, and the writer works again once
+// the picker restores the json.
+func TestWriterRefusesWhenLockProvesPriorLife(t *testing.T) {
+	useTempConfig(t)
+	run := func(args ...string) ([]byte, error) {
+		argv := append([]string{"run", "."}, args...)
+		return exec.Command("go", argv...).CombinedOutput()
+	}
+
+	if err := os.WriteFile(lockPath(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"favorite", "w1:p2"}, {"jev", "reset"}} {
+		out, err := run(args...)
+		if err == nil {
+			t.Fatalf("%v must refuse when recall.lock proves prior life: %s", args, out)
+		}
+		if !strings.Contains(string(out), "recall.lock proves it existed") || !strings.Contains(string(out), "restore") {
+			t.Fatalf("%v refusal must name the situation and the recovery: %s", args, out)
+		}
+		if _, err := os.Stat(statePath()); !os.IsNotExist(err) {
+			t.Fatalf("%v must create no recall.json", args)
+		}
+	}
+
+	if err := os.Remove(lockPath()); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run("favorite", "w1:p2"); err != nil {
+		t.Fatalf("the bare first run must create state: %v: %s", err, out)
+	}
+	if _, err := os.Stat(statePath()); err != nil {
+		t.Fatalf("the first run must create recall.json: %v", err)
+	}
+
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	restored := &store{Version: 1, Panes: map[string]*paneStat{"w1:p1": {Visits: 1, Label: "one"}}, TabsInit: true}
+	if err := saveStore(restored); err != nil {
+		t.Fatalf("the picker restore must write: %v", err)
+	}
+	if out, err := run("favorite", "w1:p2"); err != nil {
+		t.Fatalf("the writer must work again once the json is restored: %v: %s", err, out)
+	}
+	if final := mustLoad(t); !final.isFavorite("w1:p2") {
+		t.Fatal("the writer's change must land after the restore")
+	}
+}
+
 // TestJevResetClearsLearnings covers the ordinary locked path of the command
 // that now fails closed.
 func TestJevResetClearsLearnings(t *testing.T) {
