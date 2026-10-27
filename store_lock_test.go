@@ -607,16 +607,25 @@ func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 // TestRefusedSaveKeepsDatasetAfterRebuild pins the save-time half of the same
 // rule and the taint scope inside the episode. A refused save while the file
 // is rebuilt or still gone must not roll back into that file, so the store is
-// tainted with the refused mutation in memory. The taint stops only that
-// mutation: the next save writes the held dataset back without it, the note
-// names the last action as not applied, and repeating the action lands.
+// tainted with the refused mutation in memory. That holds for a rebuild that
+// re-records every held pane without its content too. The taint stops only
+// the refused mutation: the next save writes the held dataset back without
+// it, the note names the last action as not applied, and repeating the
+// action lands.
 func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		rebuild bool
+		rebuild map[string]*paneStat
 	}{
-		{"rebuilt", true},
-		{"still gone", false},
+		{"rebuilt from one pane", map[string]*paneStat{
+			"w1:p9": {Visits: 1, Label: "hook"},
+		}},
+		{"rebuilt from every pane, stripped", map[string]*paneStat{
+			"w1:p1": {Visits: 1, Label: "one"},
+			"w1:p2": {Visits: 1, Label: "two"},
+			"w1:p3": {Visits: 1, Label: "three"},
+		}},
+		{"still gone", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useTempConfig(t)
@@ -635,10 +644,8 @@ func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 			if err := os.Remove(statePath()); err != nil {
 				t.Fatal(err)
 			}
-			if tc.rebuild {
-				writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
-					"w1:p9": {Visits: 1, Label: "hook"},
-				}})
+			if tc.rebuild != nil {
+				writeStoreDirect(t, &store{Version: 1, Panes: tc.rebuild})
 			}
 			before, _ := os.ReadFile(statePath())
 
@@ -651,8 +658,8 @@ func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 			if err == nil {
 				t.Fatal("the save must be refused while the lock is unavailable")
 			}
-			if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p2"] == nil || kept.Panes["w1:p3"] == nil {
-				t.Fatalf("the rollback replaced the dataset with the rebuild: %+v", kept.Panes)
+			if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p1"].Note != "call vendor" || kept.Panes["w1:p2"] == nil || kept.Panes["w1:p3"] == nil || !kept.isFavorite("w1:p2") {
+				t.Fatalf("the rollback replaced the dataset with the rebuild: %+v %v", kept.Panes, kept.Favorites)
 			}
 			if after, _ := os.ReadFile(statePath()); !bytes.Equal(after, before) {
 				t.Fatal("the refused save changed recall.json")
@@ -959,23 +966,87 @@ func TestEpisodeRefusesRebuildMissingContent(t *testing.T) {
 			if err := saveStore(st); err != nil {
 				t.Fatalf("the picker's save must write the dataset: %v", err)
 			}
-			final := mustLoad(t)
-			if p := final.Panes["w1:p1"]; p == nil || p.Note != "call vendor" {
-				t.Fatalf("the note was not written back: %+v", p)
-			}
-			if p := final.Panes["w1:p2"]; p == nil || !p.ManualBlocked || !final.isFavorite("w1:p2") {
-				t.Fatalf("the manual block or favorite was not written back: %+v %v", p, final.Favorites)
-			}
-			if p := final.Panes["w1:p3"]; p == nil || p.RemindAt == 0 {
-				t.Fatalf("the reminder was not written back: %+v", p)
-			}
-			if len(final.Tabs) != 3 || final.Tabs[2].Name != "Work" {
-				t.Fatalf("the custom tab was not written back: %+v", final.Tabs)
-			}
-			if final.Jev == nil || final.Jev.Weights["label:docs"] != 0.5 {
-				t.Fatalf("the Jev weight was not written back: %+v", final.Jev)
-			}
+			assertHeldUnits(t, mustLoad(t))
 		})
+	}
+}
+
+// assertHeldUnits fails unless s carries every content unit seedHeldUnits
+// saved.
+func assertHeldUnits(t *testing.T, s *store) {
+	t.Helper()
+	if p := s.Panes["w1:p1"]; p == nil || p.Note != "call vendor" {
+		t.Fatalf("the note was not written back: %+v", p)
+	}
+	if p := s.Panes["w1:p2"]; p == nil || !p.ManualBlocked || !s.isFavorite("w1:p2") {
+		t.Fatalf("the manual block or favorite was not written back: %+v %v", p, s.Favorites)
+	}
+	if p := s.Panes["w1:p3"]; p == nil || p.RemindAt == 0 {
+		t.Fatalf("the reminder was not written back: %+v", p)
+	}
+	if len(s.Tabs) != 3 || s.Tabs[2].Name != "Work" {
+		t.Fatalf("the custom tab was not written back: %+v", s.Tabs)
+	}
+	if s.Jev == nil || s.Jev.Weights["label:docs"] != 0.5 {
+		t.Fatalf("the Jev weight was not written back: %+v", s.Jev)
+	}
+}
+
+// TestIdlePickerRefusesStrippedFullRebuild pins the continuation proof at
+// every adoption, not only inside an observed episode. recall.json vanishes
+// while the picker waits for a key, and focus hooks re-record every held
+// pane before any refresh sees the gap, so the rebuilt file carries every
+// held pane ID and none of the held content. The picker's next refresh
+// refuses it and keeps the dataset, and the next save writes the full store
+// back. A writer that changes a unit and keeps it, or removes a favorite or
+// Jev weight the way the favorite and jev reset commands do, is adopted.
+func TestIdlePickerRefusesStrippedFullRebuild(t *testing.T) {
+	useTempConfig(t)
+	seedHeldUnits(t)
+
+	st := mustLoad(t)
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	// Each focus hook loads what the previous one wrote, or starts fresh,
+	// and records only its pane's visit, the way recordFocus does.
+	for _, id := range []string{"w1:p1", "w1:p2", "w1:p3"} {
+		hook := &store{Version: 1, Panes: map[string]*paneStat{}}
+		if _, err := os.Stat(statePath()); err == nil {
+			hook = readStoreDirect(t)
+		}
+		ps := hook.ensurePane(id)
+		ps.Visits++
+		ps.Last = time.Now().Unix()
+		ps.Label = st.Panes[id].Label
+		writeStoreDirect(t, hook)
+	}
+
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	if got := refreshStore(st); got != st {
+		t.Fatal("the stripped rebuild must not replace the picker's dataset")
+	}
+	if _, err := persistStore(lk, st); err != nil {
+		t.Fatalf("the next save must write the dataset back: %v", err)
+	}
+	final := mustLoad(t)
+	assertHeldUnits(t, final)
+
+	edit := readStoreDirect(t)
+	edit.Panes["w1:p1"].Note = "call vendor at 3"
+	edit.Favorites = []string{}
+	edit.Jev.Weights = nil
+	writeStoreDirect(t, edit)
+	fresh := refreshStore(final)
+	if fresh == final {
+		t.Fatal("a writer's change that keeps every picker-only unit must be adopted")
+	}
+	if fresh.Panes["w1:p1"].Note != "call vendor at 3" || fresh.isFavorite("w1:p2") || fresh.Jev != nil && len(fresh.Jev.Weights) > 0 {
+		t.Fatalf("the writer's change was not adopted: %+v %v %+v", fresh.Panes["w1:p1"], fresh.Favorites, fresh.Jev)
 	}
 }
 

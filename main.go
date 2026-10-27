@@ -358,17 +358,22 @@ const pruneKeep = 200
 // recreatesState reports whether the store on disk is a recreation of the
 // proven state instead of a writer's continuation of it. Inside a vanish
 // episode only a file that continues the proven state may replace it.
-// Outside one, a missing proven pane is a prune's work only when the file
+// Outside one, a file that strips a content unit only a picker removes was
+// built again, and so was one that misses a proven pane prune could not
+// have dropped. A missing proven pane is a prune's work only when the file
 // carries a full keep window of panes ranked at or above it: prune drops
 // just the tail of a closed set it has a window to drop. A held pin proves
-// nothing here: a writer may un-pin and prune a pane for real. A missing
-// pane prune could not drop means the file was built again from nothing,
-// which opens the episode. The proven state is the reference, so this
-// process's own unsaved panes are no evidence either way.
+// nothing for a missing pane: a writer may un-pin and prune it for real.
+// Either finding opens the episode. The proven state is the reference, so
+// this process's own unsaved changes are no evidence either way.
 func recreatesState(disk *store) bool {
 	held := provenState()
 	if stateVanished.Load() {
 		return !continues(held, disk)
+	}
+	if strips(held, disk) {
+		stateVanished.Store(true)
+		return true
 	}
 	for id, hp := range held.Panes {
 		if disk.Panes[id] != nil {
@@ -393,26 +398,13 @@ func recreatesState(disk *store) bool {
 // tab, and each Jev weight. A file that reappears during a vanish episode
 // must prove that before it replaces the held dataset.
 func continues(held, disk *store) bool {
-	for id, hp := range held.Panes {
-		dp := disk.Panes[id]
-		if dp == nil || hp.Note != "" && dp.Note == "" || hp.ManualBlocked && !dp.ManualBlocked || hp.RemindAt > 0 && dp.RemindAt == 0 {
+	for id := range held.Panes {
+		if disk.Panes[id] == nil {
 			return false
 		}
 	}
 	for _, id := range held.Favorites {
 		if !disk.isFavorite(id) {
-			return false
-		}
-	}
-	for _, ht := range held.Tabs {
-		found := false
-		for _, dt := range disk.Tabs {
-			if dt.Name == ht.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
 			return false
 		}
 	}
@@ -426,7 +418,35 @@ func continues(held, disk *store) bool {
 			}
 		}
 	}
-	return true
+	return !strips(held, disk)
+}
+
+// strips reports whether disk dropped a content unit of held that only a
+// picker removes: the note, manual block, or reminder of a pane disk still
+// carries, or a tab. No hook or command clears these, so a changed file that
+// lacks one does not prove it continues the held state. Favorites and Jev
+// weights are left to the episode check: the favorite and jev reset
+// commands remove them for real.
+func strips(held, disk *store) bool {
+	for id, hp := range held.Panes {
+		dp := disk.Panes[id]
+		if dp != nil && (hp.Note != "" && dp.Note == "" || hp.ManualBlocked && !dp.ManualBlocked || hp.RemindAt > 0 && dp.RemindAt == 0) {
+			return true
+		}
+	}
+	for _, ht := range held.Tabs {
+		found := false
+		for _, dt := range disk.Tabs {
+			if dt.Name == ht.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return true
+		}
+	}
+	return false
 }
 
 // refreshStore adopts on-disk writes made by hook or CLI processes since this
