@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -586,18 +587,23 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 	return st, err
 }
 
-// saveNote keeps a refusal note on screen until the operator has seen it, so
-// no save and no other status write can clear a note that was never
-// rendered. The status line clips at the pane width, so the note can reach
-// the screen as a head of itself; what the emitted frame displays is what
-// marks it seen. tok is the retry token of the refused mutation: an opaque
-// identity stamped on it at refusal, which only a later save of the same
-// mutation carries, so a landed save with it is the operator's retry. Zero
-// means no retry context.
+// saveNote keeps every note on screen until the operator has seen it, so no
+// save and no other status write can clear a note that was never rendered,
+// and no later note replaces an earlier one. The status line clips at the
+// pane width, so a note can reach the screen as a head of itself; what the
+// emitted frame displays is what marks it seen.
 type saveNote struct {
-	text  string
-	shown bool
-	tok   uint64
+	recs []noteRec // notes no frame has shown yet, oldest first
+	last string    // the note a frame showed last, until a landed save clears it
+}
+
+// noteRec is one note the operator must see. tok is the retry token of the
+// refused mutation it reports: an opaque identity stamped on it at refusal,
+// which only a later save of the same mutation carries, so a landed save
+// with it is the operator's retry. Zero means no retry context.
+type noteRec struct {
+	text string
+	tok  uint64
 }
 
 // viewTok is the retry token every view autosave carries, so the next
@@ -605,88 +611,110 @@ type saveNote struct {
 // refused in-place mutations count up from it.
 const viewTok uint64 = 1
 
-// post sets a note the operator must see: a refusal, or an overlay action
+// post queues a note the operator must see, such as an overlay action
 // ignored because its list changed. Overlay frames carry no status line, so
 // the note waits for a frame that does.
 func (n *saveNote) post(text string) string {
-	n.text = text
-	n.shown = false
-	n.tok = 0
-	return text
+	n.push(noteRec{text: text})
+	return n.keep(text)
 }
 
-// refuse posts a refusal of a save that carried tok. The token of a refused
-// in-place mutation takes over the note. While the note is unseen, a refused
-// autosave keeps any token, and a refused save with no retry context ends
-// only the autosave's: the operator's refused mutation outranks both.
+// push queues r behind every pending note. A refused autosave reports itself
+// only while no other note is pending, so r supersedes it.
+func (n *saveNote) push(r noteRec) {
+	n.recs = slices.DeleteFunc(n.recs, func(p noteRec) bool { return p.tok == viewTok })
+	n.recs = append(n.recs, r)
+}
+
+// find returns the index of the note stamped with tok, or -1.
+func (n *saveNote) find(tok uint64) int {
+	return slices.IndexFunc(n.recs, func(r noteRec) bool { return tok != 0 && r.tok == tok })
+}
+
+// refuse records the refusal of a save that carried tok. A refused mutation
+// that already has a note keeps it, and every other refusal queues its own,
+// so no refusal erases another. A refused autosave queues one only while no
+// other note is pending.
 func (n *saveNote) refuse(err error, tok uint64) string {
-	switch {
-	case n.shown || n.text == "" || tok > viewTok:
-		n.tok = tok
-	case tok == 0 && n.tok == viewTok:
-		n.tok = 0
+	text := "not saved: " + err.Error()
+	switch i := n.find(tok); {
+	case i >= 0:
+		n.recs[i].text = text
+	case tok != viewTok:
+		n.push(noteRec{text: text, tok: tok})
+	case len(n.recs) == 0:
+		n.recs = append(n.recs, noteRec{text: text, tok: tok})
 	}
-	n.text = "not saved: " + err.Error()
-	n.shown = false
-	return n.text
+	return n.keep(text)
 }
 
-// keep returns the note while no frame has shown it, so no later status
-// write, such as leaving an overlay, replaces a note the operator never saw.
+// keep returns the oldest note no frame has shown, so no later status write,
+// such as leaving an overlay, replaces a note the operator never saw.
 func (n *saveNote) keep(status string) string {
-	if n.text != "" && !n.shown {
-		return n.text
+	if len(n.recs) > 0 {
+		return n.recs[0].text
 	}
 	return status
 }
 
 // landed returns the status to show after a save carrying tok landed. A note
-// a frame has shown clears. An unseen refusal stamped with tok was just
-// retried, so it reads plain "saved" and retires. Any other landed save turns
-// an unseen refusal that still has a retry context into the composed note,
-// which acknowledges the save first and keeps the refused action visible and
-// repeatable second.
+// a frame has shown clears. The refusal stamped with tok was just retried,
+// so its note retires. Every other refusal that still has a retry context
+// turns into the composed note, which acknowledges the save first and keeps
+// the refused action visible and repeatable second. A retry that leaves none
+// reads plain "saved".
 func (n *saveNote) landed(status string, tok uint64) string {
-	switch {
-	case n.shown:
-		n.tok = 0
-		if status == n.text {
-			return ""
-		}
-	case n.tok != 0 && tok == n.tok:
-		return n.post("saved")
-	case n.tok != 0:
-		n.text = "saved; earlier action was not applied - repeat it"
-		return n.text
+	if status == n.last {
+		status = ""
 	}
-	return status
+	n.last = ""
+	i := n.find(tok)
+	if i >= 0 {
+		n.recs = slices.Delete(n.recs, i, i+1)
+	}
+	pending := false
+	for j := range n.recs {
+		if n.recs[j].tok != 0 {
+			n.recs[j].text = "saved; earlier action was not applied - repeat it"
+			pending = true
+		}
+	}
+	if i >= 0 && !pending {
+		n.push(noteRec{text: "saved"})
+	}
+	return n.keep(status)
 }
 
-// stale ends the retry context of a refused in-place mutation once no
+// stale ends the retry context of every refused in-place mutation once no
 // overlay is open. A refusal whose overlay closed cannot be retried in place
 // any more: it keeps its text, and no later save turns it into a repeat
 // instruction. The view autosave keeps its context.
 func (n *saveNote) stale() {
-	if n.tok != viewTok {
-		n.tok = 0
+	for i := range n.recs {
+		if n.recs[i].tok != viewTok {
+			n.recs[i].tok = 0
+		}
 	}
 }
 
+// rendered marks the oldest note seen once the emitted frame displays it,
+// together with every pending note of the same text.
 func (n *saveNote) rendered(frame string) {
-	if n.text == "" {
+	if len(n.recs) == 0 {
 		return
 	}
-	if strings.Contains(frame, n.text) {
-		n.shown = true
-		return
-	}
+	head := n.recs[0].text
+	seen := strings.Contains(frame, head)
 	// Clipping cuts the note's tail, never its head, so an emitted status
 	// line is exactly a head of the note. That visible head marks it seen.
 	for _, line := range strings.Split(strings.ReplaceAll(frame, "\r\n", "\n"), "\n") {
-		if line := stripANSI(line); line != "" && strings.HasPrefix(n.text, line) {
-			n.shown = true
-			return
+		if line := stripANSI(line); line != "" && strings.HasPrefix(head, line) {
+			seen = true
 		}
+	}
+	if seen {
+		n.last = head
+		n.recs = slices.DeleteFunc(n.recs, func(r noteRec) bool { return r.text == head })
 	}
 }
 
@@ -3598,23 +3626,25 @@ func runPicker() int {
 		status = note.landed(status, tok)
 		return true
 	}
-	// retryAt names the in-place mutation stamped with retryTok, the token of
-	// the last refused save that an open overlay can retry where it stands.
-	var retryAt string
-	retryTok := viewTok
+	// retry holds the token stamped on each refused mutation that an open
+	// overlay can still retry in place, by the mutation's action and target.
+	retry := map[string]uint64{}
+	minted := viewTok
 	// saveIn saves a mutation that an open overlay can retry in place, named
 	// by its action and target. A refusal stamps it with a fresh token, and
-	// only a later save of the same mutation carries that token, so only its
-	// retry resolves the refusal.
+	// only a later save of the same mutation carries that token, so each
+	// retry resolves only its own refusal.
 	saveIn := func(at string) bool {
-		tok := retryTok
-		if at != retryAt {
-			tok++
+		tok, ok := retry[at]
+		if !ok {
+			minted++
+			tok = minted
 		}
 		if saveSt(tok) {
+			delete(retry, at)
 			return true
 		}
-		retryAt, retryTok = at, tok
+		retry[at] = tok
 		return false
 	}
 	// pointed reports whether the row the drawn cursor pointed at is still
@@ -3908,6 +3938,7 @@ func runPicker() int {
 		}
 		if !showJev && !reminding && !teaching {
 			note.stale()
+			clear(retry)
 		}
 		persistView(rows)
 		status = note.keep(status)

@@ -746,7 +746,9 @@ func TestStaleRefusalNeverOrdersRetry(t *testing.T) {
 // line shows the composed note, the refused mutation is still not on disk,
 // and repeating it lands. When the refused mutation itself is retried after
 // the other save, even with its dialog changed and changed back, the note
-// reads plain "saved".
+// reads plain "saved". With two refusals pending in one overlay, each retry
+// resolves only its own: the composed note shows while the other is still
+// not on disk, and plain "saved" once both retries landed, in either order.
 func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "herdr-recall")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
@@ -768,22 +770,39 @@ func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
 		name   string
 		open   string
 		act    string
+		second []string // refuses a second mutation in the same overlay
 		keys   []string
 		note   string
 		disk   func(t *testing.T) bool
 		repeat func(t *testing.T) bool
 	}{
-		{"teach then a different teach", "i", "\r", []string{"l", "\r"}, composed,
+		{"teach then a different teach", "i", "\r", nil, []string{"l", "\r"}, composed,
 			taught("neutral"), taught("neutral", "prefer")},
-		{"teach retried after the view save", "i", "\r", []string{"l", "h", "\r"}, "saved",
+		{"teach retried after the view save", "i", "\r", nil, []string{"l", "h", "\r"}, "saved",
 			taught("prefer"), nil},
-		{"jev delete then a different delete", "J", "\r", []string{"j", "\r", "q"}, composed,
+		{"jev delete then a different delete", "J", "\r", nil, []string{"j", "\r", "q"}, composed,
 			weights("tok:alpha"), weights()},
-		{"jev delete retried after a different delete", "J", "\r", []string{"j", "\r", "\r", "q"}, "saved",
+		{"jev delete retried after a different delete", "J", "\r", nil, []string{"j", "\r", "\r", "q"}, "saved",
 			weights(), nil},
-		{"quick pick removal then a different removal", "h", "x", []string{"l", "x", "q"}, composed,
+		{"quick pick removal then a different removal", "h", "x", nil, []string{"l", "x", "q"}, composed,
 			picks("20min", "3h", "tomorrow", "clear"), picks("3h", "tomorrow", "clear")},
-		{"quick pick removal retried after a different removal", "h", "x", []string{"l", "x", "h", "x", "q"}, "saved",
+		{"quick pick removal retried after a different removal", "h", "x", nil, []string{"l", "x", "h", "x", "q"}, "saved",
+			picks("3h", "tomorrow", "clear"), nil},
+		{"two refused jev deletes, the second retried", "J", "\r", []string{"j", "\r"}, []string{"\r", "q"}, composed,
+			weights("tok:alpha"), weights()},
+		{"two refused jev deletes, the second then the first retried", "J", "\r", []string{"j", "\r"}, []string{"\r", "\r", "q"}, "saved",
+			weights(), nil},
+		{"two refused jev deletes, the first retried", "J", "\r", []string{"j", "\r"}, []string{"k", "\r", "q"}, composed,
+			weights("tok:bravo"), weights()},
+		{"two refused jev deletes, the first then the second retried", "J", "\r", []string{"j", "\r"}, []string{"k", "\r", "\r", "q"}, "saved",
+			weights(), nil},
+		{"two refused quick pick removals, the second retried", "h", "x", []string{"l", "x"}, []string{"x", "q"}, composed,
+			picks("20min", "3h", "tomorrow", "clear"), picks("3h", "tomorrow", "clear")},
+		{"two refused quick pick removals, the second then the first retried", "h", "x", []string{"l", "x"}, []string{"x", "h", "x", "q"}, "saved",
+			picks("3h", "tomorrow", "clear"), nil},
+		{"two refused quick pick removals, the first retried", "h", "x", []string{"l", "x"}, []string{"h", "x", "q"}, composed,
+			picks("1h", "3h", "tomorrow", "clear"), picks("3h", "tomorrow", "clear")},
+		{"two refused quick pick removals, the first then the second retried", "h", "x", []string{"l", "x"}, []string{"h", "x", "x", "q"}, "saved",
 			picks("3h", "tomorrow", "clear"), nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -801,13 +820,16 @@ func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
 			frame++
 			p.frames(frame)
 
-			// The first action's save fails, so it stays pending in place.
+			// Saves fail while the refused actions are taken, so they stay
+			// pending in place.
 			if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
 				t.Fatal(err)
 			}
-			p.press(tc.act)
-			frame++
-			p.frames(frame)
+			for _, k := range append([]string{tc.act}, tc.second...) {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
 			if err := os.Remove(statePath() + ".tmp"); err != nil {
 				t.Fatal(err)
 			}

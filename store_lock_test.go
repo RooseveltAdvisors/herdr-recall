@@ -1483,7 +1483,7 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	}
 
 	overlay := renderNote(80, 24, []string{"All"}, 0, vimline.View{Label: "note", Text: "x", Focused: true})
-	if strings.Contains(overlay, note.text) {
+	if strings.Contains(overlay, status) {
 		t.Fatalf("the overlay frame carries no status line:\n%s", overlay)
 	}
 	note.rendered(overlay)
@@ -1540,10 +1540,10 @@ func TestRefusalNoteSeenWhenStatusClips(t *testing.T) {
 
 	frame := renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, status, 24, 24, []string{"All"}, 0, "both", "")
 	shown := stripANSI(frame)
-	if strings.Contains(shown, note.text) {
+	if strings.Contains(shown, status) {
 		t.Fatalf("the frame must clip the note at width 24:\n%s", frame)
 	}
-	if !strings.Contains(shown, note.text[:24]) {
+	if !strings.Contains(shown, status[:24]) {
 		t.Fatalf("the frame must show the note's visible head:\n%s", frame)
 	}
 	note.rendered(frame)
@@ -1559,26 +1559,61 @@ func TestRefusalNoteSeenWhenStatusClips(t *testing.T) {
 	}
 }
 
+// showStatus renders a browse frame carrying status, which marks the note it
+// displays seen.
+func showStatus(note *saveNote, status string) {
+	note.rendered(renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, status, 80, 24, []string{"All"}, 0, "both", ""))
+}
+
 // TestRefusalWithoutRetryKeepsMutationToken pins the retry token against a
 // refused save with no retry context of its own, such as the background Jev
-// score save. While the operator's refused mutation is unseen, that refusal
-// keeps the mutation's token, so the retry still reads plain "saved" instead
-// of a stale refusal. It does end a refused autosave's context, so the next
-// autosave never reads as the retry of a save it did not repeat.
+// score save. That refusal queues its own note and leaves the mutation's
+// note stamped, so the retry resolves only its own refusal: the background
+// refusal shows first, then plain "saved", and nothing orders a repeat. Such
+// a refusal also supersedes a refused autosave, so the next autosave never
+// reads as the retry of a save it did not repeat.
 func TestRefusalWithoutRetryKeepsMutationToken(t *testing.T) {
-	err := errors.New("recall.json write failed")
 	note := &saveNote{}
-	note.refuse(err, viewTok+1)
-	status := note.refuse(err, 0)
-	if status = note.keep(note.landed(status, viewTok+1)); status != "saved" {
-		t.Fatalf("the landed retry of the refused mutation must read plain saved: %q", status)
+	note.refuse(errors.New("teach write failed"), viewTok+1)
+	status := note.refuse(errors.New("score write failed"), 0)
+	status = note.keep(note.landed(status, viewTok+1))
+	for _, want := range []string{"not saved: score write failed", "saved"} {
+		if status != want {
+			t.Fatalf("the next note must read %q: %q", want, status)
+		}
+		showStatus(note, status)
+		status = note.keep(status)
 	}
 
 	note = &saveNote{}
+	err := errors.New("recall.json write failed")
 	note.refuse(err, viewTok)
 	status = note.refuse(err, 0)
 	if status = note.keep(note.landed(status, viewTok)); status == "saved" {
 		t.Fatalf("an autosave must not resolve a refusal it did not repeat: %q", status)
+	}
+}
+
+// TestEveryNoteReachesTheScreenInOrder pins one note per refused mutation
+// and per ignored action. No later note replaces an earlier one, so once the
+// overlay closes every note reaches a frame that carries a status line,
+// oldest first, and only then does a landed save clear the line.
+func TestEveryNoteReachesTheScreenInOrder(t *testing.T) {
+	note := &saveNote{}
+	note.post("list changed - review and retry")
+	note.refuse(errors.New("first write failed"), viewTok+1)
+	note.refuse(errors.New("second write failed"), viewTok+2)
+	note.stale()
+	status := note.keep(note.landed("", viewTok))
+	for _, want := range []string{"list changed - review and retry", "not saved: first write failed", "not saved: second write failed"} {
+		if status != want {
+			t.Fatalf("the next note must read %q: %q", want, status)
+		}
+		showStatus(note, status)
+		status = note.keep(note.landed(status, viewTok))
+	}
+	if status != "" {
+		t.Fatalf("a landed save must clear the line once every note was shown: %q", status)
 	}
 }
 
