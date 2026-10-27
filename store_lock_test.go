@@ -1594,18 +1594,21 @@ func TestRefusalWithoutRetryKeepsMutationToken(t *testing.T) {
 	}
 }
 
-// TestEveryNoteReachesTheScreenInOrder pins one note per refused mutation
-// and per ignored action. No later note replaces an earlier one, so once the
-// overlay closes every note reaches a frame that carries a status line,
-// oldest first, and only then does a landed save clear the line.
-func TestEveryNoteReachesTheScreenInOrder(t *testing.T) {
+// TestNewestRefusalShowsFirst pins ruling 033's order. Refusals outrank
+// successes, the newest refusal shows first, and a success that landed
+// before a newer refusal never shows after it. Once the overlay closes, every
+// refusal reaches a frame that carries a status line, no frame shows "saved"
+// while one is pending, and only then does a landed save clear the line.
+func TestNewestRefusalShowsFirst(t *testing.T) {
 	note := &saveNote{}
 	note.post("list changed - review and retry")
-	note.refuse(errors.New("first write failed"), viewTok+1)
+	note.refuse(errors.New("first write failed"), 0)
+	note.refuse(errors.New("retried write failed"), viewTok+1)
+	note.landed("", viewTok+1)
 	note.refuse(errors.New("second write failed"), viewTok+2)
 	note.stale()
 	status := note.keep(note.landed("", viewTok))
-	for _, want := range []string{"list changed - review and retry", "not saved: first write failed", "not saved: second write failed"} {
+	for _, want := range []string{"not saved: second write failed", "not saved: first write failed", "list changed - review and retry"} {
 		if status != want {
 			t.Fatalf("the next note must read %q: %q", want, status)
 		}
@@ -1614,6 +1617,55 @@ func TestEveryNoteReachesTheScreenInOrder(t *testing.T) {
 	}
 	if status != "" {
 		t.Fatalf("a landed save must clear the line once every note was shown: %q", status)
+	}
+}
+
+// TestBrowseNotesNeverMaskEachOther pins ruling 033 in browse mode, in both
+// directions. A success still waiting for a status line never masks a newer
+// refused action: the frame reads the refusal, and the older "saved" never
+// shows after it. A refusal a frame has shown never masks a later action
+// that landed: the next frame reads that action's own status.
+func TestBrowseNotesNeverMaskEachOther(t *testing.T) {
+	note := &saveNote{}
+	note.refuse(errors.New("delete write failed"), viewTok+1)
+	note.landed("", viewTok+1)
+	status := note.refuse(errors.New("favorite write failed"), 0)
+	if status = note.keep(note.landed(status, viewTok)); status != "not saved: favorite write failed" {
+		t.Fatalf("a refused action must read its refusal, not an older success: %q", status)
+	}
+	showStatus(note, status)
+	if status = note.keep(note.landed("favorited: one", 0)); status != "favorited: one" {
+		t.Fatalf("a landed action must read its own status once the refusal was shown: %q", status)
+	}
+}
+
+// TestIdenticalRefusalsCoalesceWithCount pins ruling 033's count: identical
+// refusals show as one note that says how many actions it stands for. A
+// landed save composes them into "N earlier actions were not applied -
+// repeat them", and one refused action keeps the 031 string unchanged.
+func TestIdenticalRefusalsCoalesceWithCount(t *testing.T) {
+	err := errors.New("recall.json write failed")
+	note := &saveNote{}
+	note.refuse(err, viewTok+1)
+	note.refuse(err, viewTok+2)
+	if status := note.landed("", viewTok); status != "saved; 2 earlier actions were not applied - repeat them" {
+		t.Fatalf("a landed save must count the refused actions it reports: %q", status)
+	}
+	if status := note.landed("", viewTok+2); status != "saved; earlier action was not applied - repeat it" {
+		t.Fatalf("one refused action keeps the composed note unchanged: %q", status)
+	}
+
+	note = &saveNote{}
+	note.refuse(err, viewTok+1)
+	note.refuse(err, viewTok+2)
+	note.stale()
+	status := note.keep(note.landed("", viewTok))
+	if status != "2 actions: not saved: recall.json write failed" {
+		t.Fatalf("identical refusals must show once with their count: %q", status)
+	}
+	showStatus(note, status)
+	if status = note.keep(note.landed(status, viewTok)); status != "" {
+		t.Fatalf("the counted note must stand for both refusals: %q", status)
 	}
 }
 

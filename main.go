@@ -588,23 +588,31 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 }
 
 // saveNote keeps every note on screen until the operator has seen it, so no
-// save and no other status write can clear a note that was never rendered,
-// and no later note replaces an earlier one. The status line clips at the
-// pane width, so a note can reach the screen as a head of itself; what the
-// emitted frame displays is what marks it seen.
+// save and no other status write can clear a note that was never rendered.
+// Refusals outrank successes: the newest refusal shows first, coalesced with
+// every pending note of the same text and counted, and no success shows
+// while a refusal is pending. The status line clips at the pane width, so a
+// note can reach the screen as a head of itself; what the emitted frame
+// displays is what marks it seen.
 type saveNote struct {
 	recs []noteRec // notes no frame has shown yet, oldest first
 	last string    // the note a frame showed last, until a landed save clears it
 }
 
-// noteRec is one note the operator must see. tok is the retry token of the
-// refused mutation it reports: an opaque identity stamped on it at refusal,
-// which only a later save of the same mutation carries, so a landed save
-// with it is the operator's retry. Zero means no retry context.
+// noteRec is one note the operator must see. ok marks a success. tok is the
+// retry token of the refused mutation a refusal reports: an opaque identity
+// stamped on it at refusal, which only a later save of the same mutation
+// carries, so a landed save with it is the operator's retry. Zero means no
+// retry context.
 type noteRec struct {
 	text string
 	tok  uint64
+	ok   bool
 }
+
+// composedNote acknowledges a landed save while a refused action is still
+// not applied.
+const composedNote = "saved; earlier action was not applied - repeat it"
 
 // viewTok is the retry token every view autosave carries, so the next
 // autosave that lands is the retry of a refused one. The tokens stamped on
@@ -619,10 +627,13 @@ func (n *saveNote) post(text string) string {
 	return n.keep(text)
 }
 
-// push queues r behind every pending note. A refused autosave reports itself
-// only while no other note is pending, so r supersedes it.
+// push queues r as the newest note. A refusal supersedes every older
+// success, which must never show after it, and a refused autosave, which
+// reports itself only while no other refusal is pending.
 func (n *saveNote) push(r noteRec) {
-	n.recs = slices.DeleteFunc(n.recs, func(p noteRec) bool { return p.tok == viewTok })
+	if !r.ok {
+		n.recs = slices.DeleteFunc(n.recs, func(p noteRec) bool { return p.ok || p.tok == viewTok })
+	}
 	n.recs = append(n.recs, r)
 }
 
@@ -631,28 +642,56 @@ func (n *saveNote) find(tok uint64) int {
 	return slices.IndexFunc(n.recs, func(r noteRec) bool { return tok != 0 && r.tok == tok })
 }
 
-// refuse records the refusal of a save that carried tok. A refused mutation
-// that already has a note keeps it, and every other refusal queues its own,
-// so no refusal erases another. A refused autosave queues one only while no
-// other note is pending.
+// refuse records the refusal of a save that carried tok as the newest note.
+// A refused mutation that already has a note moves it there, and every other
+// refusal queues its own, so no refusal erases another. A refused autosave
+// queues one only while no other refusal is pending.
 func (n *saveNote) refuse(err error, tok uint64) string {
 	text := "not saved: " + err.Error()
-	switch i := n.find(tok); {
-	case i >= 0:
-		n.recs[i].text = text
-	case tok != viewTok:
+	i := n.find(tok)
+	if i >= 0 {
+		n.recs = slices.Delete(n.recs, i, i+1)
+	}
+	if i >= 0 || tok != viewTok || !slices.ContainsFunc(n.recs, func(r noteRec) bool { return !r.ok }) {
 		n.push(noteRec{text: text, tok: tok})
-	case len(n.recs) == 0:
-		n.recs = append(n.recs, noteRec{text: text, tok: tok})
 	}
 	return n.keep(text)
 }
 
-// keep returns the oldest note no frame has shown, so no later status write,
-// such as leaving an overlay, replaces a note the operator never saw.
+// next returns the note the next frame shows and its text on the status
+// line: the newest refusal ahead of any success, standing for every pending
+// note of the same text and counted when that is more than one action.
+func (n *saveNote) next() (noteRec, string) {
+	top := -1
+	for i, r := range n.recs {
+		if top < 0 || !r.ok || n.recs[top].ok {
+			top = i
+		}
+	}
+	if top < 0 {
+		return noteRec{}, ""
+	}
+	t := n.recs[top]
+	count := 0
+	for _, r := range n.recs {
+		if r.ok == t.ok && r.text == t.text {
+			count++
+		}
+	}
+	switch {
+	case t.ok || count == 1:
+		return t, t.text
+	case t.text == composedNote:
+		return t, fmt.Sprintf("saved; %d earlier actions were not applied - repeat them", count)
+	}
+	return t, fmt.Sprintf("%d actions: %s", count, t.text)
+}
+
+// keep returns the note the next frame shows, so no later status write, such
+// as leaving an overlay, replaces a note the operator never saw.
 func (n *saveNote) keep(status string) string {
-	if len(n.recs) > 0 {
-		return n.recs[0].text
+	if _, text := n.next(); text != "" {
+		return text
 	}
 	return status
 }
@@ -675,12 +714,12 @@ func (n *saveNote) landed(status string, tok uint64) string {
 	pending := false
 	for j := range n.recs {
 		if n.recs[j].tok != 0 {
-			n.recs[j].text = "saved; earlier action was not applied - repeat it"
+			n.recs[j].text = composedNote
 			pending = true
 		}
 	}
 	if i >= 0 && !pending {
-		n.push(noteRec{text: "saved"})
+		n.push(noteRec{text: "saved", ok: true})
 	}
 	return n.keep(status)
 }
@@ -697,24 +736,24 @@ func (n *saveNote) stale() {
 	}
 }
 
-// rendered marks the oldest note seen once the emitted frame displays it,
-// together with every pending note of the same text.
+// rendered marks the note seen once the emitted frame displays it, together
+// with every pending note it stands for.
 func (n *saveNote) rendered(frame string) {
-	if len(n.recs) == 0 {
+	t, text := n.next()
+	if text == "" {
 		return
 	}
-	head := n.recs[0].text
-	seen := strings.Contains(frame, head)
+	seen := strings.Contains(frame, text)
 	// Clipping cuts the note's tail, never its head, so an emitted status
 	// line is exactly a head of the note. That visible head marks it seen.
 	for _, line := range strings.Split(strings.ReplaceAll(frame, "\r\n", "\n"), "\n") {
-		if line := stripANSI(line); line != "" && strings.HasPrefix(head, line) {
+		if line := stripANSI(line); line != "" && strings.HasPrefix(text, line) {
 			seen = true
 		}
 	}
 	if seen {
-		n.last = head
-		n.recs = slices.DeleteFunc(n.recs, func(r noteRec) bool { return r.text == head })
+		n.last = text
+		n.recs = slices.DeleteFunc(n.recs, func(r noteRec) bool { return r.ok == t.ok && r.text == t.text })
 	}
 }
 

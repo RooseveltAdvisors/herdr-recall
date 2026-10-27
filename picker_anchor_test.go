@@ -749,12 +749,14 @@ func TestStaleRefusalNeverOrdersRetry(t *testing.T) {
 // reads plain "saved". With two refusals pending in one overlay, each retry
 // resolves only its own: the composed note shows while the other is still
 // not on disk, and plain "saved" once both retries landed, in either order.
+// When a different save lands while both are pending, one note counts them.
 func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "herdr-recall")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v: %s", err, out)
 	}
 	const composed = "saved; earlier action was not applied - repeat it"
+	const counted = "saved; 2 earlier actions were not applied - repeat them"
 	taught := func(want ...string) func(t *testing.T) bool {
 		return func(t *testing.T) bool { return slices.Equal(teachings(t), want) }
 	}
@@ -804,6 +806,10 @@ func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
 			picks("1h", "3h", "tomorrow", "clear"), picks("3h", "tomorrow", "clear")},
 		{"two refused quick pick removals, the first then the second retried", "h", "x", []string{"l", "x"}, []string{"h", "x", "x", "q"}, "saved",
 			picks("3h", "tomorrow", "clear"), nil},
+		{"two refused jev deletes, then a different save", "J", "\r", []string{"j", "\r"}, []string{"k", "q"}, counted,
+			weights("tok:alpha", "tok:bravo"), weights("tok:bravo")},
+		{"two refused quick pick removals, then a different save", "h", "x", []string{"l", "x"}, []string{"h", "q"}, counted,
+			picks("20min", "1h", "3h", "tomorrow", "clear"), picks("1h", "3h", "tomorrow", "clear")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useTempConfig(t)
@@ -858,6 +864,71 @@ func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
 				t.Fatalf("the refused action must stay repeatable: %+v %v %v", mustLoad(t).Jev, teachings(t), mustLoad(t).getSnoozePicks())
 			}
 		})
+	}
+}
+
+// TestNewerRefusalOutranksOlderSaved pins ruling 033 on the close-panel
+// sequence. A refused Jev delete is retried and lands, so "saved" waits for
+// a status line, and then a second delete in the same panel is refused. The
+// first frame that carries a status line reads the newer refusal, the next
+// action's own status follows it, and no frame ever shows "saved".
+func TestNewerRefusalOutranksOlderSaved(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seedPicker(t, []string{"w1:pA"}, func(s *store) {
+		s.ensureJev()
+		s.Jev.Weights = map[string]float64{"tok:alpha": 0.9, "tok:bravo": 0.5}
+	})
+
+	p := startPicker(t, bin, cfg)
+	frame := 1
+	p.frames(frame)
+	press := func(keys ...string) string {
+		for _, k := range keys {
+			p.press(k)
+			frame++
+			p.frames(frame)
+		}
+		return p.frames(frame)
+	}
+	block := func(on bool) {
+		var err error
+		if on {
+			err = os.Mkdir(statePath()+".tmp", 0o700)
+		} else {
+			err = os.Remove(statePath() + ".tmp")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	press("J")
+	block(true)
+	press("\r") // the delete of alpha is refused
+	block(false)
+	press("\r") // its retry lands, so "saved" waits for a status line
+	block(true)
+	press("\r") // the delete of bravo is refused
+	block(false)
+	if lines := lastFrame(press("q")); !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "not saved: ") }) {
+		t.Fatalf("the first status line must read the newer refusal:\n%s", strings.Join(lines, "\n"))
+	}
+	out := press("s")
+	if lines := lastFrame(out); !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "sort: ") }) {
+		t.Fatalf("the next action must read its own status:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, f := range strings.Split(out, "\x1b[2J\x1b[H") {
+		if slices.Contains(strings.Split(stripANSI(f), "\r\n"), "saved") {
+			t.Fatalf("no frame may show saved over the refusal:\n%s", stripANSI(f))
+		}
+	}
+	if w := slices.Sorted(maps.Keys(mustLoad(t).Jev.Weights)); !slices.Equal(w, []string{"tok:bravo"}) {
+		t.Fatalf("only the retried delete may reach disk: %v", w)
 	}
 }
 
