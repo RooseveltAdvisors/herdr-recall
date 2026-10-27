@@ -313,10 +313,10 @@ var lastStoreFP atomic.Value // string
 // over whatever is there.
 var loadFailed atomic.Bool
 
-// saveTaint records the refusal reason while a refused save could not be
+// saveTaint marks the store tainted while a refused save could not be
 // rolled back: the in-memory store may carry unsaved state that must never
 // reach disk until a clean reload proves the state again.
-var saveTaint atomic.Value // string
+var saveTaint atomic.Bool
 
 func hashStore(b []byte) string {
 	sum := sha256.Sum256(b)
@@ -399,31 +399,46 @@ func (l *storeLock) held() bool { return l.f != nil }
 // persistStore writes st under the held lock. A refused write rolls the
 // uncommitted mutation back by reloading the store from disk under the lock,
 // so nothing unsaved lingers, and reports the refusal.
+// cleanReload replaces the in-memory store with the proven bytes on disk and
+// clears the taint: only a reload can show the state again after a failed
+// rollback.
+func cleanReload(lk *storeLock) (*store, error) {
+	lk.acquire()
+	b, err := os.ReadFile(statePath())
+	if err != nil {
+		return nil, err
+	}
+	fresh, err := parseStore(b)
+	if err != nil {
+		return nil, err
+	}
+	loadFailed.Store(false)
+	saveTaint.Store(false)
+	stampStore(b)
+	return fresh, nil
+}
+
 func persistStore(lk *storeLock, st *store) (*store, error) {
-	reason, _ := saveTaint.Load().(string)
+	if saveTaint.Load() {
+		fresh, err := cleanReload(lk)
+		if err != nil {
+			return st, err
+		}
+		st = fresh
+	}
 	var err error
-	switch {
-	case reason != "":
-		err = errors.New(reason)
-	case !lk.held():
+	if !lk.held() {
 		err = errors.New("recall.lock unavailable")
-	default:
+	} else {
 		err = saveStore(st)
 	}
 	if err == nil {
 		return st, nil
 	}
-	lk.acquire()
-	if b, rerr := os.ReadFile(statePath()); rerr == nil {
-		if fresh, perr := parseStore(b); perr == nil {
-			stampStore(b)
-			saveTaint.Store("")
-			return fresh, err
-		}
+	if fresh, rerr := cleanReload(lk); rerr == nil {
+		return fresh, err
 	}
-	if reason == "" {
-		saveTaint.Store(err.Error())
-	}
+	saveTaint.Store(true)
 	return st, err
 }
 

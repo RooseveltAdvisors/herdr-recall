@@ -30,7 +30,7 @@ func useTempConfig(t *testing.T) {
 	configDirOnce = sync.Once{}
 	lastStoreFP.Store("")
 	loadFailed.Store(false)
-	saveTaint.Store("")
+	saveTaint.Store(false)
 }
 
 // writeStoreDirect simulates a write from another process: it replaces the
@@ -728,8 +728,9 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 }
 
 // TestTaintedRollbackNeverPersistsRefusedMutation pins the taint contract:
-// when a refused save cannot be rolled back, the refused change never reaches
-// disk and no call claims a save until a clean reload proves the state.
+// a refused change never reaches disk, the note reports the live failure
+// while the reload keeps failing, and a clean reload clears the taint so the
+// next persist saves only proven state.
 func TestTaintedRollbackNeverPersistsRefusedMutation(t *testing.T) {
 	useTempConfig(t)
 	seed := mustLoad(t)
@@ -754,17 +755,25 @@ func TestTaintedRollbackNeverPersistsRefusedMutation(t *testing.T) {
 		t.Fatal("the in-memory view must keep showing the refused change")
 	}
 
-	writeStoreDirect(t, seed)
 	kept, err = persistStore(lk, kept)
 	if err == nil {
-		t.Fatal("a tainted save must stay refused until a clean reload")
+		t.Fatal("a tainted save must stay refused while the reload fails")
+	}
+	if !os.IsNotExist(err) {
+		t.Fatalf("the note must report the live failure: %v", err)
+	}
+	note := &saveNote{}
+	if got := note.refuse(err); strings.Contains(got, "recall.lock unavailable") {
+		t.Fatalf("the note must not replay the stale reason: %q", got)
+	}
+
+	writeStoreDirect(t, seed)
+	kept, err = persistStore(lk, kept)
+	if err != nil {
+		t.Fatalf("the next persist must reload, clear the taint, and save: %v", err)
 	}
 	if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p1"].Note != "" {
 		t.Fatalf("the clean reload must drop the refused change: %+v", kept.Panes["w1:p1"])
-	}
-
-	if _, err := persistStore(lk, kept); err != nil {
-		t.Fatalf("persistence must resume after a clean reload: %v", err)
 	}
 	final := mustLoad(t)
 	if final.Panes["w1:p1"].Note != "" {
