@@ -338,12 +338,18 @@ func refreshStore(st *store) *store {
 		loadFailed.Store(!os.IsNotExist(err))
 		return st
 	}
-	loadFailed.Store(false)
 	if hashStore(b) == currentFP() {
+		loadFailed.Store(false)
 		return st
 	}
+	fresh, perr := parseStore(b)
+	if perr != nil {
+		loadFailed.Store(true)
+		return st
+	}
+	loadFailed.Store(false)
 	stampStore(b)
-	return parseStore(b)
+	return fresh
 }
 
 // storeLock serializes read-modify-write cycles on recall.json across the
@@ -399,8 +405,11 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 		return st, nil
 	}
 	lk.acquire()
-	if fresh, e := loadStore(); e == nil {
-		return fresh, err
+	if b, rerr := os.ReadFile(statePath()); rerr == nil {
+		if fresh, perr := parseStore(b); perr == nil {
+			stampStore(b)
+			return fresh, err
+		}
 	}
 	return st, err
 }
@@ -414,15 +423,23 @@ func loadStore() (*store, error) {
 		}
 		return nil, err
 	}
+	s, perr := parseStore(b)
+	if perr != nil {
+		loadFailed.Store(true)
+		return nil, perr
+	}
 	loadFailed.Store(false)
 	stampStore(b)
-	return parseStore(b), nil
+	return s, nil
 }
 
-func parseStore(b []byte) *store {
+func parseStore(b []byte) (*store, error) {
 	s := &store{Version: 1, Panes: map[string]*paneStat{}}
-	if err := json.Unmarshal(b, s); err != nil || s.Panes == nil {
-		s = &store{Version: 1, Panes: map[string]*paneStat{}}
+	if err := json.Unmarshal(b, s); err != nil {
+		return nil, err
+	}
+	if s.Panes == nil {
+		return nil, errors.New("recall.json has no panes")
 	}
 	if !s.TabsInit {
 		s.Tabs = defaultTabs()
@@ -441,7 +458,7 @@ func parseStore(b []byte) *store {
 			s.Tabs[i].Limit = 50
 		}
 	}
-	return s
+	return s, nil
 }
 
 func defaultTabs() []customTab {

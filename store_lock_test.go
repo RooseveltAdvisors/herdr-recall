@@ -623,6 +623,66 @@ func TestUnitMergeKeepsOddKeys(t *testing.T) {
 	}
 }
 
+// TestRefusedSaveKeepsStoreWhenStateGoneOrCorrupt pins that a fabricated
+// empty store never replaces proven live state: when recall.json is missing
+// or unparseable at rollback time the in-memory dataset stays intact, the
+// note stays a truthful refusal, and refresh adopts nothing.
+func TestRefusedSaveKeepsStoreWhenStateGoneOrCorrupt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lose func(t *testing.T)
+	}{
+		{"deleted", func(t *testing.T) {
+			if err := os.Remove(statePath()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"corrupt", func(t *testing.T) {
+			if err := os.WriteFile(statePath(), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			seed := mustLoad(t)
+			seed.TabsInit = true
+			seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+			seed.Favorites = []string{"w1:p1"}
+			if err := saveStore(seed); err != nil {
+				t.Fatal(err)
+			}
+
+			lk := &storeLock{}
+			st := mustLoad(t)
+			st.Panes["w1:p1"].Note = "typed"
+			tc.lose(t)
+
+			if got := refreshStore(st); got != st {
+				t.Fatal("refresh must keep the in-memory store when the state file is gone or corrupt")
+			}
+			if err := os.Mkdir(lockPath(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			kept, err := persistStore(lk, st)
+			if err == nil {
+				t.Fatal("the save must be refused while the lock is unavailable")
+			}
+			if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p1"].Visits != 1 {
+				t.Fatalf("the rollback replaced the live dataset: %+v", kept.Panes)
+			}
+			if len(kept.Favorites) != 1 {
+				t.Fatalf("the rollback dropped favorites: %v", kept.Favorites)
+			}
+			note := "not saved: " + err.Error()
+			frame := renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, note, 80, 24, []string{"All"}, 0, "both", "")
+			if !strings.Contains(frame, "not saved: ") {
+				t.Fatalf("the refusal note must render:\n%s", frame)
+			}
+		})
+	}
+}
+
 // TestStoreLockSerializesConcurrentWriters guards the critical section: many
 // read-modify-write cycles under the lock must not lose an update.
 func TestStoreLockSerializesConcurrentWriters(t *testing.T) {
