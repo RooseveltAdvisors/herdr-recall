@@ -18,12 +18,14 @@ archives out of whatever view you are triaging. On the reference tabs the
 limit is applied after done rows are hidden, so a limit of 50 always shows 50
 live rows instead of losing slots to hidden ones. `z` undoes the last `e` and
 the row returns to the top of the list. A thread also returns on its own when
-its agent does something new. A snoozed row is different: it keeps its `~`
-badge and stays visible until the reminder is due.
+its agent does something new. A row with a reminder shows a clock icon and
+the time. A due reminder shows `!` instead.
 Viewing a pane is you reading, not the agent moving, so it never returns a thread and never moves the pinned queue.
 Press `e` again on that row to undo.
-Press `h` to snooze a thread (`20m`, `1h`, `3h`, `Tomorrow 9am`, or `Clear`).
-The snooze carries a return rule: `If no reply` breaks early on new agent activity, `Regardless` keeps the timer.
+Press `h` to set a reminder (`20m`, `1h`, `3h`, `tomorrow`, or `clear`).
+If one is already set, `h` shows that time. Choose Update or Cancel.
+`x` on that choice also cancels it.
+The return rule is `If no reply` or `Regardless`.
 Press `n` to leave a one-line sticky note beside the tab name.
 Press `!` to toggle a manual `blocked` override when a thread is waiting on something outside Herdr's detector.
 
@@ -39,7 +41,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
 | `enter` | focus the selected pane directly via Herdr socket |
 | `e` | mark done. The row leaves the current list. `z` undoes |
-| `h` | snooze with a typed time (`3h`, `2w`, `1d12h`, `tomorrow`, `clear`) and a return rule: `If no reply` (default) or `Regardless` |
+| `h` | set, change, or cancel a reminder. Shows the current time when one is set |
 | `z` | undo the last `e`. `u` does the same |
 | `n` | set or edit a sticky note on the selected thread |
 | `!` | toggle manual `blocked` override on the selected thread |
@@ -138,8 +140,8 @@ are red. The inbox preview says why the top threads rank first.
 
 ![Jev dashboard](assets/showcase-jev.png)
 
-`z` snoozes with a typed time and a live preview (`3h` resolves to "in 3 hours"
-before it commits). `If no reply` returns the thread early on new agent activity.
+`h` sets a reminder with a live preview (`3h` resolves to "in 3 hours"
+before it commits). A set reminder can be updated or cancelled there.
 
 ![snooze](assets/showcase-snooze.png)
 

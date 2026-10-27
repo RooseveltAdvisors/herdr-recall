@@ -123,7 +123,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 	if strings.Contains(plain, "[sort:") {
 		t.Fatalf("inbox should not show a sort pill:\n%s", plain)
 	}
-	for _, want := range []string{"! idle", "● vendor-reply", "waiting on db migration", "e done", "h remind", "n note"} {
+	for _, want := range []string{"qa-followup", "vendor-reply", "waiting on db migration", "e done", "h remind", "n note"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("inbox frame missing %q:\n%s", want, plain)
 		}
@@ -154,8 +154,8 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 	// Snoozed pane renders ~ in All tab, and All shows [sort: Most recent].
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
 	allPlain := stripANSI(renderFrame(all, 0, 0, vimline.View{Label: "/"}, "", 100, 18, viewNames(st), 4, "both", ""))
-	if !strings.Contains(allPlain, "~ working") || !strings.Contains(allPlain, "[sort: Most recent]") {
-		t.Fatalf("expected ~ working badge and [sort: Most recent] pill in All:\n%s", allPlain)
+	if !strings.Contains(allPlain, "\u25f7") || !strings.Contains(allPlain, "[sort: Most recent]") {
+		t.Fatalf("expected reminder icon and [sort: Most recent] pill in All:\n%s", allPlain)
 	}
 }
 

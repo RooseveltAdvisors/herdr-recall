@@ -1483,7 +1483,7 @@ func allHelpEntries() []helpEntry {
 		{"i", "teach Jev: prefer, demote, pick features, or type a rule"},
 		{"space", "in teach: toggle the highlighted feature chip"},
 		{"J", "Jev dashboard: inspect and delete learned weights, see preview"},
-		{"h", "remind with typed time (3h, 2w, tomorrow, clear) and return rules"},
+		{"h", "set, change, or cancel a reminder"},
 		{"n", "sticky note on selected thread, edited with vim keys"},
 		{"!", "toggle manual blocked override on selected thread"},
 		{"m", "mark or unmark favorite star (*)"},
@@ -2080,6 +2080,64 @@ func remindBadge(r row, now int64) string {
 	return "~"
 }
 
+// remindIcon is the list mark for a set reminder. It is one column wide so
+// the row stays aligned. Due reminders use the same mark in the warning color.
+func remindIcon() string { return "\u25f7" }
+
+func remindClock(at, now int64) string {
+	if at <= 0 {
+		return ""
+	}
+	return time.Unix(at, 0).Format("15:04")
+}
+
+func remindSummary(at int64, mode string, now time.Time) string {
+	if at <= 0 {
+		return "No reminder set"
+	}
+	t := time.Unix(at, 0).In(now.Location())
+	rel := t.Sub(now)
+	var when string
+	switch {
+	case rel <= 0:
+		when = "due"
+	case rel < time.Hour:
+		when = fmt.Sprintf("in %dm", max(1, int(rel.Minutes())))
+	case rel < 48*time.Hour:
+		when = fmt.Sprintf("in %dh", int(rel.Hours()))
+	default:
+		when = fmt.Sprintf("in %dd", int(rel.Hours()/24))
+	}
+	rule := "if no reply"
+	if mode == "regardless" {
+		rule = "regardless"
+	}
+	return when + " \u00b7 " + t.Format("Mon 3:04 PM") + " \u00b7 " + rule
+}
+
+func remindIconCell(r row, now int64, width int, selected bool) string {
+	if width < 2 {
+		return ""
+	}
+	if r.RemindAt <= 0 {
+		return strings.Repeat(" ", width)
+	}
+	icon := remindIcon()
+	color := keyAccentFg
+	if r.RemindAt <= now {
+		icon = "!"
+		color = keyStBad
+	}
+	body := icon
+	if width >= 8 {
+		body += " " + remindClock(r.RemindAt, now)
+	}
+	if selected {
+		return pad(color+body+keySelectFg, width)
+	}
+	return pad(color+body+keyReset, width)
+}
+
 // screen is the shared frame builder every dialog uses.
 type screen struct {
 	lines  []string
@@ -2226,12 +2284,17 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
 	starW, dotW, statusW, metaW := 2, 2, 10, 22
+	remindW := 8
 	if narrow {
 		// The name is the point of the picker. A narrow pane keeps the coloured
-		// dot and a short "2m ago", and gives every remaining column to the label.
-		statusW, metaW = 0, 8
+		// dot, the reminder icon, and a short "2m ago".
+		statusW, metaW, remindW = 0, 8, 2
 	}
-	labelW := width - starW - dotW - statusW - metaW
+	labelW := width - starW - dotW - remindW - statusW - metaW
+	if labelW < 8 && remindW > 2 {
+		remindW = 2
+		labelW = width - starW - dotW - remindW - statusW - metaW
+	}
 	if labelW < 4 {
 		labelW = 4
 	}
@@ -2257,18 +2320,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			starCell = keyStar + "*" + keyReset + " "
 		}
 		word := statusWord(r.Status)
-		badge := remindBadge(r, now)
-		if badge != "" {
-			if word != "" {
-				word = badge + " " + word
-			} else {
-				word = badge
-			}
-		}
 		glyph, scol := statusMark(r.Status)
-		if badge == "!" && word == "!" {
-			scol = keyStar
-		}
 		// Prefix k puts the status dot immediately left of the name. The word
 		// stays in its own column, and any sticky note sits dim beside the name.
 		labelCell := formatLabelWithNote(r.Label, r.Note, labelW, i == sel)
@@ -2278,9 +2330,10 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		} else {
 			dotCell += keyReset + " "
 		}
+		iconCell := remindIconCell(r, now, remindW, i == sel)
 		var statusCell string
 		switch {
-		case r.Done && badge == "" && !r.ManualBlocked:
+		case r.Done && !r.ManualBlocked:
 			// Triage state outranks the agent word: this is what e just did.
 			mark := keyStGood + "\u2713 done"
 			if i == sel {
@@ -2304,10 +2357,10 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			} else {
 				line += "  "
 			}
-			line += dotCell + labelCell + statusCell + metaCol
+			line += dotCell + iconCell + labelCell + statusCell + metaCol
 			emit(pad(line, width) + keyReset)
 		} else {
-			emit(starCell + dotCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
+			emit(starCell + dotCell + iconCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
 		}
 		shown++
 	}
@@ -2541,41 +2594,81 @@ func renderConfirm(width, height int, names []string, active, sel int, name stri
 func remindModeLabels() []string { return []string{"If no reply", "Regardless"} }
 func remindModeOpts() []string   { return []string{"", "regardless"} }
 
-// renderRemind is the snooze dialog. Focus starts on Quick picks with 20min
-// immediately active so Enter snoozes in 1 keypress. Custom times can be typed
-// below and pinned as quick picks with ctrl+p.
-func renderRemind(width, height int, names []string, active, field, mode, pick int, picks []string, fv vimline.View, label string) string {
-	return dialog(width, height, 14, names, active, func(sc *screen) {
+func remindTimeField(has bool) int {
+	if has {
+		return 3
+	}
+	return 2
+}
+
+func remindPickField(has bool) int {
+	if has {
+		return 2
+	}
+	return 1
+}
+
+func remindModeField(has bool) int {
+	if has {
+		return 1
+	}
+	return 0
+}
+
+func remindActionLabels(has bool) []string {
+	if has {
+		return []string{"Update", "Cancel"}
+	}
+	return nil
+}
+
+// renderRemind is the reminder dialog. A set reminder is shown first, with
+// Update and Cancel. A new reminder starts on Quick picks so enter sets 20min.
+func renderRemind(width, height int, names []string, active, field, mode, action, pick int, picks []string, fv vimline.View, label string, has bool, existingAt int64, now time.Time) string {
+	modeField, pickField, timeField := 0, 1, 2
+	if has {
+		modeField, pickField, timeField = 1, 2, 3
+	}
+	return dialog(width, height, 16, names, active, func(sc *screen) {
 		sc.emit("")
 		sc.emit(keyText + keyBold + "  Remind me about " + label + keyReset)
-		sc.emit(keyOverlay + "  Hides this thread from Inbox. New agent activity returns it early." + keyReset)
+		sc.emit(keyOverlay + "  " + remindSummary(existingAt, remindModeOpts()[mode], now) + keyReset)
 		sc.emit("")
-		sc.emit(fieldTitle("Return to Inbox", field == 0))
+		if has {
+			sc.emit(fieldTitle("Reminder", field == 0))
+			for _, line := range choiceLines(remindActionLabels(true), action, sc.width) {
+				sc.emit(line)
+			}
+		}
+		sc.emit(fieldTitle("Return to Inbox", field == modeField))
 		for _, line := range choiceLines(remindModeLabels(), mode, sc.width) {
 			sc.emit(line)
 		}
-		sc.emit(fieldTitle("Quick picks", field == 1))
+		sc.emit(fieldTitle("Quick picks", field == pickField))
 		for _, line := range choiceLines(picks, pick, sc.width) {
 			sc.emit(line)
 		}
-		sc.emit(fieldTitle("Custom time", field == 2))
+		sc.emit(fieldTitle("Custom time", field == timeField))
 		sc.emit(renderField(fv, sc.width))
-		switch _, ok, desc := duration.Parse(fv.Text, time.Now()); {
+		switch _, ok, desc := duration.Parse(fv.Text, now); {
 		case ok:
-			sc.emit(keyStGood + "  → " + desc + keyReset)
+			sc.emit(keyStGood + "  -> " + desc + keyReset)
 		case strings.TrimSpace(fv.Text) == "":
-			sc.emit(keyOverlay + "  → type a time: 3h 2w 1d12h tomorrow, or clear" + keyReset)
+			sc.emit(keyOverlay + "  -> type a time: 3h 2w 1d12h tomorrow, or clear" + keyReset)
 		default:
-			sc.emit(keyStBad + "  → not a time. Units: min h d w mo y" + keyReset)
+			sc.emit(keyStBad + "  -> not a time. Units: min h d w mo y" + keyReset)
 		}
 	}, func() string {
-		if field == 2 {
-			return "enter snooze,ctrl+p pin pick,k quick picks,esc cancel"
+		if field == timeField {
+			return "enter save,ctrl+p pin pick,k picks,esc back"
 		}
-		if field == 1 {
-			return "h/l pick,enter snooze,x remove pick,j custom time,esc cancel"
+		if field == pickField {
+			return "h/l pick,enter save,x remove pick,j time,esc back"
 		}
-		return "h/l choice,j quick picks,enter snooze,esc cancel"
+		if has && field == 0 {
+			return "h/l choice,enter do it,x cancel reminder,j next,esc back"
+		}
+		return "h/l choice,j picks,enter save,esc back"
 	}())
 }
 
@@ -2845,6 +2938,9 @@ func runPicker() int {
 	reminding := false
 	remindField := 1
 	remindMode := 0
+	remindAction := 0
+	remindHas := false
+	remindExisting := int64(0)
 	remindSel := 0
 	lastDoneID := ""
 	remindEd := vimline.New("")
@@ -3053,6 +3149,21 @@ func runPicker() int {
 		rebuild()
 	}
 
+	clearRemind := func() {
+		ps := st.ensurePane(remindPaneID)
+		ps.RemindAt = 0
+		ps.SnoozeMode = ""
+		ps.SnoozeState = ""
+		ps.Done = false
+		st.addToInbox(remindPaneID)
+		status = "reminder cleared: " + remindLabel
+		_ = saveStore(st)
+		reminding = false
+		remindHas = false
+		remindExisting = 0
+		rebuild()
+	}
+
 	// activeEd reports which vim editor owns the next key, if any.
 	activeEd := func() *vimline.Editor {
 		if teaching && teachField == 2 {
@@ -3073,7 +3184,7 @@ func runPicker() int {
 		if creating && formField == 0 {
 			return formEd
 		}
-		if reminding && remindField == 2 {
+		if reminding && remindField == remindTimeField(remindHas) {
 			return remindEd
 		}
 		return nil
@@ -3208,7 +3319,7 @@ func runPicker() int {
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
-			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindSel, st.getSnoozePicks(), remindEd.View("at", remindField == 2), remindLabel)
+			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindAction, remindSel, st.getSnoozePicks(), remindEd.View("at", remindField == remindTimeField(remindHas)), remindLabel, remindHas, remindExisting, time.Now())
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
 		case teaching:
@@ -3384,7 +3495,10 @@ func runPicker() int {
 		}
 		if reminding && !showHelp {
 			picks := st.getSnoozePicks()
-			if remindField == 2 {
+			timeField := remindTimeField(remindHas)
+			pickField := remindPickField(remindHas)
+			modeField := remindModeField(remindHas)
+			if remindField == timeField {
 				switch key {
 				case "ctrl+p":
 					txt := strings.TrimSpace(remindEd.String())
@@ -3392,7 +3506,7 @@ func runPicker() int {
 						if st.pinSnoozePick(txt) {
 							_ = saveStore(st)
 							status = "pinned quick pick: " + txt
-							remindField = 1
+							remindField = pickField
 							picks = st.getSnoozePicks()
 							remindSel = indexOf(picks, txt)
 						} else {
@@ -3406,12 +3520,12 @@ func runPicker() int {
 					if remindEd.Mode() == vimline.ModeInsert {
 						remindEd.Feed(key)
 					} else {
-						remindField = 1
+						remindField = pickField
 					}
 					continue
 				case "k", "up":
 					if remindEd.Mode() != vimline.ModeInsert {
-						remindField = 1
+						remindField = pickField
 						continue
 					}
 				}
@@ -3419,16 +3533,16 @@ func runPicker() int {
 				case vimline.ActAccept:
 					commitRemind()
 				case vimline.ActUp:
-					remindField = 1
+					remindField = pickField
 				case vimline.ActCancel:
-					remindField = 1
+					remindField = pickField
 				}
 				continue
 			}
 
 			switch key {
 			case "j", "down", "tab":
-				if remindField < 2 {
+				if remindField < timeField {
 					remindField++
 				}
 			case "k", "up":
@@ -3436,21 +3550,41 @@ func runPicker() int {
 					remindField--
 				}
 			case "h", "left":
-				if remindField == 0 {
-					remindMode = cycle(len(remindModeOpts()), remindMode, -1)
-				} else {
-					remindSel = cycle(len(picks), remindSel, -1)
-					remindEd = vimline.New(picks[remindSel])
+				switch remindField {
+				case 0:
+					if remindHas {
+						remindAction = cycle(2, remindAction, -1)
+					} else {
+						remindMode = cycle(len(remindModeOpts()), remindMode, -1)
+					}
+				default:
+					if remindField == modeField {
+						remindMode = cycle(len(remindModeOpts()), remindMode, -1)
+					} else if remindField == pickField {
+						remindSel = cycle(len(picks), remindSel, -1)
+						remindEd = vimline.New(picks[remindSel])
+					}
 				}
 			case "l", "right":
-				if remindField == 0 {
-					remindMode = cycle(len(remindModeOpts()), remindMode, 1)
-				} else {
-					remindSel = cycle(len(picks), remindSel, 1)
-					remindEd = vimline.New(picks[remindSel])
+				switch remindField {
+				case 0:
+					if remindHas {
+						remindAction = cycle(2, remindAction, 1)
+					} else {
+						remindMode = cycle(len(remindModeOpts()), remindMode, 1)
+					}
+				default:
+					if remindField == modeField {
+						remindMode = cycle(len(remindModeOpts()), remindMode, 1)
+					} else if remindField == pickField {
+						remindSel = cycle(len(picks), remindSel, 1)
+						remindEd = vimline.New(picks[remindSel])
+					}
 				}
 			case "x":
-				if remindField == 1 && len(picks) > 1 {
+				if remindHas && remindField == 0 {
+					clearRemind()
+				} else if remindField == pickField && len(picks) > 1 {
 					removed := picks[remindSel]
 					st.removeSnoozePick(remindSel)
 					_ = saveStore(st)
@@ -3462,7 +3596,15 @@ func runPicker() int {
 					remindEd = vimline.New(picks[remindSel])
 				}
 			case "enter":
-				commitRemind()
+				if remindHas && remindField == 0 {
+					if remindAction == 1 {
+						clearRemind()
+					} else {
+						remindField = pickField
+					}
+				} else {
+					commitRemind()
+				}
 			case "esc", "q":
 				reminding = false
 				status = ""
@@ -3915,9 +4057,21 @@ func runPicker() int {
 				break
 			}
 			reminding = true
-			remindField = 1
-			remindMode = 0
+			remindAction = 0
 			remindSel = 0
+			psRemind := st.ensurePane(rows[sel].PaneID)
+			remindHas = psRemind.RemindAt > 0
+			remindExisting = psRemind.RemindAt
+			if psRemind.SnoozeMode == "regardless" {
+				remindMode = 1
+			} else {
+				remindMode = 0
+			}
+			if remindHas {
+				remindField = 0
+			} else {
+				remindField = 1
+			}
 			picks := st.getSnoozePicks()
 			if len(picks) > 0 {
 				remindEd = vimline.New(picks[0])

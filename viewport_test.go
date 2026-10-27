@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RooseveltAdvisors/vimline"
 )
@@ -337,7 +338,7 @@ func TestSnoozeDefaultQuickPicksAndPinning(t *testing.T) {
 
 	// 4. Test renderRemind with field 1 (Quick picks focused)
 	fv := vimline.View{Label: "at", Text: "20min"}
-	frame := renderRemind(100, 16, []string{"Inbox"}, 0, 1, 0, 0, picks, fv, "billing")
+	frame := renderRemind(100, 16, []string{"Inbox"}, 0, 1, 0, 0, 0, picks, fv, "billing", false, 0, time.Time{})
 	plain := stripANSI(frame)
 
 	if !strings.Contains(plain, "Quick picks") {
@@ -346,7 +347,17 @@ func TestSnoozeDefaultQuickPicksAndPinning(t *testing.T) {
 	if !strings.Contains(plain, "20min") || !strings.Contains(plain, "1h") {
 		t.Fatalf("chips missing in frame:\n%s", plain)
 	}
-	if !strings.Contains(plain, "h/l pick") || !strings.Contains(plain, "enter snooze") {
+	if !strings.Contains(plain, "h/l pick") || !strings.Contains(plain, "enter save") {
 		t.Fatalf("footer missing in frame:\n%s", plain)
+	}
+}
+
+func TestRemindDialogShowsSetReminder(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	fv := vimline.View{Label: "at", Text: "20min"}
+	frame := renderRemind(100, 20, []string{"Inbox"}, 0, 0, 0, 0, 0, []string{"20min"}, fv, "billing", true, now.Add(3*time.Hour).Unix(), now)
+	plain := stripANSI(frame)
+	if !strings.Contains(plain, "Update") || !strings.Contains(plain, "Cancel") || !strings.Contains(plain, "in 3h") {
+		t.Fatalf("dialog missing current reminder:\n%s", plain)
 	}
 }
