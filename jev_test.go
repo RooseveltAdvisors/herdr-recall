@@ -228,7 +228,11 @@ func TestJevContextualTeaching(t *testing.T) {
 		t.Fatalf("saved teaching mismatch: %+v", saved)
 	}
 
-	logPath := filepath.Join(configDir(), "jev-teachings.jsonl")
+	dir, err := configDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "jev-teachings.jsonl")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read jev-teachings.jsonl failed: %v", err)

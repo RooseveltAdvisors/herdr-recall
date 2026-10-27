@@ -19,6 +19,24 @@ func mustLoad(t *testing.T) *store {
 	return s
 }
 
+func stateFile(t *testing.T) string {
+	t.Helper()
+	p, err := statePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func lockFile(t *testing.T) string {
+	t.Helper()
+	p, err := lockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // useTempConfig isolates recall state in a temp dir and resets the process
 // fingerprint, so tests never touch the live plugin config directory.
 func useTempConfig(t *testing.T) {
@@ -37,7 +55,7 @@ func writeStoreDirect(t *testing.T, s *store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(statePath(), b, 0o600); err != nil {
+	if err := os.WriteFile(stateFile(t), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -148,7 +166,7 @@ func TestRefreshStoreAdoptsWriteWithSameMtime(t *testing.T) {
 		t.Fatal(err)
 	}
 	held := mustLoad(t)
-	fi, err := os.Stat(statePath())
+	fi, err := os.Stat(stateFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +175,7 @@ func TestRefreshStoreAdoptsWriteWithSameMtime(t *testing.T) {
 	ext := mustLoad(t)
 	ext.Panes["w1:p1"].Visits++
 	writeStoreDirect(t, ext)
-	if err := os.Chtimes(statePath(), same, same); err != nil {
+	if err := os.Chtimes(stateFile(t), same, same); err != nil {
 		t.Fatal(err)
 	}
 
@@ -183,10 +201,10 @@ func TestRefreshStoreKeepsStoreWhenStateUnreadable(t *testing.T) {
 	}
 	held := mustLoad(t)
 
-	if err := os.Remove(statePath()); err != nil {
+	if err := os.Remove(stateFile(t)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(statePath(), 0o700); err != nil {
+	if err := os.Mkdir(stateFile(t), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	fresh := refreshStore(held)
@@ -197,7 +215,7 @@ func TestRefreshStoreKeepsStoreWhenStateUnreadable(t *testing.T) {
 		t.Fatalf("in-memory store lost: %+v", fresh.Panes)
 	}
 
-	if err := os.Remove(statePath()); err != nil {
+	if err := os.Remove(stateFile(t)); err != nil {
 		t.Fatal(err)
 	}
 	if got := refreshStore(fresh); got != fresh {
@@ -230,11 +248,11 @@ func TestPickerDoesNotPersistAfterFailedRefresh(t *testing.T) {
 	hook.Panes["w1:p9"] = &paneStat{Visits: 3, Last: 123, Label: "hook"}
 	writeStoreDirect(t, hook)
 
-	if err := os.Chmod(statePath(), 0o000); err != nil {
+	if err := os.Chmod(stateFile(t), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(statePath(), 0o600)
-	if _, err := os.ReadFile(statePath()); err == nil {
+	defer os.Chmod(stateFile(t), 0o600)
+	if _, err := os.ReadFile(stateFile(t)); err == nil {
 		t.Skip("cannot make the state file unreadable")
 	}
 	if got := refreshStore(picker); got != picker {
@@ -246,7 +264,7 @@ func TestPickerDoesNotPersistAfterFailedRefresh(t *testing.T) {
 		t.Fatal("the picker persisted a stale store after a failed refresh")
 	}
 
-	if err := os.Chmod(statePath(), 0o600); err != nil {
+	if err := os.Chmod(stateFile(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	final := mustLoad(t)
@@ -362,11 +380,11 @@ func TestCLIWriterRefusesWriteWithoutLock(t *testing.T) {
 	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(statePath())
+	before, err := os.ReadFile(stateFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(lockPath(), 0o700); err != nil {
+	if err := os.Mkdir(lockFile(t), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"jev", "reset"}, {"favorite", "w1:pA"}} {
@@ -375,7 +393,7 @@ func TestCLIWriterRefusesWriteWithoutLock(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%v wrote without the lock: %s", args, out)
 		}
-		after, err := os.ReadFile(statePath())
+		after, err := os.ReadFile(stateFile(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,15 +436,15 @@ func TestWritersRefuseToPersistOnReadError(t *testing.T) {
 	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(statePath())
+	before, err := os.ReadFile(stateFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(statePath(), 0o000); err != nil {
+	if err := os.Chmod(stateFile(t), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(statePath(), 0o600)
-	if _, err := os.ReadFile(statePath()); err == nil {
+	defer os.Chmod(stateFile(t), 0o600)
+	if _, err := os.ReadFile(stateFile(t)); err == nil {
 		t.Skip("cannot make the state file unreadable")
 	}
 	if st, err := loadStore(); err == nil {
@@ -438,15 +456,68 @@ func TestWritersRefuseToPersistOnReadError(t *testing.T) {
 			t.Fatalf("%v wrote despite the unreadable state file: %s", args, out)
 		}
 	}
-	if err := os.Chmod(statePath(), 0o600); err != nil {
+	if err := os.Chmod(stateFile(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.ReadFile(statePath())
+	after, err := os.ReadFile(stateFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("a writer erased recall.json after a read error")
+	}
+}
+
+// TestRefusedMutationNeverReachesDisk pins the refused-save contract: a
+// refused write is dropped by a reload, so the transient clearing later must
+// not persist it. Only repeating the action saves it.
+func TestRefusedMutationNeverReachesDisk(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+	hook := mustLoad(t)
+	hook.Panes["w1:p1"].Visits++
+	writeStoreDirect(t, hook)
+
+	lk := &storeLock{}
+	w := &storeWriter{lk: lk}
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
+
+	if err := os.Mkdir(lockFile(t), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.persist(st); err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+
+	if err := os.Remove(lockFile(t)); err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := w.persist(st)
+	if err == nil {
+		t.Fatal("the refused write must still be reported as not saved")
+	}
+	if _, err := w.persist(dropped); err != nil {
+		t.Fatalf("persist after the transient: %v", err)
+	}
+	final := mustLoad(t)
+	if final.Panes["w1:p1"].Note != "" {
+		t.Fatalf("the refused mutation reached disk: note=%q", final.Panes["w1:p1"].Note)
+	}
+	if final.Panes["w1:p1"].Visits != 2 {
+		t.Fatalf("hook visit lost: visits=%d", final.Panes["w1:p1"].Visits)
+	}
+
+	dropped.Panes["w1:p1"].Note = "typed"
+	if _, err := w.persist(dropped); err != nil {
+		t.Fatalf("repeated action after recovery: %v", err)
+	}
+	if got := mustLoad(t).Panes["w1:p1"].Note; got != "typed" {
+		t.Fatalf("the repeated action must persist: note=%q", got)
 	}
 }
 

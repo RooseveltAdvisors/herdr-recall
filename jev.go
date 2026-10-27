@@ -489,7 +489,11 @@ func recordJevTeaching(st *store, t jevTeaching) error {
 		st.Jev.Teachings = st.Jev.Teachings[len(st.Jev.Teachings)-200:]
 	}
 
-	logPath := filepath.Join(configDir(), "jev-teachings.jsonl")
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	logPath := filepath.Join(dir, "jev-teachings.jsonl")
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err

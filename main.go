@@ -271,30 +271,38 @@ type view struct {
 var (
 	configDirOnce sync.Once
 	configDirVal  string
+	configDirErr  error
 )
 
-func configDir() string {
-	configDirOnce.Do(func() { configDirVal = resolveConfigDir() })
-	return configDirVal
+func configDir() (string, error) {
+	configDirOnce.Do(func() {
+		configDirVal, configDirErr = resolveConfigDir()
+	})
+	return configDirVal, configDirErr
 }
 
-func resolveConfigDir() string {
+func resolveConfigDir() (string, error) {
 	if v := os.Getenv("HERDR_PLUGIN_CONFIG_DIR"); v != "" {
-		return v
+		return v, nil
 	}
 	out, err := herdr("plugin", "config-dir", pluginID)
-	if err == nil {
-		if d := strings.TrimSpace(string(out)); d != "" {
-			return d
-		}
+	if err != nil {
+		return "", err
 	}
-	// Deterministic fallback: the same encoded-id layout herdr uses.
-	enc := strings.ReplaceAll(pluginID, "R", "%52")
-	enc = strings.ReplaceAll(enc, "A", "%41")
-	return filepath.Join(os.Getenv("HOME"), ".config", "herdr", "plugins", "config", enc)
+	d := strings.TrimSpace(string(out))
+	if d == "" {
+		return "", errors.New("herdr plugin config-dir: empty")
+	}
+	return d, nil
 }
 
-func statePath() string { return filepath.Join(configDir(), "recall.json") }
+func statePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "recall.json"), nil
+}
 
 // lastStoreFP is the content fingerprint of recall.json the last time this
 // process loaded or saved it. A long-lived picker compares it before touching
@@ -328,7 +336,11 @@ func currentFP() string {
 // process last loaded or saved recall.json. It reloads only when the file
 // content changed, so rows stay frozen while no other writer ran.
 func refreshStore(st *store) *store {
-	b, err := os.ReadFile(statePath())
+	sp, err := statePath()
+	if err != nil {
+		return st
+	}
+	b, err := os.ReadFile(sp)
 	if err != nil {
 		loadFailed.Store(!os.IsNotExist(err))
 		return st
@@ -347,16 +359,30 @@ func refreshStore(st *store) *store {
 // prune results.
 type storeLock struct{ f *os.File }
 
-func lockPath() string { return filepath.Join(configDir(), "recall.lock") }
+func lockPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "recall.lock"), nil
+}
 
 func (l *storeLock) acquire() error {
 	if l.f != nil {
 		return nil
 	}
-	if err := os.MkdirAll(configDir(), 0o700); err != nil {
+	dir, err := configDir()
+	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	lp, err := lockPath()
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(lp, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
@@ -379,8 +405,44 @@ func (l *storeLock) release() {
 
 func (l *storeLock) held() bool { return l.f != nil }
 
+// storeWriter persists recall state fail-closed: a refused write is dropped
+// by reloading the store from disk so no later write can carry it, and a
+// failed reload blocks persistence until the state is proven again.
+type storeWriter struct {
+	lk    *storeLock
+	block error
+}
+
+// persist writes st and returns the store to keep. A non-nil error means the
+// write was refused; the returned store is the reloaded one when the refused
+// mutation could be dropped.
+func (w *storeWriter) persist(st *store) (*store, error) {
+	err := w.block
+	if err == nil {
+		if !w.lk.held() {
+			err = errors.New("recall.lock unavailable")
+		} else if e := saveStore(st); e != nil {
+			err = e
+		} else {
+			return st, nil
+		}
+	}
+	if w.lk.acquire() == nil {
+		if fresh, e := loadStore(); e == nil {
+			w.block = nil
+			return fresh, err
+		}
+	}
+	w.block = err
+	return st, err
+}
+
 func loadStore() (*store, error) {
-	b, err := os.ReadFile(statePath())
+	sp, err := statePath()
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(sp)
 	if err != nil {
 		loadFailed.Store(!os.IsNotExist(err))
 		if os.IsNotExist(err) {
@@ -563,7 +625,10 @@ func saveStore(s *store) error {
 	if loadFailed.Load() {
 		return errors.New("recall.json unreadable")
 	}
-	dir := configDir()
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -571,11 +636,15 @@ func saveStore(s *store) error {
 	if err != nil {
 		return err
 	}
-	tmp := statePath() + ".tmp"
+	sp, err := statePath()
+	if err != nil {
+		return err
+	}
+	tmp := sp + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, statePath()); err != nil {
+	if err := os.Rename(tmp, sp); err != nil {
 		return err
 	}
 	stampStore(b)
@@ -3220,12 +3289,14 @@ func runPicker() int {
 	if st.ActivePaneID != "" {
 		sel = pinSel(visible(), sel, st.ActivePaneID)
 	}
+	writer := &storeWriter{lk: lk}
 	saveSt := func() bool {
-		if !lk.held() {
-			status = "not saved: recall.lock unavailable"
-			return false
+		next, err := writer.persist(st)
+		if next != st {
+			st = next
+			rows = rebase(rows)
 		}
-		if err := saveStore(st); err != nil {
+		if err != nil {
 			status = "not saved: " + err.Error()
 			return false
 		}

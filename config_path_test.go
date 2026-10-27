@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,8 +16,8 @@ func TestPathProbe(t *testing.T) {
 	if os.Getenv("RECALL_PATHS_PROBE") == "" {
 		t.Skip("probe helper for the child-process path tests")
 	}
-	fmt.Println("lock:", lockPath())
-	fmt.Println("state:", statePath())
+	fmt.Println("lock:", lockFile(t))
+	fmt.Println("state:", stateFile(t))
 }
 
 func probeEnv(overrides ...string) []string {
@@ -64,8 +65,8 @@ func runPathProbe(t *testing.T, env []string) (string, string) {
 // lock and the state file resolve into the same config directory.
 func TestLockAndStatePathShareConfigDir(t *testing.T) {
 	useTempConfig(t)
-	if filepath.Dir(lockPath()) != filepath.Dir(statePath()) {
-		t.Fatalf("lockPath %q and statePath %q must resolve into one directory", lockPath(), statePath())
+	if filepath.Dir(lockFile(t)) != filepath.Dir(stateFile(t)) {
+		t.Fatalf("lockPath %q and statePath %q must resolve into one directory", lockFile(t), stateFile(t))
 	}
 }
 
@@ -90,15 +91,41 @@ func TestConfigDirStableWhenHerdrFlaps(t *testing.T) {
 	}
 }
 
-// TestFallbackResolutionIdenticalAcrossProcesses pins the deterministic
-// fallback: two separate processes without the herdr CLI resolve the same
-// lock and state paths.
-func TestFallbackResolutionIdenticalAcrossProcesses(t *testing.T) {
-	empty := t.TempDir()
-	env := probeEnv("RECALL_PATHS_PROBE=1", "PATH="+empty)
-	lock1, state1 := runPathProbe(t, env)
-	lock2, state2 := runPathProbe(t, env)
-	if lock1 != lock2 || state1 != state2 {
-		t.Fatalf("fallback resolution differs across processes: %q %q vs %q %q", lock1, state1, lock2, state2)
+// TestWriterFailsClosedWhenConfigDirUnresolvable pins the no-fallback rule:
+// with the override unset and the herdr CLI failing, a writer must error and
+// recall.json must stay untouched instead of splitting onto another path.
+func TestWriterFailsClosedWhenConfigDirUnresolvable(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	home := t.TempDir()
+	enc := strings.ReplaceAll(pluginID, "R", "%52")
+	enc = strings.ReplaceAll(enc, "A", "%41")
+	state := filepath.Join(home, ".config", "herdr", "plugins", "config", enc, "recall.json")
+	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte(`{"version":1,"tabs_init":true,"panes":{"w1:p1":{"visits":1,"label":"one"}},"favorites":["w1:p1"]}`)
+	if err := os.WriteFile(state, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "herdr"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"favorite", "w1:p2"}, {"jev", "reset"}} {
+		cmd := exec.Command(bin, args...)
+		cmd.Env = probeEnv("HOME="+home, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("%v wrote despite the unresolvable config dir: %s", args, out)
+		}
+	}
+	after, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("recall.json was rewritten despite the unresolvable config dir")
 	}
 }
