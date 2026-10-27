@@ -591,8 +591,9 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 // rendered. The status line clips at the pane width, so the note can reach
 // the screen as a head of itself; what the emitted frame displays is what
 // marks it seen. tok is the retry token of the refused mutation: an opaque
-// identity that every save from the same retry context carries, so a landed
-// save with it is the operator's retry. Zero means no retry context.
+// identity stamped on it at refusal, which only a later save of the same
+// mutation carries, so a landed save with it is the operator's retry. Zero
+// means no retry context.
 type saveNote struct {
 	text  string
 	shown bool
@@ -600,7 +601,8 @@ type saveNote struct {
 }
 
 // viewTok is the retry token every view autosave carries, so the next
-// autosave that lands is the retry of a refused one.
+// autosave that lands is the retry of a refused one. The tokens stamped on
+// refused in-place mutations count up from it.
 const viewTok uint64 = 1
 
 // post sets a note the operator must see: a refusal, or an overlay action
@@ -613,12 +615,16 @@ func (n *saveNote) post(text string) string {
 	return text
 }
 
-// refuse posts a refusal stamped with tok, the retry token of the refused
-// save. A refused autosave leaves the token of an unseen note alone: the
-// operator's refused action outranks the view state.
+// refuse posts a refusal of a save that carried tok. The token of a refused
+// in-place mutation takes over the note. While the note is unseen, a refused
+// autosave keeps any token, and a refused save with no retry context ends
+// only the autosave's: the operator's refused mutation outranks both.
 func (n *saveNote) refuse(err error, tok uint64) string {
-	if tok != viewTok || n.shown || n.text == "" {
+	switch {
+	case n.shown || n.text == "" || tok > viewTok:
 		n.tok = tok
+	case tok == 0 && n.tok == viewTok:
+		n.tok = 0
 	}
 	n.text = "not saved: " + err.Error()
 	n.shown = false
@@ -656,12 +662,12 @@ func (n *saveNote) landed(status string, tok uint64) string {
 	return status
 }
 
-// stale ends every retry context except the view autosave and open, the
-// token of the overlay still on screen. A refusal stamped by an overlay that
-// closed cannot be retried in place any more: it keeps its text, and no
-// later save turns it into a repeat instruction.
-func (n *saveNote) stale(open uint64) {
-	if n.tok != viewTok && n.tok != open {
+// stale ends the retry context of a refused in-place mutation once no
+// overlay is open. A refusal whose overlay closed cannot be retried in place
+// any more: it keeps its text, and no later save turns it into a repeat
+// instruction. The view autosave keeps its context.
+func (n *saveNote) stale() {
+	if n.tok != viewTok {
 		n.tok = 0
 	}
 }
@@ -3579,7 +3585,6 @@ func runPicker() int {
 		sel = pinSel(visible(), sel, st.ActivePaneID)
 	}
 	note := saveNote{}
-	ctxTok := viewTok
 	saveSt := func(tok uint64) bool {
 		next, err := persistStore(lk, st)
 		if next != st {
@@ -3592,6 +3597,25 @@ func runPicker() int {
 		}
 		status = note.landed(status, tok)
 		return true
+	}
+	// retryAt names the in-place mutation stamped with retryTok, the token of
+	// the last refused save that an open overlay can retry where it stands.
+	var retryAt string
+	retryTok := viewTok
+	// saveIn saves a mutation that an open overlay can retry in place, named
+	// by its action and target. A refusal stamps it with a fresh token, and
+	// only a later save of the same mutation carries that token, so only its
+	// retry resolves the refusal.
+	saveIn := func(at string) bool {
+		tok := retryTok
+		if at != retryAt {
+			tok++
+		}
+		if saveSt(tok) {
+			return true
+		}
+		retryAt, retryTok = at, tok
+		return false
 	}
 	// pointed reports whether the row the drawn cursor pointed at is still
 	// the row under the cursor. A key never acts on a row the last frame did
@@ -3716,7 +3740,9 @@ func runPicker() int {
 			},
 		}
 
-		saved := commitTeaching(st, tRecord, func() bool { return saveSt(ctxTok) })
+		saved := commitTeaching(st, tRecord, func() bool {
+			return saveIn(fmt.Sprintf("teach %q %d %q %q", teachRow.PaneID, teachPref, selected, text))
+		})
 
 		taughtID := teachRow.PaneID
 		if saved {
@@ -3880,11 +3906,9 @@ func runPicker() int {
 		if sel < 0 {
 			sel = 0
 		}
-		open := uint64(0)
-		if showJev || reminding || teaching {
-			open = ctxTok
+		if !showJev && !reminding && !teaching {
+			note.stale()
 		}
-		note.stale(open)
 		persistView(rows)
 		status = note.keep(status)
 		w, h := termSize(tty)
@@ -4127,7 +4151,7 @@ func runPicker() int {
 					} else {
 						delete(st.Jev.Weights, it.feature)
 					}
-					saveSt(ctxTok)
+					saveIn(fmt.Sprintf("jev %q %q", it.feature, it.ruleID))
 					items = jevSelectableItems(st)
 					if jevSel >= len(items) {
 						jevSel = max(0, len(items)-1)
@@ -4148,7 +4172,7 @@ func runPicker() int {
 					txt := strings.TrimSpace(remindEd.String())
 					if _, ok, _ := duration.Parse(txt, time.Now()); ok {
 						if st.pinSnoozePick(txt) {
-							if saveSt(ctxTok) {
+							if saveIn(fmt.Sprintf("pin %q", txt)) {
 								status = "pinned quick pick: " + txt
 							}
 							remindField = pickField
@@ -4234,7 +4258,7 @@ func runPicker() int {
 				} else if remindField == pickField && len(picks) > 1 {
 					removed := picks[remindSel]
 					st.removeSnoozePick(remindSel)
-					if saveSt(ctxTok) {
+					if saveIn(fmt.Sprintf("unpick %q", removed)) {
 						status = "removed quick pick: " + removed
 					}
 					picks = st.getSnoozePicks()
@@ -4634,7 +4658,6 @@ func runPicker() int {
 			helpEd = vimline.New("")
 		case key == "J" && !searching && !showHelp:
 			showJev = true
-			ctxTok++
 			jevSel = 0
 			jevScrollOffset = 0
 			jevTyping = false
@@ -4674,7 +4697,6 @@ func runPicker() int {
 			}
 			if len(rows) > 0 && sel < len(rows) {
 				teaching = true
-				ctxTok++
 				teachField = 0
 				teachPref = 0
 				teachRow = rows[sel]
@@ -4735,7 +4757,6 @@ func runPicker() int {
 				break
 			}
 			reminding = true
-			ctxTok++
 			remindAction = 0
 			remindSel = 0
 			psRemind := st.ensurePane(rows[sel].PaneID)

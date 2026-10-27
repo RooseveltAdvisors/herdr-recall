@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -548,13 +549,16 @@ func lastFrame(out string) []string {
 	return strings.Split(stripANSI(frame), "\r\n")
 }
 
-// teachings returns how many teachings recall.json holds.
-func teachings(t *testing.T) int {
+// teachings returns the intent of every teaching recall.json holds.
+func teachings(t *testing.T) []string {
 	t.Helper()
+	var intents []string
 	if s := mustLoad(t); s.Jev != nil {
-		return len(s.Jev.Teachings)
+		for _, tr := range s.Jev.Teachings {
+			intents = append(intents, tr.Intent)
+		}
 	}
-	return 0
+	return intents
 }
 
 // TestRetryInPlaceResolvesRefusal pins the retry token: an action refused
@@ -575,7 +579,7 @@ func TestRetryInPlaceResolvesRefusal(t *testing.T) {
 		applied func(t *testing.T) bool
 	}{
 		{"teach", "i", "\r", nil,
-			func(t *testing.T) bool { return teachings(t) == 1 }},
+			func(t *testing.T) bool { return len(teachings(t)) == 1 }},
 		{"jev delete", "J", "\r", []string{"q"},
 			func(t *testing.T) bool { _, ok := mustLoad(t).Jev.Weights["tok:alpha"]; return !ok }},
 		{"remind quick pick removal", "h", "x", []string{"q"},
@@ -672,7 +676,7 @@ func TestDifferentSaveComposesRefusal(t *testing.T) {
 	if lines := lastFrame(out); !slices.Contains(lines, composed) {
 		t.Fatalf("the next status line must show the composed note:\n%s", strings.Join(lines, "\n"))
 	}
-	if n := teachings(t); n != 0 {
+	if n := len(teachings(t)); n != 0 {
 		t.Fatalf("the refused teach reached disk: %d teachings", n)
 	}
 
@@ -728,11 +732,110 @@ func TestStaleRefusalNeverOrdersRetry(t *testing.T) {
 		frame++
 	}
 	out := p.frames(frame)
-	if n := teachings(t); n != 1 {
+	if n := len(teachings(t)); n != 1 {
 		t.Fatalf("the retried teach must land: %d teachings", n)
 	}
 	if strings.Contains(out, "repeat it") {
 		t.Fatalf("a stale refusal must never order a retry:\n%s", stripANSI(out))
+	}
+}
+
+// TestRetryTokenStaysOnRefusedMutation pins the retry token on the refused
+// mutation, not on the overlay that hosts it. When a different mutation lands
+// in the same overlay after a refusal, the next frame that carries a status
+// line shows the composed note, the refused mutation is still not on disk,
+// and repeating it lands. When the refused mutation itself is retried after
+// the other save, even with its dialog changed and changed back, the note
+// reads plain "saved".
+func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	const composed = "saved; earlier action was not applied - repeat it"
+	taught := func(want ...string) func(t *testing.T) bool {
+		return func(t *testing.T) bool { return slices.Equal(teachings(t), want) }
+	}
+	weights := func(want ...string) func(t *testing.T) bool {
+		return func(t *testing.T) bool {
+			return slices.Equal(slices.Sorted(maps.Keys(mustLoad(t).Jev.Weights)), want)
+		}
+	}
+	picks := func(want ...string) func(t *testing.T) bool {
+		return func(t *testing.T) bool { return slices.Equal(mustLoad(t).getSnoozePicks(), want) }
+	}
+	for _, tc := range []struct {
+		name   string
+		open   string
+		act    string
+		keys   []string
+		note   string
+		disk   func(t *testing.T) bool
+		repeat func(t *testing.T) bool
+	}{
+		{"teach then a different teach", "i", "\r", []string{"l", "\r"}, composed,
+			taught("neutral"), taught("neutral", "prefer")},
+		{"teach retried after the view save", "i", "\r", []string{"l", "h", "\r"}, "saved",
+			taught("prefer"), nil},
+		{"jev delete then a different delete", "J", "\r", []string{"j", "\r", "q"}, composed,
+			weights("tok:alpha"), weights()},
+		{"jev delete retried after a different delete", "J", "\r", []string{"j", "\r", "\r", "q"}, "saved",
+			weights(), nil},
+		{"quick pick removal then a different removal", "h", "x", []string{"l", "x", "q"}, composed,
+			picks("20min", "3h", "tomorrow", "clear"), picks("3h", "tomorrow", "clear")},
+		{"quick pick removal retried after a different removal", "h", "x", []string{"l", "x", "h", "x", "q"}, "saved",
+			picks("3h", "tomorrow", "clear"), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seedPicker(t, []string{"w1:pA"}, func(s *store) {
+				s.ensureJev()
+				s.Jev.Weights = map[string]float64{"tok:alpha": 0.9, "tok:bravo": 0.5}
+			})
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			p.press(tc.open)
+			frame++
+			p.frames(frame)
+
+			// The first action's save fails, so it stays pending in place.
+			if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			p.press(tc.act)
+			frame++
+			p.frames(frame)
+			if err := os.Remove(statePath() + ".tmp"); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, k := range tc.keys {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+			if lines := lastFrame(p.frames(frame)); !slices.Contains(lines, tc.note) {
+				t.Fatalf("the next status line must read %q:\n%s", tc.note, strings.Join(lines, "\n"))
+			}
+			if !tc.disk(t) {
+				t.Fatalf("wrong state on disk: %+v %v %v", mustLoad(t).Jev, teachings(t), mustLoad(t).getSnoozePicks())
+			}
+			if tc.repeat == nil {
+				return
+			}
+
+			for _, k := range []string{tc.open, tc.act} {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+			if !tc.repeat(t) {
+				t.Fatalf("the refused action must stay repeatable: %+v %v %v", mustLoad(t).Jev, teachings(t), mustLoad(t).getSnoozePicks())
+			}
+		})
 	}
 }
 

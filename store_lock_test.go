@@ -1559,6 +1559,29 @@ func TestRefusalNoteSeenWhenStatusClips(t *testing.T) {
 	}
 }
 
+// TestRefusalWithoutRetryKeepsMutationToken pins the retry token against a
+// refused save with no retry context of its own, such as the background Jev
+// score save. While the operator's refused mutation is unseen, that refusal
+// keeps the mutation's token, so the retry still reads plain "saved" instead
+// of a stale refusal. It does end a refused autosave's context, so the next
+// autosave never reads as the retry of a save it did not repeat.
+func TestRefusalWithoutRetryKeepsMutationToken(t *testing.T) {
+	err := errors.New("recall.json write failed")
+	note := &saveNote{}
+	note.refuse(err, viewTok+1)
+	status := note.refuse(err, 0)
+	if status = note.keep(note.landed(status, viewTok+1)); status != "saved" {
+		t.Fatalf("the landed retry of the refused mutation must read plain saved: %q", status)
+	}
+
+	note = &saveNote{}
+	note.refuse(err, viewTok)
+	status = note.refuse(err, 0)
+	if status = note.keep(note.landed(status, viewTok)); status == "saved" {
+		t.Fatalf("an autosave must not resolve a refusal it did not repeat: %q", status)
+	}
+}
+
 // TestUndoPointerSurvivesRefusedSave pins the undo pointer rule: e publishes
 // it only on a landed save, and z spends it only on a landed undo. A refused
 // undo rolls the marker back and keeps the pointer armed, so recovery undoes
