@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"reflect"
 
 	"fmt"
 	"github.com/RooseveltAdvisors/vimline"
@@ -320,6 +321,81 @@ func hashStore(b []byte) string {
 
 func stampStore(b []byte) {
 	lastStoreFP.Store(hashStore(b))
+	lastSynced.Store(string(b))
+}
+
+// lastSynced is the recall.json content of the last successful load, adopt,
+// or save. A pending change is measured against it, so an external sync can
+// be folded in without dropping the operator's edit.
+var lastSynced atomic.Value // string
+
+var fieldGone = struct{}{}
+
+func storeFields(s *store) map[string]any {
+	m := map[string]any{}
+	if b, err := json.Marshal(s); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+func syncedFields() map[string]any {
+	m := map[string]any{}
+	if v := lastSynced.Load(); v != nil {
+		_ = json.Unmarshal([]byte(v.(string)), &m)
+	}
+	return m
+}
+
+func diffFields(base, want map[string]any, prefix string, out map[string]any) {
+	path := func(k string) string {
+		if prefix == "" {
+			return k
+		}
+		return prefix + "/" + k
+	}
+	for k, bv := range base {
+		wv, ok := want[k]
+		if !ok {
+			out[path(k)] = fieldGone
+			continue
+		}
+		bm, bok := bv.(map[string]any)
+		wm, wok := wv.(map[string]any)
+		if bok && wok {
+			diffFields(bm, wm, path(k), out)
+			continue
+		}
+		if !reflect.DeepEqual(bv, wv) {
+			out[path(k)] = wv
+		}
+	}
+	for k, wv := range want {
+		if _, ok := base[k]; !ok {
+			out[path(k)] = wv
+		}
+	}
+}
+
+func applyFields(m map[string]any, patch map[string]any) {
+	for p, v := range patch {
+		parts := strings.Split(p, "/")
+		node := m
+		for _, part := range parts[:len(parts)-1] {
+			child, ok := node[part].(map[string]any)
+			if !ok {
+				child = map[string]any{}
+				node[part] = child
+			}
+			node = child
+		}
+		leaf := parts[len(parts)-1]
+		if v == fieldGone {
+			delete(node, leaf)
+			continue
+		}
+		node[leaf] = v
+	}
 }
 
 func currentFP() string {
@@ -406,6 +482,40 @@ func (w *storeWriter) persist(st *store) error {
 }
 
 func (w *storeWriter) pending() bool { return w.pend != nil }
+
+func (w *storeWriter) note() string {
+	if w.pend == nil {
+		return ""
+	}
+	return "pending save: " + w.pend.Error() + " (esc discards)"
+}
+
+// adopt folds an external store into the session. The pending change is
+// reapplied so an external sync can never drop it, and its fields win over
+// the sync's. base is the last synced state, taken before the adoption.
+func (w *storeWriter) adopt(st, fresh *store, base map[string]any) *store {
+	if !w.pending() {
+		return fresh
+	}
+	patch := map[string]any{}
+	diffFields(base, storeFields(st), "", patch)
+	merged := storeFields(fresh)
+	applyFields(merged, patch)
+	out := &store{}
+	if b, err := json.Marshal(merged); err == nil {
+		_ = json.Unmarshal(b, out)
+	}
+	return out
+}
+
+// close reports whether the session can exit without losing a pending
+// change: it saves the change first and refuses the exit while that fails.
+func (w *storeWriter) close(st *store) bool {
+	if !w.pending() {
+		return true
+	}
+	return w.persist(st) == nil
+}
 
 func (w *storeWriter) discard(st *store) (*store, error) {
 	fresh, err := loadStore()
@@ -3241,14 +3351,16 @@ func runPicker() int {
 		return next
 	}
 	rebuild()
+	writer := &storeWriter{lk: lk}
 	// resync adopts another writer's on-disk update before this event is
 	// handled, keeping the row the captain is pointing at selected by pane ID.
 	resync := func(cur []row) []row {
 		if lk.acquire() != nil {
 			return visible()
 		}
+		base := syncedFields()
 		if fresh := refreshStore(st); fresh != st {
-			st = fresh
+			st = writer.adopt(st, fresh, base)
 			return rebase(cur)
 		}
 		return visible()
@@ -3256,19 +3368,15 @@ func runPicker() int {
 	if st.ActivePaneID != "" {
 		sel = pinSel(visible(), sel, st.ActivePaneID)
 	}
-	writer := &storeWriter{lk: lk}
-	pendingNote := ""
 	saveSt := func() bool {
-		err := writer.persist(st)
-		if err != nil {
-			pendingNote = "pending save: " + err.Error() + " (esc discards)"
-			status = pendingNote
+		wasNote := writer.note()
+		if err := writer.persist(st); err != nil {
+			status = writer.note()
 			return false
 		}
-		if status == pendingNote {
+		if status == wasNote {
 			status = ""
 		}
-		pendingNote = ""
 		return true
 	}
 	persistView := func(list []row) {
@@ -3613,6 +3721,7 @@ func runPicker() int {
 			select {
 			case k, ok := <-keyCh:
 				if !ok {
+					writer.close(st)
 					return 0
 				}
 				key = k
@@ -3624,6 +3733,7 @@ func runPicker() int {
 			select {
 			case k, ok := <-keyCh:
 				if !ok {
+					writer.close(st)
 					return 0
 				}
 				key = k
@@ -4004,12 +4114,20 @@ func runPicker() int {
 						status = "jump: " + err.Error()
 						continue
 					}
+					if !writer.close(st) {
+						status = writer.note()
+						continue
+					}
 					return 0
 				}
 			case vimline.ActOut:
 				// Level two of the ladder: leave the field, keep the filter.
 				searching = false
 			case vimline.ActCancel:
+				if !writer.close(st) {
+					status = writer.note()
+					continue
+				}
 				return 0
 			case vimline.ActUp:
 				if sel > 0 {
@@ -4201,7 +4319,6 @@ func runPicker() int {
 				if fresh, err := writer.discard(st); err == nil {
 					st = fresh
 					rows = rebase(rows)
-					pendingNote = ""
 					status = ""
 				}
 				continue
@@ -4239,6 +4356,10 @@ func runPicker() int {
 				}
 			}
 			if len(rows) == 0 {
+				if !writer.close(st) {
+					status = writer.note()
+					continue
+				}
 				return 0
 			}
 			target := rows[sel].PaneID
@@ -4246,6 +4367,10 @@ func runPicker() int {
 			if err := jumpTo(target); err != nil {
 				// keep the frame open with the reason instead of failing silently
 				status = "jump: " + err.Error()
+				continue
+			}
+			if !writer.close(st) {
+				status = writer.note()
 				continue
 			}
 			return 0
@@ -4473,6 +4598,10 @@ func runPicker() int {
 				sel = 0
 			}
 		case key == "q":
+			if !writer.close(st) {
+				status = writer.note()
+				continue
+			}
 			return 0
 		}
 	}

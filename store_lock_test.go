@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/RooseveltAdvisors/vimline"
 )
 
 func mustLoad(t *testing.T) *store {
@@ -516,6 +519,161 @@ func TestPendingChangeRetriesOrDiscards(t *testing.T) {
 	}
 	if got := mustLoad(t).Panes["w1:p1"].Note; got != "typed" {
 		t.Fatalf("the discard must not write: note=%q", got)
+	}
+}
+
+// TestPendingChangeSurvivesResyncAdoption pins the merge contract: an
+// external sync can never drop a pending change, the change's fields win over
+// the sync's, and the sync's other fields still land.
+func TestPendingChangeSurvivesResyncAdoption(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "old"}
+	seed.Panes["w1:p2"] = &paneStat{Visits: 1, Label: "two"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	w := &storeWriter{lk: lk}
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
+	if err := w.persist(st); err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+
+	hook := mustLoad(t)
+	hook.Panes["w1:p2"].Visits++
+	writeStoreDirect(t, hook)
+
+	base := syncedFields()
+	st = w.adopt(st, refreshStore(st), base)
+	if st.Panes["w1:p1"].Note != "typed" {
+		t.Fatalf("the adoption dropped the pending change: %q", st.Panes["w1:p1"].Note)
+	}
+	if st.Panes["w1:p2"].Visits != 2 {
+		t.Fatalf("the adoption dropped the external write: %d", st.Panes["w1:p2"].Visits)
+	}
+	if !w.pending() {
+		t.Fatal("the adopted change must stay pending until it is saved")
+	}
+
+	hook2 := mustLoad(t)
+	hook2.Panes["w1:p1"].Note = "hook note"
+	writeStoreDirect(t, hook2)
+	base = syncedFields()
+	st = w.adopt(st, refreshStore(st), base)
+	if st.Panes["w1:p1"].Note != "typed" {
+		t.Fatalf("an external sync overwrote the pending change: %q", st.Panes["w1:p1"].Note)
+	}
+
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	if err := w.persist(st); err != nil {
+		t.Fatalf("save after the adoption: %v", err)
+	}
+	final := mustLoad(t)
+	if final.Panes["w1:p1"].Note != "typed" {
+		t.Fatalf("the pending change must persist: %q", final.Panes["w1:p1"].Note)
+	}
+	if final.Panes["w1:p2"].Visits != 2 {
+		t.Fatalf("the external write must persist: %d", final.Panes["w1:p2"].Visits)
+	}
+}
+
+// TestPendingChangeSurvivesExit pins the exit contract: the picker does not
+// exit while a pending change cannot be saved, and the exit persists it.
+func TestPendingChangeSurvivesExit(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	w := &storeWriter{lk: lk}
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
+	if err := w.persist(st); err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+	if w.close(st) {
+		t.Fatal("the exit must be refused while the change cannot be saved")
+	}
+	if !w.pending() {
+		t.Fatal("the refused exit must keep the change pending")
+	}
+
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	if !w.close(st) {
+		t.Fatal("the exit must persist the pending change")
+	}
+	if got := mustLoad(t).Panes["w1:p1"].Note; got != "typed" {
+		t.Fatalf("the pending change was lost at exit: %q", got)
+	}
+}
+
+// TestDiscardFailureKeepsPendingChange pins the discard contract: a discard
+// that cannot reload drops nothing and keeps the pending note visible.
+func TestDiscardFailureKeepsPendingChange(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	w := &storeWriter{lk: lk}
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
+	if err := w.persist(st); err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+
+	if err := os.Chmod(statePath(), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(statePath(), 0o600)
+	if _, err := os.ReadFile(statePath()); err == nil {
+		t.Skip("cannot make the state file unreadable")
+	}
+	if _, err := w.discard(st); err == nil {
+		t.Fatal("the discard must fail while the state file is unreadable")
+	}
+	if !w.pending() {
+		t.Fatal("a failed discard must keep the change pending")
+	}
+	if st.Panes["w1:p1"].Note != "typed" {
+		t.Fatalf("a failed discard must keep the change: %q", st.Panes["w1:p1"].Note)
+	}
+	if w.note() == "" {
+		t.Fatal("a failed discard must keep the pending note")
+	}
+}
+
+// TestPendingNoteNeverSaysSaved is the cross-check: while a change is
+// pending, no rendered note claims a save happened.
+func TestPendingNoteNeverSaysSaved(t *testing.T) {
+	useTempConfig(t)
+	lk := &storeLock{}
+	w := &storeWriter{lk: lk}
+	if err := w.persist(mustLoad(t)); err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+	note := w.note()
+	if !strings.Contains(note, "pending") {
+		t.Fatalf("the note must say the change is pending: %q", note)
+	}
+	frame := renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, note, 80, 24, []string{"All"}, 0, "both", "")
+	if strings.Contains(frame, "saved") {
+		t.Fatalf("the rendered note claims saved while a change is pending:\n%s", frame)
 	}
 }
 
