@@ -608,7 +608,8 @@ func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 // rule and the taint scope inside the episode. A refused save while the file
 // is rebuilt or still gone must not roll back into that file, so the store is
 // tainted with the refused mutation in memory. That holds for a rebuild that
-// re-records every held pane without its content too. The taint stops only
+// re-records every held pane without its content or without the held
+// favorites too. The taint stops only
 // the refused mutation: the next save writes the held dataset back without
 // it, the note names the last action as not applied, and repeating the
 // action lands.
@@ -625,6 +626,11 @@ func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 			"w1:p2": {Visits: 1, Label: "two"},
 			"w1:p3": {Visits: 1, Label: "three"},
 		}},
+		{"rebuilt from every pane, favorites wiped", map[string]*paneStat{
+			"w1:p1": {Visits: 1, Label: "one", Note: "call vendor"},
+			"w1:p2": {Visits: 1, Label: "two"},
+			"w1:p3": {Visits: 1, Label: "three"},
+		}},
 		{"still gone", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -634,7 +640,7 @@ func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 			seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "call vendor"}
 			seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
 			seed.Panes["w1:p3"] = &paneStat{Visits: 3, Label: "three"}
-			seed.Favorites = []string{"w1:p2"}
+			seed.Favorites = []string{"w1:p2", "w1:p3"}
 			if err := saveStore(seed); err != nil {
 				t.Fatal(err)
 			}
@@ -658,7 +664,7 @@ func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 			if err == nil {
 				t.Fatal("the save must be refused while the lock is unavailable")
 			}
-			if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p1"].Note != "call vendor" || kept.Panes["w1:p2"] == nil || kept.Panes["w1:p3"] == nil || !kept.isFavorite("w1:p2") {
+			if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p1"].Note != "call vendor" || kept.Panes["w1:p2"] == nil || kept.Panes["w1:p3"] == nil || !kept.isFavorite("w1:p2") || !kept.isFavorite("w1:p3") {
 				t.Fatalf("the rollback replaced the dataset with the rebuild: %+v %v", kept.Panes, kept.Favorites)
 			}
 			if after, _ := os.ReadFile(statePath()); !bytes.Equal(after, before) {
@@ -687,7 +693,7 @@ func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 					t.Fatalf("the held dataset was not written back: %+v", final.Panes)
 				}
 			}
-			if final.Panes["w1:p1"].Note != "call vendor" || !final.isFavorite("w1:p2") {
+			if final.Panes["w1:p1"].Note != "call vendor" || !final.isFavorite("w1:p2") || !final.isFavorite("w1:p3") {
 				t.Fatalf("the held content was not written back: %+v %v", final.Panes["w1:p1"], final.Favorites)
 			}
 			if final.Panes["w1:p3"].Done || kept.Panes["w1:p3"].Done {
@@ -992,25 +998,17 @@ func assertHeldUnits(t *testing.T, s *store) {
 	}
 }
 
-// TestIdlePickerRefusesStrippedFullRebuild pins the continuation proof at
-// every adoption, not only inside an observed episode. recall.json vanishes
-// while the picker waits for a key, and focus hooks re-record every held
-// pane before any refresh sees the gap, so the rebuilt file carries every
-// held pane ID and none of the held content. The picker's next refresh
-// refuses it and keeps the dataset, and the next save writes the full store
-// back. A writer that changes a unit and keeps it, or removes a favorite or
-// Jev weight the way the favorite and jev reset commands do, is adopted.
-func TestIdlePickerRefusesStrippedFullRebuild(t *testing.T) {
-	useTempConfig(t)
-	seedHeldUnits(t)
-
-	st := mustLoad(t)
+// rerecordStripped deletes recall.json and plays focus hooks for ids while
+// the picker holding held waits for a key: each hook loads what the previous
+// one wrote, or starts fresh, and records only its pane's visit, the way
+// recordFocus does. The rebuilt file carries the panes and none of the held
+// content.
+func rerecordStripped(t *testing.T, held *store, ids ...string) {
+	t.Helper()
 	if err := os.Remove(statePath()); err != nil {
 		t.Fatal(err)
 	}
-	// Each focus hook loads what the previous one wrote, or starts fresh,
-	// and records only its pane's visit, the way recordFocus does.
-	for _, id := range []string{"w1:p1", "w1:p2", "w1:p3"} {
+	for _, id := range ids {
 		hook := &store{Version: 1, Panes: map[string]*paneStat{}}
 		if _, err := os.Stat(statePath()); err == nil {
 			hook = readStoreDirect(t)
@@ -1018,9 +1016,25 @@ func TestIdlePickerRefusesStrippedFullRebuild(t *testing.T) {
 		ps := hook.ensurePane(id)
 		ps.Visits++
 		ps.Last = time.Now().Unix()
-		ps.Label = st.Panes[id].Label
+		ps.Label = held.Panes[id].Label
 		writeStoreDirect(t, hook)
 	}
+}
+
+// TestIdlePickerRefusesStrippedFullRebuild pins the continuation proof at
+// every adoption, not only inside an observed episode. recall.json vanishes
+// while the picker waits for a key, and focus hooks re-record every held
+// pane before any refresh sees the gap, so the rebuilt file carries every
+// held pane ID and none of the held content. The picker's next refresh
+// refuses it and keeps the dataset, and the next save writes the full store
+// back. A writer that changes a unit and keeps it, removes the only
+// favorite, or resets the Jev weights is adopted.
+func TestIdlePickerRefusesStrippedFullRebuild(t *testing.T) {
+	useTempConfig(t)
+	seedHeldUnits(t)
+
+	st := mustLoad(t)
+	rerecordStripped(t, st, "w1:p1", "w1:p2", "w1:p3")
 
 	lk := &storeLock{}
 	if err := lk.acquire(); err != nil {
@@ -1047,6 +1061,101 @@ func TestIdlePickerRefusesStrippedFullRebuild(t *testing.T) {
 	}
 	if fresh.Panes["w1:p1"].Note != "call vendor at 3" || fresh.isFavorite("w1:p2") || fresh.Jev != nil && len(fresh.Jev.Weights) > 0 {
 		t.Fatalf("the writer's change was not adopted: %+v %v %+v", fresh.Panes["w1:p1"], fresh.Favorites, fresh.Jev)
+	}
+}
+
+// seedFavoritesOnly saves three panes whose only content units are the
+// given favorites and one Jev weight.
+func seedFavoritesOnly(t *testing.T, favorites ...string) {
+	t.Helper()
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 4, Label: "one"}
+	seed.Panes["w1:p2"] = &paneStat{Visits: 5, Label: "two"}
+	seed.Panes["w1:p3"] = &paneStat{Visits: 6, Label: "three"}
+	seed.Favorites = favorites
+	seed.ensureJev()
+	seed.Jev.Weights = map[string]float64{"label:docs": 0.5}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIdlePickerRefusesFavoriteWipe pins the favorite rule at every
+// adoption: when the picker held more than one favorite, a rebuild that
+// drops all of them is refused even with no other content unit to miss and
+// no refresh in the gap, because no single action wipes them. The next save
+// writes the favorites and the Jev weight back.
+func TestIdlePickerRefusesFavoriteWipe(t *testing.T) {
+	useTempConfig(t)
+	seedFavoritesOnly(t, "w1:p1", "w1:p2")
+
+	st := mustLoad(t)
+	rerecordStripped(t, st, "w1:p1", "w1:p2", "w1:p3")
+
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	if got := refreshStore(st); got != st {
+		t.Fatal("a rebuild that wipes the held favorites must not replace the picker's dataset")
+	}
+	if _, err := persistStore(lk, st); err != nil {
+		t.Fatalf("the next save must write the dataset back: %v", err)
+	}
+	final := mustLoad(t)
+	if !final.isFavorite("w1:p1") || !final.isFavorite("w1:p2") {
+		t.Fatalf("the favorites were not written back: %v", final.Favorites)
+	}
+	if final.Jev == nil || final.Jev.Weights["label:docs"] != 0.5 {
+		t.Fatalf("the Jev weight was not written back: %+v", final.Jev)
+	}
+}
+
+// TestSingleUnfavoriteAndJevResetAdopt pins the other side of the boundary
+// with the real commands: one un-favorite, whether of the only favorite or
+// one of two, and a jev reset outside an episode are legitimate writes. The
+// picker adopts each one, and its next save keeps it.
+func TestSingleUnfavoriteAndJevResetAdopt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		favorites []string
+		args      []string
+		check     func(s *store) bool
+	}{
+		{"un-favorite the only favorite", []string{"w1:p1"}, []string{"favorite", "w1:p1"},
+			func(s *store) bool { return !s.isFavorite("w1:p1") }},
+		{"un-favorite one of two", []string{"w1:p1", "w1:p2"}, []string{"favorite", "w1:p1"},
+			func(s *store) bool { return !s.isFavorite("w1:p1") && s.isFavorite("w1:p2") }},
+		{"jev reset", []string{"w1:p1", "w1:p2"}, []string{"jev", "reset"},
+			func(s *store) bool { return s.Jev == nil || len(s.Jev.Weights) == 0 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			seedFavoritesOnly(t, tc.favorites...)
+
+			st := mustLoad(t)
+			if out, err := exec.Command("go", append([]string{"run", "."}, tc.args...)...).CombinedOutput(); err != nil {
+				t.Fatalf("%v: %v: %s", tc.args, err, out)
+			}
+
+			lk := &storeLock{}
+			if err := lk.acquire(); err != nil {
+				t.Fatal(err)
+			}
+			defer lk.release()
+			fresh := refreshStore(st)
+			if fresh == st || !tc.check(fresh) {
+				t.Fatalf("%v must be adopted: %v %+v", tc.args, fresh.Favorites, fresh.Jev)
+			}
+			if _, err := persistStore(lk, fresh); err != nil {
+				t.Fatalf("the picker's save must land: %v", err)
+			}
+			if final := mustLoad(t); !tc.check(final) {
+				t.Fatalf("the picker's save reverted %v: %v %+v", tc.args, final.Favorites, final.Jev)
+			}
+		})
 	}
 }
 
