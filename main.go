@@ -2106,62 +2106,67 @@ func remindBadge(r row, now int64) string {
 	return "~"
 }
 
-// remindIcon is the list mark for a set reminder. It is one column wide so
-// the row stays aligned. Due reminders use the same mark in the warning color.
-func remindIcon() string { return "\u25f7" }
-
-func remindClock(at, now int64) string {
+// remindWhen is the 12-hour phrase for a reminder. short fits a list cell.
+// full is the sentence in the h dialog.
+func remindWhen(at int64, now time.Time) (short, full string) {
 	if at <= 0 {
-		return ""
+		return "", "No reminder set"
 	}
-	return time.Unix(at, 0).Format("15:04")
+	t := time.Unix(at, 0).In(now.Location())
+	clock := t.Format("3:04 PM")
+	rel := t.Sub(now)
+	y, m, d := now.Date()
+	start := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+	sameDay := !t.Before(start) && t.Before(start.AddDate(0, 0, 1))
+	tomorrow := !t.Before(start.AddDate(0, 0, 1)) && t.Before(start.AddDate(0, 0, 2))
+	switch {
+	case rel <= 0:
+		return "due " + clock, "Due at " + clock
+	case rel < time.Hour:
+		mins := max(1, int(rel.Minutes()))
+		s := fmt.Sprintf("in %dm", mins)
+		return s, s + ", at " + clock
+	case sameDay:
+		return clock, "Today at " + clock
+	case tomorrow:
+		return "tmr " + clock, "Tomorrow at " + clock
+	case rel < 7*24*time.Hour:
+		day := t.Format("Mon")
+		return day + " " + clock, day + " at " + clock
+	default:
+		date := t.Format("Jan 2")
+		return date + " " + clock, date + " at " + clock
+	}
 }
 
 func remindSummary(at int64, mode string, now time.Time) string {
+	_, full := remindWhen(at, now)
 	if at <= 0 {
-		return "No reminder set"
+		return full
 	}
-	t := time.Unix(at, 0).In(now.Location())
-	rel := t.Sub(now)
-	var when string
-	switch {
-	case rel <= 0:
-		when = "due"
-	case rel < time.Hour:
-		when = fmt.Sprintf("in %dm", max(1, int(rel.Minutes())))
-	case rel < 48*time.Hour:
-		when = fmt.Sprintf("in %dh", int(rel.Hours()))
-	default:
-		when = fmt.Sprintf("in %dd", int(rel.Hours()/24))
-	}
-	rule := "if no reply"
 	if mode == "regardless" {
-		rule = "regardless"
+		return full + ". Stays hidden until then."
 	}
-	return when + " \u00b7 " + t.Format("Mon 3:04 PM") + " \u00b7 " + rule
+	return full + ". Returns early if the agent replies."
 }
 
-func remindIconCell(r row, now int64, width int, selected bool) string {
+func remindTimeCell(r row, now int64, width int, selected bool) string {
 	if width < 2 {
 		return ""
 	}
 	if r.RemindAt <= 0 {
 		return strings.Repeat(" ", width)
 	}
-	icon := remindIcon()
+	short, _ := remindWhen(r.RemindAt, time.Unix(now, 0))
 	color := keyAccentFg
 	if r.RemindAt <= now {
-		icon = "!"
 		color = keyStBad
 	}
-	body := icon
-	if width >= 8 {
-		body += " " + remindClock(r.RemindAt, now)
-	}
+	plain := clip(short, width)
 	if selected {
-		return pad(color+body+keySelectFg, width)
+		return pad(color+plain+keySelectFg, width)
 	}
-	return pad(color+body+keyReset, width)
+	return pad(color+plain+keyReset, width)
 }
 
 // screen is the shared frame builder every dialog uses.
@@ -2310,11 +2315,11 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
 	starW, dotW, statusW, metaW := 2, 2, 10, 22
-	remindW := 8
+	remindW := 12
 	if narrow {
 		// The name is the point of the picker. A narrow pane keeps the coloured
-		// dot, the reminder icon, and a short "2m ago".
-		statusW, metaW, remindW = 0, 8, 2
+		// dot, a short reminder time, and a short "2m ago".
+		statusW, metaW, remindW = 0, 8, 8
 	}
 	labelW := width - starW - dotW - remindW - statusW - metaW
 	if labelW < 8 && remindW > 2 {
@@ -2356,7 +2361,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		} else {
 			dotCell += keyReset + " "
 		}
-		iconCell := remindIconCell(r, now, remindW, i == sel)
+		iconCell := remindTimeCell(r, now, remindW, i == sel)
 		var statusCell string
 		switch {
 		case r.Done && !r.ManualBlocked:

@@ -154,8 +154,14 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 	// Snoozed pane renders ~ in All tab, and All shows [sort: Most recent].
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
 	allPlain := stripANSI(renderFrame(all, 0, 0, vimline.View{Label: "/"}, "", 100, 18, viewNames(st), 5, "both", ""))
-	if !strings.Contains(allPlain, "\u25f7") || !strings.Contains(allPlain, "[sort: Most recent]") {
-		t.Fatalf("expected reminder icon and [sort: Most recent] pill in All:\n%s", allPlain)
+	if !strings.Contains(allPlain, "PM") && !strings.Contains(allPlain, "AM") && !strings.Contains(allPlain, "in ") {
+		t.Fatalf("expected a 12-hour reminder time in All:\n%s", allPlain)
+	}
+	if strings.Contains(allPlain, "\u25f7") {
+		t.Fatal("cryptic clock mark is still shown")
+	}
+	if !strings.Contains(allPlain, "[sort: Most recent]") {
+		t.Fatalf("expected [sort: Most recent] pill in All:\n%s", allPlain)
 	}
 }
 

@@ -357,7 +357,13 @@ func TestRemindDialogShowsSetReminder(t *testing.T) {
 	fv := vimline.View{Label: "at", Text: "20min"}
 	frame := renderRemind(100, 20, []string{"Inbox"}, 0, 0, 0, 0, 0, []string{"20min"}, fv, "billing", true, now.Add(3*time.Hour).Unix(), now)
 	plain := stripANSI(frame)
-	if !strings.Contains(plain, "Update") || !strings.Contains(plain, "Cancel") || !strings.Contains(plain, "in 3h") {
-		t.Fatalf("dialog missing current reminder:\n%s", plain)
+	if !strings.Contains(plain, "Update") || !strings.Contains(plain, "Cancel") {
+		t.Fatalf("dialog missing choices:\n%s", plain)
+	}
+	if !strings.Contains(plain, "PM") && !strings.Contains(plain, "AM") {
+		t.Fatalf("dialog missing 12-hour time:\n%s", plain)
+	}
+	if strings.Contains(plain, "15:") || strings.Contains(plain, "\u25f7") {
+		t.Fatalf("dialog still uses a 24-hour or clock mark:\n%s", plain)
 	}
 }
