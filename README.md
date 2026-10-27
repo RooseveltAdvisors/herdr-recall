@@ -20,7 +20,8 @@ live rows instead of losing slots to hidden ones. `z` undoes the last `e` and
 the row returns to the top of the list. A thread also returns on its own when
 its agent does something new. A row with a reminder shows the next time
 beside the name, such as `in 20m`, `3:04 PM`, or `tmr 9:00 AM`.
-Panes with no reminder keep the same columns.
+An overdue reminder says `overdue 3m` and rises to the top of Inbox.
+The other rows keep their order. Panes with no reminder keep the same columns.
 Viewing a pane is you reading, not the agent moving, so it never returns a thread and never moves the pinned queue.
 Press `e` again on that row to undo.
 Press `h` to set a reminder (`20m`, `1h`, `3h`, `tomorrow`, or `clear`).

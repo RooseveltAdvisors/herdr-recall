@@ -74,6 +74,32 @@ func TestTabJumpLetters(t *testing.T) {
 	}
 }
 
+func TestOverdueReminderRisesWithoutShuffling(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{
+		Version: 2, TabsInit: true, Tabs: defaultTabs(),
+		Panes: map[string]*paneStat{
+			"a": {Label: "alpha", InInbox: true, Last: now - 30},
+			"b": {Label: "axiad-sync", InInbox: true, Last: now - 20, RemindAt: now - 120},
+			"c": {Label: "gamma", InInbox: true, Last: now - 10},
+		},
+		InboxOrder: []string{"a", "b", "c"},
+	}
+	snap := &snapshot{Panes: []paneRec{
+		{PaneID: "a", AgentStatus: "idle"},
+		{PaneID: "b", AgentStatus: "idle"},
+		{PaneID: "c", AgentStatus: "working"},
+	}}
+	got := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	if strings.Join(paneIDs(got), ",") != "b,a,c" {
+		t.Fatalf("inbox = %v, want overdue axiad-sync first, then a,c", paneIDs(got))
+	}
+	short, _ := remindWhen(now-120, time.Unix(now, 0))
+	if !strings.HasPrefix(short, "overdue") {
+		t.Fatalf("phrase = %q, want overdue", short)
+	}
+}
+
 func TestLaterListsOnlyReminders(t *testing.T) {
 	now := time.Now().Unix()
 	st := &store{

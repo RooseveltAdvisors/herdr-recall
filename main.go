@@ -973,12 +973,27 @@ func syncInboxRows(all []row, st *store, now int64) []row {
 			orderedIDs = append(orderedIDs, r.PaneID)
 		}
 	}
+	// An overdue reminder rises to the top. The other rows keep their order.
+	orderedIDs = promoteOverdue(orderedIDs, byID, now)
 	st.InboxOrder = orderedIDs
 	out := make([]row, 0, len(orderedIDs))
 	for _, id := range orderedIDs {
 		out = append(out, byID[id])
 	}
 	return out
+}
+
+func promoteOverdue(ids []string, byID map[string]row, now int64) []string {
+	var due, rest []string
+	for _, id := range ids {
+		r := byID[id]
+		if r.RemindAt > 0 && r.RemindAt <= now {
+			due = append(due, id)
+		} else {
+			rest = append(rest, id)
+		}
+	}
+	return append(due, rest...)
 }
 
 func (s *store) removeFromInbox(id string) {
@@ -2144,7 +2159,17 @@ func remindWhen(at int64, now time.Time) (short, full string) {
 	tomorrow := !t.Before(start.AddDate(0, 0, 1)) && t.Before(start.AddDate(0, 0, 2))
 	switch {
 	case rel <= 0:
-		return "due " + clock, "Due at " + clock
+		late := -rel
+		var lateText string
+		switch {
+		case late < time.Hour:
+			lateText = fmt.Sprintf("overdue %dm", max(1, int(late.Minutes())))
+		case late < 24*time.Hour:
+			lateText = fmt.Sprintf("overdue %dh", max(1, int(late.Hours())))
+		default:
+			lateText = fmt.Sprintf("overdue %dd", max(1, int(late.Hours()/24)))
+		}
+		return lateText, "Overdue. It was due at " + clock
 	case rel < time.Hour:
 		mins := max(1, int(rel.Minutes()))
 		s := fmt.Sprintf("in %dm", mins)
