@@ -542,29 +542,38 @@ func TestNoteCommitLabelsCapturedPane(t *testing.T) {
 	}
 }
 
-// TestRefusalNoteOutlivesOverlayExit pins matrix row R3: a save refused
-// while an overlay is up never reaches the overlay's frames, which carry no
-// status line, and leaving the overlay must not discard the note, whether a
-// hint overwrites it first or the exit clears the status. The next frame
-// that carries a status line shows it.
+// TestRefusalNoteOutlivesOverlayExit pins matrix row R3 with the composed
+// note: an action refused while an overlay is up never reaches the overlay's
+// frames, which carry no status line. When later saves land before any frame
+// shows the refusal, the next frame that carries a status line shows the
+// composed note, whether a hint overwrote the status first or the exit
+// cleared it. The note clears on the next landed save, and the refused
+// action stays repeatable.
 func TestRefusalNoteOutlivesOverlayExit(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "herdr-recall")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v: %s", err, out)
 	}
+	const composed = "saved; earlier action was not applied - repeat it"
 	for _, tc := range []struct {
-		name  string
-		open  string
-		churn string
-		leave []string
+		name    string
+		open    string
+		act     string
+		leave   []string
+		applied func(s *store) bool
 	}{
-		{"remind", "h", "k", []string{"q"}},
-		{"jev", "J", "j", []string{"i", "q"}},
+		{"remind quick pick removal", "h", "x", []string{"q"},
+			func(s *store) bool { return !slices.Contains(s.getSnoozePicks(), "20min") }},
+		{"jev delete", "J", "\r", []string{"i", "q"},
+			func(s *store) bool { _, ok := s.Jev.Weights["tok:alpha"]; return !ok }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useTempConfig(t)
 			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
-			seedPicker(t, []string{"w1:pA"}, nil)
+			seedPicker(t, []string{"w1:pA"}, func(s *store) {
+				s.ensureJev()
+				s.Jev.Weights = map[string]float64{"tok:alpha": 0.9}
+			})
 
 			p := startPicker(t, bin, cfg)
 			frame := 1
@@ -573,25 +582,48 @@ func TestRefusalNoteOutlivesOverlayExit(t *testing.T) {
 			frame++
 			p.frames(frame)
 
-			// The save after the next key fails while the overlay is up.
+			// The action's save fails while the overlay is up.
 			if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
 				t.Fatal(err)
 			}
-			p.press(tc.churn)
+			p.press(tc.act)
 			frame++
-			if out := p.frames(frame); strings.Contains(out, "not saved: ") {
+			out := p.frames(frame)
+			if strings.Contains(out, "not saved: ") || strings.Contains(out, composed) {
 				t.Fatalf("the overlay frame must carry no status line:\n%s", stripANSI(out))
+			}
+			if tc.applied(mustLoad(t)) {
+				t.Fatal("the refused action reached disk")
 			}
 			if err := os.Remove(statePath() + ".tmp"); err != nil {
 				t.Fatal(err)
 			}
 
+			// The saves while leaving land before any frame showed the refusal.
 			for _, k := range tc.leave {
 				p.press(k)
 				frame++
 			}
-			if out := p.frames(frame); !strings.Contains(out, "not saved: ") {
-				t.Fatalf("leaving the overlay discarded the unseen refusal note:\n%s", stripANSI(out))
+			out = p.frames(frame)
+			if !strings.Contains(out, composed) {
+				t.Fatalf("the next status line must show the composed note:\n%s", stripANSI(out))
+			}
+			shown := len(out)
+
+			p.press("j")
+			frame++
+			out = p.frames(frame)
+			if strings.Contains(out[shown:], composed) {
+				t.Fatalf("the composed note must clear on the next landed save:\n%s", stripANSI(out[shown:]))
+			}
+
+			for _, k := range []string{tc.open, tc.act} {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+			if !tc.applied(mustLoad(t)) {
+				t.Fatal("the refused action must stay repeatable")
 			}
 		})
 	}

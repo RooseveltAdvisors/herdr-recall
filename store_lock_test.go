@@ -1445,8 +1445,11 @@ func TestRefusedSaveKeepsStoreWhenStateGoneOrCorrupt(t *testing.T) {
 
 // TestRefusalNoteRendersBeforeAnySaveClearsIt pins the note contract: a
 // refusal note reaches a rendered frame before any save can clear it, and it
-// is gone only after a successful save.
+// is gone only after a successful save. A save that lands before the
+// refusal rendered turns it into the composed note, which then follows the
+// same rule.
 func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
+	const composed = "saved; earlier action was not applied - repeat it"
 	useTempConfig(t)
 	seed := mustLoad(t)
 	seed.TabsInit = true
@@ -1469,14 +1472,14 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	if _, err := persistStore(lk, kept); err != nil {
 		t.Fatalf("the auto-save must succeed: %v", err)
 	}
-	status = note.clear(status)
-	if !strings.Contains(status, "not saved: ") {
-		t.Fatalf("the refusal note was cleared before it rendered: %q", status)
+	status = note.landed(status)
+	if status != composed {
+		t.Fatalf("a save that lands before the refusal rendered must compose the note: %q", status)
 	}
 
 	frame := renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, status, 80, 24, []string{"All"}, 0, "both", "")
-	if !strings.Contains(stripANSI(frame), "not saved: ") {
-		t.Fatalf("the refusal note must render:\n%s", frame)
+	if !strings.Contains(stripANSI(frame), composed) {
+		t.Fatalf("the composed note must render:\n%s", frame)
 	}
 
 	overlay := renderNote(80, 24, []string{"All"}, 0, vimline.View{Label: "note", Text: "x", Focused: true})
@@ -1487,8 +1490,8 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	if _, err := persistStore(lk, kept); err != nil {
 		t.Fatalf("the later save must succeed: %v", err)
 	}
-	status = note.clear(status)
-	if !strings.Contains(status, "not saved: ") {
+	status = note.landed(status)
+	if status != composed {
 		t.Fatalf("an overlay frame must not mark the note seen: %q", status)
 	}
 
@@ -1496,7 +1499,7 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	if _, err := persistStore(lk, kept); err != nil {
 		t.Fatalf("the later save must succeed: %v", err)
 	}
-	status = note.clear(status)
+	status = note.landed(status)
 	if status != "" {
 		t.Fatalf("the note must clear only after a successful save: %q", status)
 	}
@@ -1551,7 +1554,7 @@ func TestRefusalNoteSeenWhenStatusClips(t *testing.T) {
 	if _, err := persistStore(lk, kept); err != nil {
 		t.Fatalf("the later save must succeed: %v", err)
 	}
-	if status = note.clear(status); status != "" {
+	if status = note.landed(status); status != "" {
 		t.Fatalf("a clipped note the frame showed must clear after a landed save: %q", status)
 	}
 }

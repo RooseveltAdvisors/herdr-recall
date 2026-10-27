@@ -592,8 +592,9 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 // the screen as a head of itself; what the emitted frame displays is what
 // marks it seen.
 type saveNote struct {
-	text  string
-	shown bool
+	text    string
+	shown   bool
+	refused bool
 }
 
 // post sets a note the operator must see: a refusal, or an overlay action
@@ -602,11 +603,14 @@ type saveNote struct {
 func (n *saveNote) post(text string) string {
 	n.text = text
 	n.shown = false
+	n.refused = false
 	return text
 }
 
 func (n *saveNote) refuse(err error) string {
-	return n.post("not saved: " + err.Error())
+	n.post("not saved: " + err.Error())
+	n.refused = true
+	return n.text
 }
 
 // keep returns the note while no frame has shown it, so no later status
@@ -618,7 +622,16 @@ func (n *saveNote) keep(status string) string {
 	return status
 }
 
-func (n *saveNote) clear(status string) string {
+// landed returns the status to show after a save landed. A refusal no frame
+// has shown yet becomes the composed note, which acknowledges the save first
+// and keeps the refused action visible and repeatable second. A note a frame
+// has shown clears.
+func (n *saveNote) landed(status string) string {
+	if n.refused && !n.shown {
+		n.refused = false
+		n.text = "saved; earlier action was not applied - repeat it"
+		return n.text
+	}
 	if n.shown && status == n.text {
 		return ""
 	}
@@ -3548,7 +3561,7 @@ func runPicker() int {
 			status = note.refuse(err)
 			return false
 		}
-		status = note.clear(status)
+		status = note.landed(status)
 		return true
 	}
 	// pointed reports whether the row the drawn cursor pointed at is still
