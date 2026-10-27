@@ -183,8 +183,7 @@ func TestJevPreferBumpsFeaturesWithoutProxy(t *testing.T) {
 }
 
 func TestJevContextualTeaching(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", tmpDir)
+	useTempConfig(t)
 
 	now := time.Now()
 	st := &store{Version: 1, Panes: map[string]*paneStat{}}
@@ -216,8 +215,9 @@ func TestJevContextualTeaching(t *testing.T) {
 		},
 	}
 
-	if err := recordJevTeaching(st, teaching); err != nil {
-		t.Fatalf("recordJevTeaching failed: %v", err)
+	recordJevTeaching(st, teaching)
+	if err := logJevTeaching(teaching); err != nil {
+		t.Fatalf("logJevTeaching failed: %v", err)
 	}
 
 	if len(st.Jev.Teachings) != 1 {

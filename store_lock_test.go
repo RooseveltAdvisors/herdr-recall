@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,12 +26,19 @@ func mustLoad(t *testing.T) *store {
 }
 
 // useTempConfig isolates recall state in a temp dir and resets the process
-// fingerprint, so tests never touch the live plugin config directory.
+// state, so tests never touch the live plugin config directory. The reset
+// runs again at cleanup, so no later test inherits this test's memoized
+// config directory after its temp dir is removed.
 func useTempConfig(t *testing.T) {
 	t.Helper()
 	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	resetStoreState()
+	t.Cleanup(resetStoreState)
+}
+
+func resetStoreState() {
 	configDirOnce = sync.Once{}
-	lastStoreFP.Store("")
+	proven.Store([]byte(nil))
 	loadFailed.Store(false)
 	saveTaint.Store(false)
 	stateVanished.Store(false)
@@ -46,6 +55,21 @@ func writeStoreDirect(t *testing.T, s *store) {
 	if err := os.WriteFile(statePath(), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// readStoreDirect simulates a read by another process: it parses the state
+// file without touching this process's proven bytes.
+func readStoreDirect(t *testing.T) *store {
+	t.Helper()
+	b, err := os.ReadFile(statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := parseStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 func TestRefreshStoreKeepsStoreWhenNoExternalWrite(t *testing.T) {
@@ -356,6 +380,76 @@ func TestFirstResyncKeepsRestoreAnchor(t *testing.T) {
 	}
 }
 
+// TestUnsavedHeldPanesAreNoRecreationEvidence pins the reference of the
+// recreation check: it judges a changed file against the proven bytes, so a
+// pane stat this process created and never saved is no evidence of a
+// rebuild. Opening the Inbox creates such stats for live rows. A hook write
+// in the startup window is adopted, and a refused save rolls back cleanly
+// instead of tainting the session with a false rebuild.
+func TestUnsavedHeldPanesAreNoRecreationEvidence(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Last: 100}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	// The picker opens on the Inbox: its rows create a stat for the live
+	// pane that was never focused, and that stat is not on disk.
+	st := mustLoad(t)
+	frozen := &snapshot{Panes: []paneRec{{PaneID: "w1:p1"}, {PaneID: "w1:p2"}}}
+	rowsFor(frozen, st, view{Kind: "inbox"}, sortDefault)
+	if st.Panes["w1:p2"] == nil {
+		t.Fatal("setup: the Inbox rows must create the unsaved stat")
+	}
+
+	// A focus hook saves a visit before the picker's first resync.
+	hook := readStoreDirect(t)
+	hook.Panes["w1:p1"].Visits++
+	hook.Panes["w1:p1"].Last = time.Now().Unix()
+	writeStoreDirect(t, hook)
+
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	fresh := refreshStore(st)
+	if fresh == st {
+		t.Fatal("the hook write must be adopted: an unsaved stat is no rebuild evidence")
+	}
+	if fresh.Panes["w1:p1"].Visits != 2 {
+		t.Fatalf("the hook visit was lost: %+v", fresh.Panes["w1:p1"])
+	}
+
+	// e archives the row whose stat is still unsaved, and the save fails.
+	rowsFor(frozen, fresh, view{Kind: "inbox"}, sortDefault)
+	fresh.Panes["w1:p2"].Done = true
+	if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := persistStore(lk, fresh)
+	if err == nil {
+		t.Fatal("the save must fail while recall.json.tmp blocks it")
+	}
+	if saveTaint.Load() {
+		t.Fatal("the rollback read the unchanged file as a rebuild and tainted the store")
+	}
+	if ps := kept.Panes["w1:p2"]; ps != nil && ps.Done {
+		t.Fatal("the refused mutation lingered in memory")
+	}
+	if err := os.Remove(statePath() + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("the next save must land: %v", err)
+	}
+	if final := mustLoad(t); final.Panes["w1:p1"].Visits != 2 {
+		t.Fatalf("the hook visit did not survive the picker's save: %+v", final.Panes["w1:p1"])
+	}
+}
+
 // TestCLIWriterRefusesWriteWithoutLock is the fail-closed regression: when
 // recall.lock cannot be taken, jev reset and favorite must error out and
 // leave recall.json byte-identical instead of writing unlocked.
@@ -429,7 +523,9 @@ func TestPickerKeepsAndRematerializesStateWhenFileGone(t *testing.T) {
 // file vanishes and a hook rebuilds it from one pane while the picker sits
 // idle, with no refresh between the two events. The rebuild drops panes no
 // prune can drop, so it is a recreation and not a writer's continuation: the
-// picker keeps its dataset and the next save writes it back in full.
+// picker keeps its dataset, the vanish episode opens, and a later rebuild
+// that re-records every pane but none of the held content is refused too.
+// The next save writes the dataset back in full.
 func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -442,7 +538,7 @@ func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 			useTempConfig(t)
 			seed := mustLoad(t)
 			seed.TabsInit = true
-			seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+			seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "call vendor"}
 			seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
 			seed.Panes["w1:p3"] = &paneStat{Visits: 3, Label: "three"}
 			if err := saveStore(seed); err != nil {
@@ -468,6 +564,17 @@ func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 			if got := refreshStore(st); got != st {
 				t.Fatal("the rebuilt file must not replace the picker's dataset")
 			}
+
+			// More focus hooks re-record every held pane before any save.
+			stripped := &store{Version: 1, Panes: map[string]*paneStat{}}
+			for id, ps := range st.Panes {
+				stripped.Panes[id] = &paneStat{Visits: ps.Visits + 1, Last: time.Now().Unix(), Label: ps.Label}
+			}
+			writeStoreDirect(t, stripped)
+			if got := refreshStore(st); got != st {
+				t.Fatal("a rebuild that drops the held note must not replace the picker's dataset")
+			}
+
 			if err := saveStore(st); err != nil {
 				t.Fatalf("the picker's save must write the dataset: %v", err)
 			}
@@ -479,6 +586,9 @@ func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 			}
 			if final.Panes["w1:p3"].Visits != 4 {
 				t.Fatalf("dataset change lost: %+v", final.Panes["w1:p3"])
+			}
+			if final.Panes["w1:p1"].Note != "call vendor" {
+				t.Fatalf("the held note was dropped: %+v", final.Panes["w1:p1"])
 			}
 
 			// The episode is over once the dataset lands: a writer's write is
@@ -495,36 +605,97 @@ func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 }
 
 // TestRefusedSaveKeepsDatasetAfterRebuild pins the save-time half of the same
-// rule: a refused save during the rebuild episode must not roll back into the
-// rebuilt file. The rollback adopts only bytes that continue the held state,
-// so the held dataset survives the refusal.
+// rule and the taint scope inside the episode. A refused save while the file
+// is rebuilt or still gone must not roll back into that file, so the store is
+// tainted with the refused mutation in memory. The taint stops only that
+// mutation: the next save writes the held dataset back without it, the note
+// names the last action as not applied, and repeating the action lands.
 func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
-	useTempConfig(t)
-	seed := mustLoad(t)
-	seed.TabsInit = true
-	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
-	seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
-	seed.Panes["w1:p3"] = &paneStat{Visits: 3, Label: "three"}
-	if err := saveStore(seed); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name    string
+		rebuild bool
+	}{
+		{"rebuilt", true},
+		{"still gone", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			seed := mustLoad(t)
+			seed.TabsInit = true
+			seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "call vendor"}
+			seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
+			seed.Panes["w1:p3"] = &paneStat{Visits: 3, Label: "three"}
+			seed.Favorites = []string{"w1:p2"}
+			if err := saveStore(seed); err != nil {
+				t.Fatal(err)
+			}
 
-	st := mustLoad(t)
-	if err := os.Remove(statePath()); err != nil {
-		t.Fatal(err)
-	}
-	writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
-		"w1:p9": {Visits: 1, Label: "hook"},
-	}})
-	if err := os.Mkdir(lockPath(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	kept, err := persistStore(&storeLock{}, st)
-	if err == nil {
-		t.Fatal("the save must be refused while the lock is unavailable")
-	}
-	if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p2"] == nil || kept.Panes["w1:p3"] == nil {
-		t.Fatalf("the rollback replaced the dataset with the rebuild: %+v", kept.Panes)
+			lk := &storeLock{}
+			st := mustLoad(t)
+			if err := os.Remove(statePath()); err != nil {
+				t.Fatal(err)
+			}
+			if tc.rebuild {
+				writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
+					"w1:p9": {Visits: 1, Label: "hook"},
+				}})
+			}
+			before, _ := os.ReadFile(statePath())
+
+			// e archives w1:p3, and its save is refused.
+			st.Panes["w1:p3"].Done = true
+			if err := os.Mkdir(lockPath(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			kept, err := persistStore(lk, st)
+			if err == nil {
+				t.Fatal("the save must be refused while the lock is unavailable")
+			}
+			if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p2"] == nil || kept.Panes["w1:p3"] == nil {
+				t.Fatalf("the rollback replaced the dataset with the rebuild: %+v", kept.Panes)
+			}
+			if after, _ := os.ReadFile(statePath()); !bytes.Equal(after, before) {
+				t.Fatal("the refused save changed recall.json")
+			}
+
+			// The lock comes back and the next save runs.
+			if err := os.Remove(lockPath()); err != nil {
+				t.Fatal(err)
+			}
+			if err := lk.acquire(); err != nil {
+				t.Fatal(err)
+			}
+			defer lk.release()
+			kept, err = persistStore(lk, kept)
+			if err == nil {
+				t.Fatal("the save that drops the refused mutation must report it, never a plain save")
+			}
+			note := &saveNote{}
+			if got := note.refuse(err); got != "not saved: last action not applied - repeat it" {
+				t.Fatalf("the note must name the last action as not applied: %q", got)
+			}
+			final := mustLoad(t)
+			for _, id := range []string{"w1:p1", "w1:p2", "w1:p3"} {
+				if final.Panes[id] == nil {
+					t.Fatalf("the held dataset was not written back: %+v", final.Panes)
+				}
+			}
+			if final.Panes["w1:p1"].Note != "call vendor" || !final.isFavorite("w1:p2") {
+				t.Fatalf("the held content was not written back: %+v %v", final.Panes["w1:p1"], final.Favorites)
+			}
+			if final.Panes["w1:p3"].Done || kept.Panes["w1:p3"].Done {
+				t.Fatal("the refused mutation persisted")
+			}
+
+			// The refused action stays repeatable and lands now.
+			kept.Panes["w1:p3"].Done = true
+			if _, err := persistStore(lk, kept); err != nil {
+				t.Fatalf("the repeated action must land: %v", err)
+			}
+			if !mustLoad(t).Panes["w1:p3"].Done {
+				t.Fatal("the repeated action did not reach disk")
+			}
+		})
 	}
 }
 
@@ -607,17 +778,17 @@ func TestLegitimateWriterWinsOverHeldPin(t *testing.T) {
 	}
 }
 
-// TestCleanReloadAdoptEndsVanishWatch pins the watch contract at the save
-// boundary: a rollback that adopts proven bytes ends the vanish watch, the
-// same as the refresh and write sites, so a keep-window prune landing in a
-// later idle gap is judged on its own merits. A stale watch reads that write
-// as a recreation, and the next save then restores the un-favorite the
-// writer removed.
+// TestCleanReloadAdoptEndsVanishWatch pins the episode contract at the save
+// boundary: a rollback that adopts bytes proving continuation ends the vanish
+// episode, the same as the refresh adoption and the landed save, so a
+// keep-window prune landing in a later idle gap is judged on its own merits.
+// A stale episode reads that write as a recreation, and the next save then
+// restores the un-favorite the writer removed.
 func TestCleanReloadAdoptEndsVanishWatch(t *testing.T) {
 	useTempConfig(t)
 	seed := mustLoad(t)
 	seed.TabsInit = true
-	seed.Panes["w1:old"] = &paneStat{Visits: 9, Label: "old", Note: "call vendor", Last: 1}
+	seed.Panes["w1:old"] = &paneStat{Visits: 9, Label: "old", Last: 1}
 	seed.Favorites = []string{"w1:old"}
 	for i := 0; i < pruneKeep; i++ {
 		seed.Panes["fill:"+strconv.Itoa(i)] = &paneStat{Label: "fill", Last: int64(2 + i)}
@@ -636,7 +807,8 @@ func TestCleanReloadAdoptEndsVanishWatch(t *testing.T) {
 		t.Fatal("refresh must keep the in-memory store when the file vanishes")
 	}
 
-	// A rebuild that drops no held pane ID lands while the picker is idle.
+	// A rebuild that carries every held pane and content unit lands while
+	// the picker is idle: it proves continuation.
 	rebuilt := &store{Version: 1, Panes: map[string]*paneStat{}, Favorites: append([]string(nil), st.Favorites...)}
 	for id, ps := range st.Panes {
 		rebuilt.Panes[id] = &paneStat{Visits: ps.Visits, Last: ps.Last, Label: ps.Label}
@@ -656,8 +828,8 @@ func TestCleanReloadAdoptEndsVanishWatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("the save must fail while recall.json.tmp blocks the rename")
 	}
-	if kept.Panes["w1:old"] == nil || !kept.isFavorite("w1:old") {
-		t.Fatalf("the rollback must adopt the rebuild: %+v", kept)
+	if kept == st || kept.Panes["w1:old"] == nil || !kept.isFavorite("w1:old") {
+		t.Fatalf("the rollback must adopt the proven continuation: %+v", kept)
 	}
 	if err := os.Remove(statePath() + ".tmp"); err != nil {
 		t.Fatal(err)
@@ -668,7 +840,7 @@ func TestCleanReloadAdoptEndsVanishWatch(t *testing.T) {
 	if out, err := exec.Command("go", "run", ".", "favorite", "w1:old").CombinedOutput(); err != nil {
 		t.Fatalf("favorite: %v: %s", err, out)
 	}
-	hook := mustLoad(t)
+	hook := readStoreDirect(t)
 	hp := hook.ensurePane("w1:live")
 	hp.Visits++
 	hp.Last = time.Now().Unix()
@@ -696,31 +868,43 @@ func TestCleanReloadAdoptEndsVanishWatch(t *testing.T) {
 	}
 }
 
-// TestPickerAdoptsSupersetAfterVanish pins the other half of the rule: a
-// recreated file that holds everything the picker holds and more is another
-// saver writing more, not less, so the picker adopts it normally.
-func TestPickerAdoptsSupersetAfterVanish(t *testing.T) {
-	useTempConfig(t)
+// seedHeldUnits saves a store that carries one of each content unit the
+// vanish episode guards: a note, a manual block, a reminder, a favorite, a
+// custom tab, and a Jev weight.
+func seedHeldUnits(t *testing.T) {
+	t.Helper()
 	seed := mustLoad(t)
 	seed.TabsInit = true
-	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
-	seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "call vendor"}
+	seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two", ManualBlocked: true}
+	seed.Panes["w1:p3"] = &paneStat{Visits: 3, Label: "three", RemindAt: time.Now().Add(time.Hour).Unix()}
+	seed.Favorites = []string{"w1:p2"}
+	seed.Tabs = append(defaultTabs(), customTab{Name: "Work", Sort: "last", Limit: 50})
+	seed.ensureJev()
+	seed.Jev.Weights = map[string]float64{"label:docs": 0.5}
 	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestPickerAdoptsSupersetAfterVanish pins the other half of the rule: a
+// recreated file that holds every pane and content unit the picker holds,
+// and more, is another saver writing more, not less, so the picker adopts it
+// normally.
+func TestPickerAdoptsSupersetAfterVanish(t *testing.T) {
+	useTempConfig(t)
+	seedHeldUnits(t)
 
 	st := mustLoad(t)
+	superset := readStoreDirect(t)
 	if err := os.Remove(statePath()); err != nil {
 		t.Fatal(err)
 	}
 	if got := refreshStore(st); got != st {
 		t.Fatal("refresh must keep the in-memory store when the file vanishes")
 	}
-	writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
-		"w1:p1": {Visits: 1, Label: "one"},
-		"w1:p2": {Visits: 2, Label: "two"},
-		"w1:p9": {Visits: 5, Label: "hook"},
-	}})
+	superset.Panes["w1:p9"] = &paneStat{Visits: 5, Label: "hook"}
+	writeStoreDirect(t, superset)
 
 	fresh := refreshStore(st)
 	if fresh == st {
@@ -728,6 +912,70 @@ func TestPickerAdoptsSupersetAfterVanish(t *testing.T) {
 	}
 	if fresh.Panes["w1:p9"] == nil || fresh.Panes["w1:p9"].Visits != 5 {
 		t.Fatalf("the adopted superset lost the other saver's pane: %+v", fresh.Panes)
+	}
+}
+
+// TestEpisodeRefusesRebuildMissingContent pins the continuation proof inside
+// a vanish episode: a file that comes back with every held pane but without
+// a held content unit was built again, not continued. The picker keeps its
+// dataset and the next save writes every unit back.
+func TestEpisodeRefusesRebuildMissingContent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		strip func(s *store)
+	}{
+		{"note", func(s *store) { s.Panes["w1:p1"].Note = "" }},
+		{"manual block", func(s *store) { s.Panes["w1:p2"].ManualBlocked = false }},
+		{"reminder", func(s *store) { s.Panes["w1:p3"].RemindAt = 0 }},
+		{"favorite", func(s *store) { s.Favorites = nil }},
+		{"tab", func(s *store) { s.Tabs = defaultTabs() }},
+		{"jev weight", func(s *store) { s.Jev.Weights = nil }},
+		{"every unit", func(s *store) {
+			panes := map[string]*paneStat{}
+			for id, ps := range s.Panes {
+				panes[id] = &paneStat{Visits: ps.Visits + 1, Last: time.Now().Unix(), Label: ps.Label}
+			}
+			*s = store{Version: 1, Panes: panes}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			seedHeldUnits(t)
+
+			st := mustLoad(t)
+			rebuilt := readStoreDirect(t)
+			if err := os.Remove(statePath()); err != nil {
+				t.Fatal(err)
+			}
+			if got := refreshStore(st); got != st {
+				t.Fatal("refresh must keep the in-memory store when the file vanishes")
+			}
+			tc.strip(rebuilt)
+			writeStoreDirect(t, rebuilt)
+
+			if got := refreshStore(st); got != st {
+				t.Fatalf("a rebuild without the held %s must not replace the picker's dataset", tc.name)
+			}
+			if err := saveStore(st); err != nil {
+				t.Fatalf("the picker's save must write the dataset: %v", err)
+			}
+			final := mustLoad(t)
+			if p := final.Panes["w1:p1"]; p == nil || p.Note != "call vendor" {
+				t.Fatalf("the note was not written back: %+v", p)
+			}
+			if p := final.Panes["w1:p2"]; p == nil || !p.ManualBlocked || !final.isFavorite("w1:p2") {
+				t.Fatalf("the manual block or favorite was not written back: %+v %v", p, final.Favorites)
+			}
+			if p := final.Panes["w1:p3"]; p == nil || p.RemindAt == 0 {
+				t.Fatalf("the reminder was not written back: %+v", p)
+			}
+			if len(final.Tabs) != 3 || final.Tabs[2].Name != "Work" {
+				t.Fatalf("the custom tab was not written back: %+v", final.Tabs)
+			}
+			if final.Jev == nil || final.Jev.Weights["label:docs"] != 0.5 {
+				t.Fatalf("the Jev weight was not written back: %+v", final.Jev)
+			}
+		})
 	}
 }
 
@@ -1222,6 +1470,65 @@ func TestUndoPointerSurvivesRefusedSave(t *testing.T) {
 	}
 }
 
+// TestRefusedTeachLeavesNoLogRecord pins the learning-log rule: a teaching
+// reaches jev-teachings.jsonl only after its save lands. A refused teach
+// rolls back and leaves no record, and its retry appends exactly once.
+func TestRefusedTeachLeavesNoLogRecord(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	st := mustLoad(t)
+	save := func() bool {
+		next, err := persistStore(lk, st)
+		if next != st {
+			st = next
+		}
+		return err == nil
+	}
+	teach := jevTeaching{ID: "teach-1", Feedback: "prefer billing", Intent: "prefer", Pane: jevPaneContext{PaneID: "w1:p1", Label: "one"}}
+	logPath := filepath.Join(configDir(), "jev-teachings.jsonl")
+
+	if err := os.Mkdir(lockPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if commitTeaching(st, teach, save) {
+		t.Fatal("the teach must be refused while the lock is unavailable")
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("the refused teach left a learning-log record: %v", err)
+	}
+	if st.Jev != nil && len(st.Jev.Teachings) != 0 {
+		t.Fatal("the refused teach lingered in memory")
+	}
+
+	if err := os.Remove(lockPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	if !commitTeaching(st, teach, save) {
+		t.Fatal("the retried teach must land")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(data)), "\n"); len(lines) != 1 || !strings.Contains(lines[0], `"teach-1"`) {
+		t.Fatalf("the retry must append exactly one record: %q", data)
+	}
+	if got := mustLoad(t); got.Jev == nil || len(got.Jev.Teachings) != 1 {
+		t.Fatalf("the landed teach must reach recall.json: %+v", got.Jev)
+	}
+}
+
 // TestNoteCommitLabelsCapturedPane pins the note commit: the status names the
 // label captured when the note opened, and a resync that empties or reorders
 // the list cannot panic or relabel it.
@@ -1254,10 +1561,10 @@ func TestNoteCommitLabelsCapturedPane(t *testing.T) {
 	}
 }
 
-// TestTaintedRollbackNeverPersistsRefusedMutation pins the taint contract:
-// a refused change never reaches disk, the note reports the live failure
-// while the reload keeps failing, and a clean reload clears the taint so the
-// next persist saves only proven state.
+// TestTaintedRollbackNeverPersistsRefusedMutation pins the taint contract
+// outside a vanish episode: a refused change never reaches disk, the note
+// reports the live failure while the reload keeps failing, and a clean
+// reload clears the taint so the next persist saves only proven state.
 func TestTaintedRollbackNeverPersistsRefusedMutation(t *testing.T) {
 	useTempConfig(t)
 	seed := mustLoad(t)
@@ -1271,7 +1578,7 @@ func TestTaintedRollbackNeverPersistsRefusedMutation(t *testing.T) {
 	st := mustLoad(t)
 	st.Panes["w1:p1"].Note = "typed"
 
-	if err := os.Remove(statePath()); err != nil {
+	if err := os.WriteFile(statePath(), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	kept, err := persistStore(lk, st)
@@ -1286,12 +1593,16 @@ func TestTaintedRollbackNeverPersistsRefusedMutation(t *testing.T) {
 	if err == nil {
 		t.Fatal("a tainted save must stay refused while the reload fails")
 	}
-	if !os.IsNotExist(err) {
+	var syntax *json.SyntaxError
+	if !errors.As(err, &syntax) {
 		t.Fatalf("the note must report the live failure: %v", err)
 	}
 	note := &saveNote{}
 	if got := note.refuse(err); strings.Contains(got, "recall.lock unavailable") {
 		t.Fatalf("the note must not replay the stale reason: %q", got)
+	}
+	if b, _ := os.ReadFile(statePath()); string(b) != "{" {
+		t.Fatalf("a tainted save wrote recall.json: %q", b)
 	}
 
 	writeStoreDirect(t, seed)

@@ -7,7 +7,7 @@
 package main
 
 import (
-	"crypto/sha256"
+	"bytes"
 	"encoding/json"
 	"errors"
 
@@ -301,12 +301,15 @@ func resolveConfigDir() string {
 
 func statePath() string { return filepath.Join(configDir(), "recall.json") }
 
-// lastStoreFP is the content fingerprint of recall.json the last time this
-// process loaded or saved it. A long-lived picker compares it before touching
-// shared state so a concurrent hook or CLI write is never overwritten by a
-// stale copy. The bytes decide, so an external write that reuses a coarse
-// modtime is still adopted.
-var lastStoreFP atomic.Value // string
+// proven holds the recall.json bytes this process last loaded, adopted, or
+// saved: the content fingerprint a long-lived picker compares before
+// touching shared state, so a concurrent hook or CLI write is never
+// overwritten by a stale copy. The bytes decide, so an external write that
+// reuses a coarse modtime is still adopted. They are also the held dataset
+// without this process's unsaved changes, so every recreation check and
+// every re-materialization after a refused save reads them, never the live
+// store.
+var proven atomic.Value // []byte
 
 // loadFailed records that the last read of recall.json hit a real error, so
 // the in-memory store is unproven against disk and must not be written back
@@ -318,25 +321,28 @@ var loadFailed atomic.Bool
 // reach disk until a clean reload proves the state again.
 var saveTaint atomic.Bool
 
-// stateVanished marks the state file as gone on this process's watch. A file
-// that reappears missing panes this process holds is a recreation, not a
-// writer's continuation, so the held dataset wins and lands on the next save.
+// stateVanished marks a vanish episode open: this process saw recall.json
+// gone, or saw it come back missing a pane no writer could have dropped. The
+// episode stays open until the held dataset is proven on disk again, by a
+// landed save or by adopting bytes that prove continuation.
 var stateVanished atomic.Bool
 
-func hashStore(b []byte) string {
-	sum := sha256.Sum256(b)
-	return string(sum[:])
-}
-
 func stampStore(b []byte) {
-	lastStoreFP.Store(hashStore(b))
+	proven.Store(b)
 }
 
-func currentFP() string {
-	if v := lastStoreFP.Load(); v != nil {
-		return v.(string)
+func provenBytes() []byte {
+	b, _ := proven.Load().([]byte)
+	return b
+}
+
+// provenState parses the proven bytes into a store of its own. With nothing
+// proven yet it is the fresh state loadStore starts from.
+func provenState() *store {
+	if s, err := parseStore(provenBytes()); err == nil {
+		return s
 	}
-	return ""
+	return &store{Version: 1, Panes: map[string]*paneStat{}}
 }
 
 // pinned reports whether the pane carries state no writer may drop: a note,
@@ -350,21 +356,23 @@ func (s *store) pinned(id string) bool {
 const pruneKeep = 200
 
 // recreatesState reports whether the store on disk is a recreation of the
-// state this process holds instead of a writer's continuation of it. A file
-// that vanished on this process's watch and comes back missing any held pane
-// was built again from nothing. Without the watch, a missing held pane is a
-// prune's work only when the file already carries a full keep window of
-// panes ranked at or above it: prune drops just the tail of a closed set it
-// has a window to drop. A held pin proves nothing here: a writer may
-// un-pin and prune a pane for real.
-func recreatesState(held, disk *store) bool {
-	watched := stateVanished.Load()
+// proven state instead of a writer's continuation of it. Inside a vanish
+// episode only a file that continues the proven state may replace it.
+// Outside one, a missing proven pane is a prune's work only when the file
+// carries a full keep window of panes ranked at or above it: prune drops
+// just the tail of a closed set it has a window to drop. A held pin proves
+// nothing here: a writer may un-pin and prune a pane for real. A missing
+// pane prune could not drop means the file was built again from nothing,
+// which opens the episode. The proven state is the reference, so this
+// process's own unsaved panes are no evidence either way.
+func recreatesState(disk *store) bool {
+	held := provenState()
+	if stateVanished.Load() {
+		return !continues(held, disk)
+	}
 	for id, hp := range held.Panes {
 		if disk.Panes[id] != nil {
 			continue
-		}
-		if watched {
-			return true
 		}
 		ahead := 0
 		for _, dp := range disk.Panes {
@@ -373,10 +381,52 @@ func recreatesState(held, disk *store) bool {
 			}
 		}
 		if ahead < pruneKeep {
+			stateVanished.Store(true)
 			return true
 		}
 	}
 	return false
+}
+
+// continues reports whether disk carries every pane of held and every
+// content unit on it: each note, manual block, reminder, and favorite, each
+// tab, and each Jev weight. A file that reappears during a vanish episode
+// must prove that before it replaces the held dataset.
+func continues(held, disk *store) bool {
+	for id, hp := range held.Panes {
+		dp := disk.Panes[id]
+		if dp == nil || hp.Note != "" && dp.Note == "" || hp.ManualBlocked && !dp.ManualBlocked || hp.RemindAt > 0 && dp.RemindAt == 0 {
+			return false
+		}
+	}
+	for _, id := range held.Favorites {
+		if !disk.isFavorite(id) {
+			return false
+		}
+	}
+	for _, ht := range held.Tabs {
+		found := false
+		for _, dt := range disk.Tabs {
+			if dt.Name == ht.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if held.Jev != nil {
+		for k := range held.Jev.Weights {
+			if disk.Jev == nil {
+				return false
+			}
+			if _, ok := disk.Jev.Weights[k]; !ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // refreshStore adopts on-disk writes made by hook or CLI processes since this
@@ -391,7 +441,7 @@ func refreshStore(st *store) *store {
 		}
 		return st
 	}
-	if hashStore(b) == currentFP() {
+	if p := provenBytes(); p != nil && bytes.Equal(b, p) {
 		loadFailed.Store(false)
 		return st
 	}
@@ -401,7 +451,7 @@ func refreshStore(st *store) *store {
 		return st
 	}
 	loadFailed.Store(false)
-	if recreatesState(st, fresh) {
+	if recreatesState(fresh) {
 		return st
 	}
 	stateVanished.Store(false)
@@ -450,20 +500,23 @@ func (l *storeLock) held() bool { return l.f != nil }
 
 // cleanReload replaces the in-memory store with the proven bytes on disk and
 // clears the taint: only a reload can show the state again after a failed
-// rollback. The save evaluates the vanish watch and the recreation rule the
-// way the refresh does, so bytes that are a recreation of the held state
-// prove nothing and never replace the held dataset.
-func cleanReload(lk *storeLock, held *store) (*store, error) {
+// rollback. It judges the file the way the refresh does: a file gone on its
+// watch opens the vanish episode, and bytes that are a recreation of the
+// proven state prove nothing and never replace the held dataset.
+func cleanReload(lk *storeLock) (*store, error) {
 	lk.acquire()
 	b, err := os.ReadFile(statePath())
 	if err != nil {
+		if os.IsNotExist(err) {
+			stateVanished.Store(true)
+		}
 		return nil, err
 	}
 	fresh, err := parseStore(b)
 	if err != nil {
 		return nil, err
 	}
-	if recreatesState(held, fresh) {
+	if recreatesState(fresh) {
 		return nil, errors.New("recall.json rebuilt, state unproven")
 	}
 	loadFailed.Store(false)
@@ -475,25 +528,38 @@ func cleanReload(lk *storeLock, held *store) (*store, error) {
 
 // persistStore writes st under the held lock. A refused write rolls the
 // uncommitted mutation back by reloading the store from disk under the lock,
-// so nothing unsaved lingers, and reports the refusal.
+// so nothing unsaved lingers, and reports the refusal. When that reload
+// fails the store is tainted, and nothing it holds may persist until a clean
+// reload proves the state again. The taint never blocks re-materialization:
+// inside an open vanish episode the proven state, which is the held dataset
+// without the refused mutation, is written back instead.
 func persistStore(lk *storeLock, st *store) (*store, error) {
+	write := func(s *store) error {
+		if !lk.held() {
+			return errors.New("recall.lock unavailable")
+		}
+		return saveStore(s)
+	}
 	if saveTaint.Load() {
-		fresh, err := cleanReload(lk, st)
-		if err != nil {
+		fresh, err := cleanReload(lk)
+		if err == nil {
+			return fresh, errors.New("recall state reloaded from disk")
+		}
+		if !stateVanished.Load() {
 			return st, err
 		}
-		return fresh, errors.New("recall state reloaded from disk")
+		held := provenState()
+		if err := write(held); err != nil {
+			return st, err
+		}
+		saveTaint.Store(false)
+		return held, errors.New("last action not applied - repeat it")
 	}
-	var err error
-	if !lk.held() {
-		err = errors.New("recall.lock unavailable")
-	} else {
-		err = saveStore(st)
-	}
+	err := write(st)
 	if err == nil {
 		return st, nil
 	}
-	if fresh, rerr := cleanReload(lk, st); rerr == nil {
+	if fresh, rerr := cleanReload(lk); rerr == nil {
 		return fresh, err
 	}
 	saveTaint.Store(true)
@@ -550,6 +616,18 @@ func commitNote(st *store, paneID, label, text string) string {
 		return "note saved: " + label
 	}
 	return "note cleared: " + label
+}
+
+// commitTeaching records t in the store and saves it. Only a landed save
+// appends t to the learning log, so a refused teach leaves no record behind
+// and its retry appends exactly once.
+func commitTeaching(st *store, t jevTeaching, save func() bool) bool {
+	recordJevTeaching(st, t)
+	if !save() {
+		return false
+	}
+	_ = logJevTeaching(t)
+	return true
 }
 
 // undoDone reverts the done marker behind mark and returns the mark that
@@ -3556,8 +3634,7 @@ func runPicker() int {
 			},
 		}
 
-		_ = recordJevTeaching(st, tRecord)
-		saved := saveSt()
+		saved := commitTeaching(st, tRecord, saveSt)
 
 		taughtID := teachRow.PaneID
 		teaching = false
@@ -3784,11 +3861,12 @@ func runPicker() int {
 			}
 			frame = renderFrame(rows, sel, scrollOffset, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
+		// The lock is dropped before the frame write and the wait for input,
+		// so hooks never stall behind a slow terminal or an idle picker, and
+		// re-taken before the next mutation.
+		lk.release()
 		tty.WriteString(frame)
 		note.rendered(frame)
-		// The lock is dropped while waiting for input so hooks never stall
-		// behind an idle picker, and re-taken before the next mutation.
-		lk.release()
 
 		var key string
 		if ed := activeEd(); ed != nil && ed.PendingJ() {
@@ -4181,6 +4259,7 @@ func runPicker() int {
 				}
 				if len(rows) > 0 {
 					target := rows[sel].PaneID
+					lk.release()
 					tty.WriteString("\x1b[2J\x1b[H")
 					if err := jumpTo(target); err != nil {
 						status = "jump: " + err.Error()
@@ -4421,6 +4500,7 @@ func runPicker() int {
 				return 0
 			}
 			target := rows[sel].PaneID
+			lk.release()
 			tty.WriteString("\x1b[2J\x1b[H")
 			if err := jumpTo(target); err != nil {
 				// keep the frame open with the reason instead of failing silently

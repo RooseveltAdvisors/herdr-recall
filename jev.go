@@ -482,13 +482,16 @@ func (s *store) JevScore(paneID string) float64 {
 	return s.Jev.Scores[paneID]
 }
 
-func recordJevTeaching(st *store, t jevTeaching) error {
+func recordJevTeaching(st *store, t jevTeaching) {
 	st.ensureJev()
 	st.Jev.Teachings = append(st.Jev.Teachings, t)
 	if len(st.Jev.Teachings) > 200 {
 		st.Jev.Teachings = st.Jev.Teachings[len(st.Jev.Teachings)-200:]
 	}
+}
 
+// logJevTeaching appends t to the long-term learning log beside recall.json.
+func logJevTeaching(t jevTeaching) error {
 	logPath := filepath.Join(configDir(), "jev-teachings.jsonl")
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
