@@ -2078,22 +2078,45 @@ func filterRows(rows []row, query string) []row {
 	return out
 }
 
-func formatLabelWithNote(label, note string, labelW int, selected bool) string {
-	if note == "" {
+func formatLabelWithNote(label, note, remind string, labelW int, selected, due bool) string {
+	if note == "" && remind == "" {
 		return pad(clipTail(label, max(1, labelW-1)), labelW)
 	}
-	maxName := max(4, labelW/2)
+	suffixPlain := ""
+	if remind != "" {
+		suffixPlain = " · " + remind
+	}
+	if note != "" {
+		suffixPlain += " · " + note
+	}
+	maxName := max(4, labelW-len([]rune(suffixPlain))-1)
+	if maxName < 4 {
+		maxName = 4
+	}
 	clippedName := clipTail(label, maxName)
-	nameRunes := len([]rune(clippedName))
-	rem := labelW - nameRunes - 3
+	rem := labelW - len([]rune(clippedName)) - 3
 	if rem < 4 {
 		return pad(clipTail(label, max(1, labelW-1)), labelW)
 	}
-	clippedNote := clip(note, rem)
 	if selected {
-		return pad(clippedName+" · "+clippedNote, labelW)
+		return pad(clippedName+suffixPlain, labelW)
 	}
-	return pad(clippedName+keySub+" · "+clippedNote+keyText, labelW)
+	var b strings.Builder
+	b.WriteString(clippedName)
+	if remind != "" {
+		color := keyAccentFg
+		if due {
+			color = keyStBad
+		}
+		shown := clip(remind, rem)
+		b.WriteString(keySub + " · " + color + shown)
+		rem -= len([]rune(shown)) + 3
+	}
+	if note != "" && rem >= 4 {
+		b.WriteString(keySub + " · " + clip(note, rem-3))
+	}
+	b.WriteString(keyText)
+	return pad(b.String(), labelW)
 }
 
 func remindBadge(r row, now int64) string {
@@ -2148,25 +2171,6 @@ func remindSummary(at int64, mode string, now time.Time) string {
 		return full + ". Stays hidden until then."
 	}
 	return full + ". Returns early if the agent replies."
-}
-
-func remindTimeCell(r row, now int64, width int, selected bool) string {
-	if width < 2 {
-		return ""
-	}
-	if r.RemindAt <= 0 {
-		return strings.Repeat(" ", width)
-	}
-	short, _ := remindWhen(r.RemindAt, time.Unix(now, 0))
-	color := keyAccentFg
-	if r.RemindAt <= now {
-		color = keyStBad
-	}
-	plain := clip(short, width)
-	if selected {
-		return pad(color+plain+keySelectFg, width)
-	}
-	return pad(color+plain+keyReset, width)
 }
 
 // screen is the shared frame builder every dialog uses.
@@ -2315,17 +2319,12 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
 	starW, dotW, statusW, metaW := 2, 2, 10, 22
-	remindW := 12
 	if narrow {
 		// The name is the point of the picker. A narrow pane keeps the coloured
-		// dot, a short reminder time, and a short "2m ago".
-		statusW, metaW, remindW = 0, 8, 8
+		// dot and a short "2m ago", and gives every remaining column to the label.
+		statusW, metaW = 0, 8
 	}
-	labelW := width - starW - dotW - remindW - statusW - metaW
-	if labelW < 8 && remindW > 2 {
-		remindW = 2
-		labelW = width - starW - dotW - remindW - statusW - metaW
-	}
+	labelW := width - starW - dotW - statusW - metaW
 	if labelW < 4 {
 		labelW = 4
 	}
@@ -2354,14 +2353,17 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		glyph, scol := statusMark(r.Status)
 		// Prefix k puts the status dot immediately left of the name. The word
 		// stays in its own column, and any sticky note sits dim beside the name.
-		labelCell := formatLabelWithNote(r.Label, r.Note, labelW, i == sel)
+		remind := ""
+		if r.RemindAt > 0 {
+			remind, _ = remindWhen(r.RemindAt, time.Unix(now, 0))
+		}
+		labelCell := formatLabelWithNote(r.Label, r.Note, remind, labelW, i == sel, r.RemindAt > 0 && r.RemindAt <= now)
 		dotCell := scol + glyph
 		if i == sel {
 			dotCell += keySelectFg + " "
 		} else {
 			dotCell += keyReset + " "
 		}
-		iconCell := remindTimeCell(r, now, remindW, i == sel)
 		var statusCell string
 		switch {
 		case r.Done && !r.ManualBlocked:
@@ -2388,10 +2390,10 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			} else {
 				line += "  "
 			}
-			line += dotCell + iconCell + labelCell + statusCell + metaCol
+			line += dotCell + labelCell + statusCell + metaCol
 			emit(pad(line, width) + keyReset)
 		} else {
-			emit(starCell + dotCell + iconCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
+			emit(starCell + dotCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
 		}
 		shown++
 	}
