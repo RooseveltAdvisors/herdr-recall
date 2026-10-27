@@ -797,6 +797,120 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	}
 }
 
+// TestRefusalNoteSeenWhenStatusClips pins that the seen flag is decided from
+// the emitted status text: a narrow pane clips the note down to its visible
+// head, that head is what the operator sees, and a later landed save may then
+// clear the note instead of freezing a stale not-saved status.
+func TestRefusalNoteSeenWhenStatusClips(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
+	if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := persistStore(lk, st)
+	if err == nil {
+		t.Fatal("the save must be refused while recall.json.tmp blocks it")
+	}
+	note := &saveNote{}
+	status := note.refuse(err)
+	if len(status) <= 24 {
+		t.Fatalf("the note must outlast the 24-column line it clips against: %q", status)
+	}
+
+	frame := renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, status, 24, 24, []string{"All"}, 0, "both", "")
+	shown := stripANSI(frame)
+	if strings.Contains(shown, note.text) {
+		t.Fatalf("the frame must clip the note at width 24:\n%s", frame)
+	}
+	if !strings.Contains(shown, note.text[:24]) {
+		t.Fatalf("the frame must show the note's visible head:\n%s", frame)
+	}
+	note.rendered(frame)
+
+	if err := os.Remove(statePath() + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("the later save must succeed: %v", err)
+	}
+	if status = note.clear(status); status != "" {
+		t.Fatalf("a clipped note the frame showed must clear after a landed save: %q", status)
+	}
+}
+
+// TestUndoPointerSurvivesRefusedSave pins the undo pointer rule: e publishes
+// it only on a landed save, and z spends it only on a landed undo. A refused
+// undo rolls the marker back and keeps the pointer armed, so recovery undoes
+// the same marker again.
+func TestUndoPointerSurvivesRefusedSave(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	st := mustLoad(t)
+	save := func() bool {
+		next, err := persistStore(lk, st)
+		if next != st {
+			st = next
+		}
+		return err == nil
+	}
+
+	// e archives the row; the pointer publishes only because its save landed.
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	ps := st.Panes["w1:p1"]
+	ps.Done = true
+	ps.DoneState = "done"
+	st.removeFromInbox("w1:p1")
+	if !save() {
+		t.Fatal("the done marker must land")
+	}
+	lk.release()
+	mark := "w1:p1"
+
+	// z under a refused save: the marker rolls back, the pointer stays armed.
+	mark = undoDone(st, mark, save)
+	if mark != "w1:p1" {
+		t.Fatalf("the refused undo spent the undo pointer: %q", mark)
+	}
+	if st.Panes["w1:p1"] == nil || !st.Panes["w1:p1"].Done {
+		t.Fatal("the refused undo must roll the marker back")
+	}
+
+	// Recovery: the armed pointer undoes the same marker once the save lands.
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	mark = undoDone(st, mark, save)
+	if mark != "" {
+		t.Fatalf("the landed undo must spend the undo pointer: %q", mark)
+	}
+	if ps := mustLoad(t).Panes["w1:p1"]; ps == nil || ps.Done {
+		t.Fatal("the retried undo must land the marker change on disk")
+	}
+}
+
 // TestNoteCommitLabelsCapturedPane pins the note commit: the status names the
 // label captured when the note opened, and a resync that empties or reorders
 // the list cannot panic or relabel it.

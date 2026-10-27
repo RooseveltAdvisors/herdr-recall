@@ -443,7 +443,9 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 }
 
 // saveNote keeps a refusal note on screen until the operator has seen it, so
-// no save can clear a note that was never rendered.
+// no save can clear a note that was never rendered. The status line clips at
+// the pane width, so the note can reach the screen as a head of itself; what
+// the emitted frame displays is what marks it seen.
 type saveNote struct {
 	text  string
 	shown bool
@@ -463,8 +465,20 @@ func (n *saveNote) clear(status string) string {
 }
 
 func (n *saveNote) rendered(frame string) {
-	if n.text != "" && strings.Contains(frame, n.text) {
+	if n.text == "" {
+		return
+	}
+	if strings.Contains(frame, n.text) {
 		n.shown = true
+		return
+	}
+	// Clipping cuts the note's tail, never its head, so an emitted status
+	// line is exactly a head of the note. That visible head marks it seen.
+	for _, line := range strings.Split(strings.ReplaceAll(frame, "\r\n", "\n"), "\n") {
+		if line := stripANSI(line); line != "" && strings.HasPrefix(n.text, line) {
+			n.shown = true
+			return
+		}
 	}
 }
 
@@ -478,6 +492,24 @@ func commitNote(st *store, paneID, label, text string) string {
 		return "note saved: " + label
 	}
 	return "note cleared: " + label
+}
+
+// undoDone reverts the done marker behind mark and returns the mark that
+// stays armed. Only a landed save spends it: a refused save rolls the marker
+// back and keeps the mark, so the next z retries the same undo. The e handler
+// arms the mark the same way, only on a landed save.
+func undoDone(st *store, mark string, save func() bool) string {
+	ps := st.Panes[mark]
+	if ps == nil {
+		return mark
+	}
+	ps.Done = false
+	ps.DoneState = ""
+	st.addToInbox(mark)
+	if save() {
+		return ""
+	}
+	return mark
 }
 
 func loadStore() (*store, error) {
@@ -4396,15 +4428,12 @@ func runPicker() int {
 			if lastDoneID == "" {
 				break
 			}
-			if ps := st.Panes[lastDoneID]; ps != nil {
-				ps.Done = false
-				ps.DoneState = ""
-				st.addToInbox(lastDoneID)
-				status = "undone"
-				lastDoneID = ""
-				saveSt()
-				rebuild()
+			if st.Panes[lastDoneID] == nil {
+				break
 			}
+			status = "undone"
+			lastDoneID = undoDone(st, lastDoneID, saveSt)
+			rebuild()
 		case key == "h" && !searching && !showHelp:
 			if len(rows) == 0 {
 				break
