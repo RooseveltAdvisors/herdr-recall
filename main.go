@@ -313,6 +313,11 @@ var lastStoreFP atomic.Value // string
 // over whatever is there.
 var loadFailed atomic.Bool
 
+// saveTaint records the refusal reason while a refused save could not be
+// rolled back: the in-memory store may carry unsaved state that must never
+// reach disk until a clean reload proves the state again.
+var saveTaint atomic.Value // string
+
 func hashStore(b []byte) string {
 	sum := sha256.Sum256(b)
 	return string(sum[:])
@@ -395,10 +400,14 @@ func (l *storeLock) held() bool { return l.f != nil }
 // uncommitted mutation back by reloading the store from disk under the lock,
 // so nothing unsaved lingers, and reports the refusal.
 func persistStore(lk *storeLock, st *store) (*store, error) {
+	reason, _ := saveTaint.Load().(string)
 	var err error
-	if !lk.held() {
+	switch {
+	case reason != "":
+		err = errors.New(reason)
+	case !lk.held():
 		err = errors.New("recall.lock unavailable")
-	} else {
+	default:
 		err = saveStore(st)
 	}
 	if err == nil {
@@ -408,10 +417,40 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 	if b, rerr := os.ReadFile(statePath()); rerr == nil {
 		if fresh, perr := parseStore(b); perr == nil {
 			stampStore(b)
+			saveTaint.Store("")
 			return fresh, err
 		}
 	}
+	if reason == "" {
+		saveTaint.Store(err.Error())
+	}
 	return st, err
+}
+
+// saveNote keeps a refusal note on screen until the operator has seen it, so
+// no save can clear a note that was never rendered.
+type saveNote struct {
+	text  string
+	shown bool
+}
+
+func (n *saveNote) refuse(err error) string {
+	n.text = "not saved: " + err.Error()
+	n.shown = false
+	return n.text
+}
+
+func (n *saveNote) clear(status string) string {
+	if n.shown && status == n.text {
+		return ""
+	}
+	return status
+}
+
+func (n *saveNote) rendered(status string) {
+	if n.text != "" && status == n.text {
+		n.shown = true
+	}
 }
 
 func loadStore() (*store, error) {
@@ -3262,7 +3301,7 @@ func runPicker() int {
 	if st.ActivePaneID != "" {
 		sel = pinSel(visible(), sel, st.ActivePaneID)
 	}
-	refusal := ""
+	note := saveNote{}
 	saveSt := func() bool {
 		next, err := persistStore(lk, st)
 		if next != st {
@@ -3270,14 +3309,10 @@ func runPicker() int {
 			rows = rebase(rows)
 		}
 		if err != nil {
-			refusal = "not saved: " + err.Error()
-			status = refusal
+			status = note.refuse(err)
 			return false
 		}
-		if status == refusal {
-			status = ""
-		}
-		refusal = ""
+		status = note.clear(status)
 		return true
 	}
 	persistView := func(list []row) {
@@ -3612,6 +3647,7 @@ func runPicker() int {
 			frame = renderFrame(rows, sel, scrollOffset, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
 		tty.WriteString(frame)
+		note.rendered(status)
 		// The lock is dropped while waiting for input so hooks never stall
 		// behind an idle picker, and re-taken before the next mutation.
 		lk.release()
@@ -4073,12 +4109,17 @@ func runPicker() int {
 					return
 				}
 				ct := customTab{Name: name, Sort: canonicalSort(newSort, ""), Limit: newLimit, Only: newOnly, Where: newWhere}
+				created := false
 				if editing && editIdx >= 0 && editIdx < len(st.Tabs) {
 					ct.Fixed = st.Tabs[editIdx].Fixed
 					st.Tabs[editIdx] = ct
 					status = "saved " + name
 				} else {
 					st.Tabs = append(st.Tabs, ct)
+					status = "created " + name
+					created = true
+				}
+				if saveSt() && created {
 					tab = 0
 					for i, v := range views(st) {
 						if v.Kind == "custom" && v.Idx == len(st.Tabs)-1 {
@@ -4086,9 +4127,7 @@ func runPicker() int {
 							break
 						}
 					}
-					status = "created " + name
 				}
-				saveSt()
 				creating = false
 				editing = false
 				sel = 0

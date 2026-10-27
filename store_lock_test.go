@@ -30,6 +30,7 @@ func useTempConfig(t *testing.T) {
 	configDirOnce = sync.Once{}
 	lastStoreFP.Store("")
 	loadFailed.Store(false)
+	saveTaint.Store("")
 }
 
 // writeStoreDirect simulates a write from another process: it replaces the
@@ -680,6 +681,94 @@ func TestRefusedSaveKeepsStoreWhenStateGoneOrCorrupt(t *testing.T) {
 				t.Fatalf("the refusal note must render:\n%s", frame)
 			}
 		})
+	}
+}
+
+// TestRefusalNoteRendersBeforeAnySaveClearsIt pins the note contract: a
+// refusal note reaches a rendered frame before any save can clear it, and it
+// is gone only after a successful save.
+func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
+
+	kept, err := persistStore(lk, st)
+	if err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+	note := &saveNote{}
+	status := note.refuse(err)
+
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("the auto-save must succeed: %v", err)
+	}
+	status = note.clear(status)
+	if !strings.Contains(status, "not saved: ") {
+		t.Fatalf("the refusal note was cleared before it rendered: %q", status)
+	}
+
+	frame := renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, status, 80, 24, []string{"All"}, 0, "both", "")
+	if !strings.Contains(stripANSI(frame), "not saved: ") {
+		t.Fatalf("the refusal note must render:\n%s", frame)
+	}
+	note.rendered(status)
+
+	status = note.clear(status)
+	if status != "" {
+		t.Fatalf("the note must clear only after a successful save: %q", status)
+	}
+}
+
+// TestTaintedRollbackNeverPersistsRefusedMutation pins the taint contract:
+// when a refused save cannot be rolled back, the refused change never reaches
+// disk and no call claims a save until a clean reload proves the state.
+func TestTaintedRollbackNeverPersistsRefusedMutation(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	lk := &storeLock{}
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
+
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := persistStore(lk, st)
+	if err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+	if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p1"].Note != "typed" {
+		t.Fatal("the in-memory view must keep showing the refused change")
+	}
+
+	writeStoreDirect(t, seed)
+	kept, err = persistStore(lk, kept)
+	if err == nil {
+		t.Fatal("a tainted save must stay refused until a clean reload")
+	}
+	if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p1"].Note != "" {
+		t.Fatalf("the clean reload must drop the refused change: %+v", kept.Panes["w1:p1"])
+	}
+
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("persistence must resume after a clean reload: %v", err)
+	}
+	final := mustLoad(t)
+	if final.Panes["w1:p1"].Note != "" {
+		t.Fatalf("the refused mutation reached disk: %q", final.Panes["w1:p1"].Note)
 	}
 }
 
