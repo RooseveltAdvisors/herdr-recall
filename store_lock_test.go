@@ -453,30 +453,39 @@ func TestWritersRefuseToPersistOnReadError(t *testing.T) {
 	}
 }
 
-// TestPendingChangeRetriesOrDiscards pins the pending contract: a refused
-// change stays in memory for the automatic retry and drops only when the
-// operator discards it, without writing.
-func TestPendingChangeRetriesOrDiscards(t *testing.T) {
+// TestRefusedSaveRollsBackAndNotes pins the refusal contract: a refused save
+// reports a refusal, never a save, and rolls the uncommitted mutation back
+// under the lock so nothing unsaved lingers and the keypress stays
+// repeatable.
+func TestRefusedSaveRollsBackAndNotes(t *testing.T) {
 	useTempConfig(t)
 	seed := mustLoad(t)
+	seed.TabsInit = true
 	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
 	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
 
 	lk := &storeLock{}
-	w := &storeWriter{lk: lk}
 	st := mustLoad(t)
 	st.Panes["w1:p1"].Note = "typed"
-
 	if err := os.Mkdir(lockPath(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.persist(st); err == nil {
+	kept, err := persistStore(lk, st)
+	if err == nil {
 		t.Fatal("the save must be refused while the lock is unavailable")
 	}
-	if !w.pending() {
-		t.Fatal("the refused change must be pending")
+	if kept.Panes["w1:p1"].Note != "" {
+		t.Fatalf("the refused mutation lingered in memory: %q", kept.Panes["w1:p1"].Note)
+	}
+	note := "not saved: " + err.Error()
+	if !strings.HasPrefix(note, "not saved:") {
+		t.Fatalf("the note must state a refusal: %q", note)
+	}
+	frame := renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, note, 80, 24, []string{"All"}, 0, "both", "")
+	if !strings.Contains(frame, "not saved: ") {
+		t.Fatalf("the refusal note must render:\n%s", frame)
 	}
 
 	if err := os.Remove(lockPath()); err != nil {
@@ -485,112 +494,23 @@ func TestPendingChangeRetriesOrDiscards(t *testing.T) {
 	if err := lk.acquire(); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.persist(st); err != nil {
-		t.Fatalf("automatic retry: %v", err)
+	defer lk.release()
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("a later save must succeed: %v", err)
 	}
-	if w.pending() {
-		t.Fatal("pending must clear once the change is saved")
-	}
-	if got := mustLoad(t).Panes["w1:p1"].Note; got != "typed" {
-		t.Fatalf("the pending change must persist on retry: note=%q", got)
-	}
-
-	lk.release()
-	st2 := mustLoad(t)
-	st2.Panes["w1:p1"].Note = "second"
-	if err := os.Remove(lockPath()); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(lockPath(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.persist(st2); err == nil {
-		t.Fatal("the save must be refused while the lock is unavailable")
-	}
-	if err := os.Remove(lockPath()); err != nil {
-		t.Fatal(err)
-	}
-	dropped, err := w.discard(st2)
-	if err != nil {
-		t.Fatalf("discard: %v", err)
-	}
-	if dropped.Panes["w1:p1"].Note != "typed" {
-		t.Fatalf("the discard must drop the pending change: note=%q", dropped.Panes["w1:p1"].Note)
-	}
-	if got := mustLoad(t).Panes["w1:p1"].Note; got != "typed" {
-		t.Fatalf("the discard must not write: note=%q", got)
+	if got := mustLoad(t).Panes["w1:p1"].Note; got != "" {
+		t.Fatalf("the rolled-back mutation must never persist: %q", got)
 	}
 }
 
-// TestAdoptionRefusesSameUnitWrite pins the conflict rule: an external write
-// on a unit the operator changed refuses the adoption, the pending change
-// wins, and the pending note stays.
-// TestAdoptionKeepsPendingAndAdoptsDisjoint pins the overlay rule: a
-// conflicting unit keeps the operator's version while every disjoint
-// external unit still lands.
-func TestAdoptionKeepsPendingAndAdoptsDisjoint(t *testing.T) {
+// TestRefusedSaveKeepsConcurrentWrites pins the traced failure: after a
+// refused save the hook's visit bumps, un-Done writes, and prune deletions
+// are never persisted over.
+func TestRefusedSaveKeepsConcurrentWrites(t *testing.T) {
 	useTempConfig(t)
 	seed := mustLoad(t)
 	seed.TabsInit = true
-	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "old"}
-	seed.Panes["w1:p2"] = &paneStat{Visits: 1, Label: "two"}
-	seed.Favorites = []string{"w1:p2"}
-	if err := saveStore(seed); err != nil {
-		t.Fatal(err)
-	}
-
-	lk := &storeLock{}
-	w := &storeWriter{lk: lk}
-	st := mustLoad(t)
-	st.Panes["w1:p1"].Note = "typed"
-	if err := w.persist(st); err == nil {
-		t.Fatal("the save must be refused while the lock is unavailable")
-	}
-
-	hook := mustLoad(t)
-	hook.Panes["w1:p1"].Visits++
-	hook.Panes["w1:p2"].Visits += 5
-	writeStoreDirect(t, hook)
-
-	base := syncedFields()
-	kept := w.adopt(st, refreshStore(st), base)
-	if kept.Panes["w1:p1"].Note != "typed" {
-		t.Fatalf("the pending change was lost: %q", kept.Panes["w1:p1"].Note)
-	}
-	if kept.Panes["w1:p2"].Visits != 6 {
-		t.Fatalf("the disjoint external write was dropped: %d", kept.Panes["w1:p2"].Visits)
-	}
-	if w.note() == "" {
-		t.Fatal("the adoption must keep the pending note until a real save")
-	}
-
-	st2 := mustLoad(t)
-	st2.Favorites = []string{"w1:p2", "w1:p1"}
-	if err := w.persist(st2); err == nil {
-		t.Fatal("the save must be refused while the lock is unavailable")
-	}
-	hook2 := mustLoad(t)
-	hook2.Favorites = []string{"w1:p2"}
-	hook2.Panes["w1:p2"].Visits += 3
-	writeStoreDirect(t, hook2)
-	base = syncedFields()
-	kept = w.adopt(st2, refreshStore(st2), base)
-	if len(kept.Favorites) != 2 {
-		t.Fatalf("the pending favorites change was lost: %v", kept.Favorites)
-	}
-	if kept.Panes["w1:p2"].Visits != 9 {
-		t.Fatalf("the disjoint external write was dropped: %d", kept.Panes["w1:p2"].Visits)
-	}
-}
-
-// TestSaveAfterConflictAdoptionKeepsExternalWrites pins the traced failure:
-// the save after an adoption that overlapped the pending change must not
-// erase the disjoint hook writes or prune deletions.
-func TestSaveAfterConflictAdoptionKeepsExternalWrites(t *testing.T) {
-	useTempConfig(t)
-	seed := mustLoad(t)
-	seed.TabsInit = true
-	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "old"}
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "old", Done: true}
 	seed.Panes["w1:p2"] = &paneStat{Visits: 1, Label: "two"}
 	seed.Panes["w1:dead"] = &paneStat{Label: "dead"}
 	if err := saveStore(seed); err != nil {
@@ -598,35 +518,40 @@ func TestSaveAfterConflictAdoptionKeepsExternalWrites(t *testing.T) {
 	}
 
 	lk := &storeLock{}
-	w := &storeWriter{lk: lk}
 	st := mustLoad(t)
 	st.Panes["w1:p1"].Note = "typed"
-	if err := w.persist(st); err == nil {
+	if err := os.Mkdir(lockPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := persistStore(lk, st)
+	if err == nil {
 		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+	if err := os.Remove(lockPath()); err != nil {
+		t.Fatal(err)
 	}
 
 	hook := mustLoad(t)
 	hook.Panes["w1:p1"].Visits++
+	hook.Panes["w1:p1"].Done = false
 	hook.Panes["w1:p2"].Visits += 5
 	delete(hook.Panes, "w1:dead")
 	writeStoreDirect(t, hook)
 
-	base := syncedFields()
-	st = w.adopt(st, refreshStore(st), base)
-
+	fresh := refreshStore(kept)
 	if err := lk.acquire(); err != nil {
 		t.Fatal(err)
 	}
 	defer lk.release()
-	if err := w.persist(st); err != nil {
-		t.Fatalf("save after the adoption: %v", err)
+	if _, err := persistStore(lk, fresh); err != nil {
+		t.Fatalf("save after the hook write: %v", err)
 	}
 	final := mustLoad(t)
-	if final.Panes["w1:p1"].Note != "typed" {
-		t.Fatalf("the pending change must persist: %q", final.Panes["w1:p1"].Note)
+	if final.Panes["w1:p1"].Note != "old" {
+		t.Fatalf("the rolled-back mutation must never persist: %q", final.Panes["w1:p1"].Note)
 	}
-	if final.Panes["w1:p1"].Visits != 1 {
-		t.Fatalf("the conflicting unit must keep the operator version wholesale: %d", final.Panes["w1:p1"].Visits)
+	if final.Panes["w1:p1"].Visits != 2 || final.Panes["w1:p1"].Done {
+		t.Fatalf("the hook visit or un-done was erased: %+v", final.Panes["w1:p1"])
 	}
 	if final.Panes["w1:p2"].Visits != 6 {
 		t.Fatalf("the disjoint hook write was erased: %d", final.Panes["w1:p2"].Visits)
@@ -636,190 +561,65 @@ func TestSaveAfterConflictAdoptionKeepsExternalWrites(t *testing.T) {
 	}
 }
 
-// TestAdoptionCarriesPendingAcrossDisjointUnits pins the reapply rule: an
-// external write on other units is adopted and the pending change rides
-// along wholesale.
-func TestAdoptionCarriesPendingAcrossDisjointUnits(t *testing.T) {
-	useTempConfig(t)
-	seed := mustLoad(t)
-	seed.TabsInit = true
-	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "old"}
-	seed.Panes["w1:p2"] = &paneStat{Visits: 1, Label: "two"}
-	if err := saveStore(seed); err != nil {
-		t.Fatal(err)
-	}
-
-	lk := &storeLock{}
-	w := &storeWriter{lk: lk}
-	st := mustLoad(t)
-	st.Panes["w1:p1"].Note = "typed"
-	if err := w.persist(st); err == nil {
-		t.Fatal("the save must be refused while the lock is unavailable")
-	}
-
-	hook := mustLoad(t)
-	hook.Panes["w1:p2"].Visits++
-	writeStoreDirect(t, hook)
-
-	base := syncedFields()
-	st = w.adopt(st, refreshStore(st), base)
-	if st.Panes["w1:p1"].Note != "typed" {
-		t.Fatalf("the adoption dropped the pending change: %q", st.Panes["w1:p1"].Note)
-	}
-	if st.Panes["w1:p2"].Visits != 2 {
-		t.Fatalf("the adoption dropped the external write: %d", st.Panes["w1:p2"].Visits)
-	}
-	if !w.pending() {
-		t.Fatal("the adopted change must stay pending until it is saved")
-	}
-}
-
-// TestUnitMergeKeepsOddKeys pins that the unit merge cannot corrupt the
-// store: a pending Jev weight keyed with a slash survives an adoption and a
-// save intact.
+// TestUnitMergeKeepsOddKeys pins that no merge machinery can corrupt the
+// store or resurrect a refused change: a Jev weight keyed with a slash
+// round-trips intact, and a refused change leaves no trace in memory or on
+// disk.
 func TestUnitMergeKeepsOddKeys(t *testing.T) {
 	useTempConfig(t)
 	seed := mustLoad(t)
 	seed.TabsInit = true
 	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
-	seed.Panes["w1:p2"] = &paneStat{Visits: 1, Label: "two"}
 	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
 
 	lk := &storeLock{}
-	w := &storeWriter{lk: lk}
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
 	st := mustLoad(t)
 	st.ensureJev()
 	if st.Jev.Weights == nil {
 		st.Jev.Weights = map[string]float64{}
 	}
 	st.Jev.Weights["label:fix/store-write-race"] = 0.5
-	if err := w.persist(st); err == nil {
-		t.Fatal("the save must be refused while the lock is unavailable")
-	}
-
-	hook := mustLoad(t)
-	hook.Panes["w1:p2"].Visits++
-	writeStoreDirect(t, hook)
-
-	base := syncedFields()
-	st = w.adopt(st, refreshStore(st), base)
-	if got := st.Jev.Weights["label:fix/store-write-race"]; got != 0.5 {
-		t.Fatalf("the pending weight was corrupted: %v (%+v)", got, st.Jev.Weights)
-	}
-	if st.Panes["w1:p2"].Visits != 2 {
-		t.Fatalf("the external write was dropped: %d", st.Panes["w1:p2"].Visits)
-	}
-
-	if err := lk.acquire(); err != nil {
-		t.Fatal(err)
-	}
-	defer lk.release()
-	if err := w.persist(st); err != nil {
-		t.Fatalf("save after the adoption: %v", err)
+	if _, err := persistStore(lk, st); err != nil {
+		t.Fatalf("save: %v", err)
 	}
 	final := mustLoad(t)
 	if got := final.Jev.Weights["label:fix/store-write-race"]; got != 0.5 {
-		t.Fatalf("the weight did not round-trip to disk: %v (%+v)", got, final.Jev.Weights)
-	}
-}
-
-// TestPendingChangeSurvivesExit pins the exit contract: the picker does not
-// exit while a pending change cannot be saved, and the exit persists it even
-// when the lock is not held.
-func TestPendingChangeSurvivesExit(t *testing.T) {
-	useTempConfig(t)
-	seed := mustLoad(t)
-	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
-	if err := saveStore(seed); err != nil {
-		t.Fatal(err)
+		t.Fatalf("the weight did not round-trip intact: %v (%+v)", got, final.Jev.Weights)
 	}
 
-	lk := &storeLock{}
-	w := &storeWriter{lk: lk}
-	st := mustLoad(t)
-	st.Panes["w1:p1"].Note = "typed"
-	if err := w.persist(st); err == nil {
-		t.Fatal("the save must be refused while the lock is unavailable")
-	}
-
-	if err := os.Mkdir(lockPath(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if w.close(st) {
-		t.Fatal("the exit must be refused while the change cannot be saved")
-	}
-	if !w.pending() {
-		t.Fatal("the refused exit must keep the change pending")
-	}
-
+	refused := mustLoad(t)
+	refused.Jev.Weights["label:fix/store-write-race"] = -1
+	lk.release()
 	if err := os.Remove(lockPath()); err != nil {
 		t.Fatal(err)
 	}
-	if !w.close(st) {
-		t.Fatal("the exit must persist the pending change even without a held lock")
-	}
-	if got := mustLoad(t).Panes["w1:p1"].Note; got != "typed" {
-		t.Fatalf("the pending change was lost at exit: %q", got)
-	}
-}
-
-// TestDiscardFailureKeepsPendingChange pins the discard contract: a discard
-// that cannot reload drops nothing and keeps the pending note visible.
-func TestDiscardFailureKeepsPendingChange(t *testing.T) {
-	useTempConfig(t)
-	seed := mustLoad(t)
-	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
-	if err := saveStore(seed); err != nil {
+	if err := os.Mkdir(lockPath(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-
-	lk := &storeLock{}
-	w := &storeWriter{lk: lk}
-	st := mustLoad(t)
-	st.Panes["w1:p1"].Note = "typed"
-	if err := w.persist(st); err == nil {
+	kept, err := persistStore(lk, refused)
+	if err == nil {
 		t.Fatal("the save must be refused while the lock is unavailable")
 	}
-
-	if err := os.Chmod(statePath(), 0o000); err != nil {
+	if got := kept.Jev.Weights["label:fix/store-write-race"]; got != 0.5 {
+		t.Fatalf("the refused change lingered in memory: %v", got)
+	}
+	if err := os.Remove(lockPath()); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(statePath(), 0o600)
-	if _, err := os.ReadFile(statePath()); err == nil {
-		t.Skip("cannot make the state file unreadable")
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := w.discard(st); err == nil {
-		t.Fatal("the discard must fail while the state file is unreadable")
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("a later save must succeed: %v", err)
 	}
-	if !w.pending() {
-		t.Fatal("a failed discard must keep the change pending")
-	}
-	if st.Panes["w1:p1"].Note != "typed" {
-		t.Fatalf("a failed discard must keep the change: %q", st.Panes["w1:p1"].Note)
-	}
-	if w.note() == "" {
-		t.Fatal("a failed discard must keep the pending note")
-	}
-}
-
-// TestPendingNoteNeverSaysSaved is the cross-check: while a change is
-// pending, no rendered note claims a save happened.
-func TestPendingNoteNeverSaysSaved(t *testing.T) {
-	useTempConfig(t)
-	lk := &storeLock{}
-	w := &storeWriter{lk: lk}
-	if err := w.persist(mustLoad(t)); err == nil {
-		t.Fatal("the save must be refused while the lock is unavailable")
-	}
-	note := w.note()
-	if !strings.Contains(note, "pending") {
-		t.Fatalf("the note must say the change is pending: %q", note)
-	}
-	frame := renderFrame([]row{{PaneID: "w1:p1", Label: "one"}}, 0, 0, vimline.View{}, note, 80, 24, []string{"All"}, 0, "both", "")
-	if strings.Contains(frame, "saved") {
-		t.Fatalf("the rendered note claims saved while a change is pending:\n%s", frame)
+	if got := mustLoad(t).Jev.Weights["label:fix/store-write-race"]; got != 0.5 {
+		t.Fatalf("the refused change resurfaced on disk: %v", got)
 	}
 }
 

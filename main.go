@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"reflect"
 
 	"fmt"
 	"github.com/RooseveltAdvisors/vimline"
@@ -321,93 +320,6 @@ func hashStore(b []byte) string {
 
 func stampStore(b []byte) {
 	lastStoreFP.Store(hashStore(b))
-	lastSynced.Store(string(b))
-}
-
-// lastSynced is the recall.json content of the last successful load, adopt,
-// or save. A pending change is measured against it, so an external sync can
-// be folded in without dropping the operator's edit.
-var lastSynced atomic.Value // string
-
-// storeUnit names one conflict unit: a pane entry or a top-level store field.
-type storeUnit struct {
-	pane  string
-	field string
-}
-
-// changedUnits reports the units where want differs from base.
-func changedUnits(base, want map[string]any) map[storeUnit]bool {
-	out := map[storeUnit]bool{}
-	basePanes, _ := base["panes"].(map[string]any)
-	wantPanes, _ := want["panes"].(map[string]any)
-	for id, bv := range basePanes {
-		if !reflect.DeepEqual(bv, wantPanes[id]) {
-			out[storeUnit{pane: id}] = true
-		}
-	}
-	for id := range wantPanes {
-		if _, ok := basePanes[id]; !ok {
-			out[storeUnit{pane: id}] = true
-		}
-	}
-	for k, bv := range base {
-		if k == "panes" {
-			continue
-		}
-		if !reflect.DeepEqual(bv, want[k]) {
-			out[storeUnit{field: k}] = true
-		}
-	}
-	for k := range want {
-		if k == "panes" {
-			continue
-		}
-		if _, ok := base[k]; !ok {
-			out[storeUnit{field: k}] = true
-		}
-	}
-	return out
-}
-
-// applyUnits copies whole pane entries and top-level fields from src onto dst.
-func applyUnits(dst, src map[string]any, units map[storeUnit]bool) {
-	dstPanes, _ := dst["panes"].(map[string]any)
-	srcPanes, _ := src["panes"].(map[string]any)
-	for u := range units {
-		if u.pane != "" {
-			if dstPanes == nil {
-				dstPanes = map[string]any{}
-				dst["panes"] = dstPanes
-			}
-			if v, ok := srcPanes[u.pane]; ok {
-				dstPanes[u.pane] = v
-			} else {
-				delete(dstPanes, u.pane)
-			}
-			continue
-		}
-		if v, ok := src[u.field]; ok {
-			dst[u.field] = v
-		} else {
-			delete(dst, u.field)
-		}
-	}
-}
-
-func storeFields(s *store) map[string]any {
-	m := map[string]any{}
-	if b, err := json.Marshal(s); err == nil {
-		_ = json.Unmarshal(b, &m)
-	}
-	return m
-}
-
-func syncedFields() map[string]any {
-	m := map[string]any{}
-	if v := lastSynced.Load(); v != nil {
-		_ = json.Unmarshal([]byte(v.(string)), &m)
-	}
-	return m
 }
 
 func currentFP() string {
@@ -473,74 +385,24 @@ func (l *storeLock) release() {
 
 func (l *storeLock) held() bool { return l.f != nil }
 
-// storeWriter persists recall state and tracks a refused change as pending:
-// the change stays in memory for the automatic retry, and only the
-// operator's discard drops it.
-type storeWriter struct {
-	lk   *storeLock
-	pend error
-}
-
-func (w *storeWriter) persist(st *store) error {
+// persistStore writes st under the held lock. A refused write rolls the
+// uncommitted mutation back by reloading the store from disk under the lock,
+// so nothing unsaved lingers, and reports the refusal.
+func persistStore(lk *storeLock, st *store) (*store, error) {
 	var err error
-	switch {
-	case !w.lk.held():
+	if !lk.held() {
 		err = errors.New("recall.lock unavailable")
-	default:
+	} else {
 		err = saveStore(st)
 	}
-	w.pend = err
-	return err
-}
-
-func (w *storeWriter) pending() bool { return w.pend != nil }
-
-func (w *storeWriter) note() string {
-	if w.pend == nil {
-		return ""
+	if err == nil {
+		return st, nil
 	}
-	return "pending save: " + w.pend.Error() + " (esc discards)"
-}
-
-// adopt folds an external store into the session at pane and top-level field
-// granularity. The external store is adopted entirely and the pending change
-// is overlaid wholesale: a conflicting unit keeps the operator's version while
-// every disjoint external unit lands. base is the last synced state, taken
-// before the adoption.
-func (w *storeWriter) adopt(st, fresh *store, base map[string]any) *store {
-	if !w.pending() {
-		return fresh
+	lk.acquire()
+	if fresh, e := loadStore(); e == nil {
+		return fresh, err
 	}
-	merged := storeFields(fresh)
-	applyUnits(merged, storeFields(st), changedUnits(base, storeFields(st)))
-	out := &store{}
-	if b, err := json.Marshal(merged); err == nil {
-		_ = json.Unmarshal(b, out)
-	}
-	return out
-}
-
-// close reports whether the session can exit without losing a pending
-// change: it saves the change first and refuses the exit while that fails.
-func (w *storeWriter) close(st *store) bool {
-	if !w.pending() {
-		return true
-	}
-	if !w.lk.held() {
-		if w.lk.acquire() != nil {
-			return false
-		}
-	}
-	return w.persist(st) == nil
-}
-
-func (w *storeWriter) discard(st *store) (*store, error) {
-	fresh, err := loadStore()
-	if err != nil {
-		return st, err
-	}
-	w.pend = nil
-	return fresh, nil
+	return st, err
 }
 
 func loadStore() (*store, error) {
@@ -3267,9 +3129,9 @@ func runPicker() int {
 		fmt.Fprintf(os.Stderr, "recall: %v\n", err)
 		return 1
 	}
-	// Recall state is shared with hook and CLI processes. Hold the store lock
-	// while mutating and reload when another writer changed the file, so a
-	// picker save can never erase a concurrent visit, un-done thread, or prune.
+	// Recall state is shared with hook and CLI processes. Under the flock and
+	// the content fingerprint, a refused save rolls back under the lock and
+	// the note never claims a save that did not happen.
 	lk := &storeLock{}
 	defer lk.release()
 	searchEd := vimline.New(st.ActiveQuery)
@@ -3368,16 +3230,14 @@ func runPicker() int {
 		return next
 	}
 	rebuild()
-	writer := &storeWriter{lk: lk}
 	// resync adopts another writer's on-disk update before this event is
 	// handled, keeping the row the captain is pointing at selected by pane ID.
 	resync := func(cur []row) []row {
 		if lk.acquire() != nil {
 			return visible()
 		}
-		base := syncedFields()
 		if fresh := refreshStore(st); fresh != st {
-			st = writer.adopt(st, fresh, base)
+			st = fresh
 			return rebase(cur)
 		}
 		return visible()
@@ -3385,15 +3245,22 @@ func runPicker() int {
 	if st.ActivePaneID != "" {
 		sel = pinSel(visible(), sel, st.ActivePaneID)
 	}
+	refusal := ""
 	saveSt := func() bool {
-		wasNote := writer.note()
-		if err := writer.persist(st); err != nil {
-			status = writer.note()
+		next, err := persistStore(lk, st)
+		if next != st {
+			st = next
+			rows = rebase(rows)
+		}
+		if err != nil {
+			refusal = "not saved: " + err.Error()
+			status = refusal
 			return false
 		}
-		if status == wasNote {
+		if status == refusal {
 			status = ""
 		}
+		refusal = ""
 		return true
 	}
 	persistView := func(list []row) {
@@ -3738,7 +3605,6 @@ func runPicker() int {
 			select {
 			case k, ok := <-keyCh:
 				if !ok {
-					writer.close(st)
 					return 0
 				}
 				key = k
@@ -3750,7 +3616,6 @@ func runPicker() int {
 			select {
 			case k, ok := <-keyCh:
 				if !ok {
-					writer.close(st)
 					return 0
 				}
 				key = k
@@ -4131,20 +3996,12 @@ func runPicker() int {
 						status = "jump: " + err.Error()
 						continue
 					}
-					if !writer.close(st) {
-						status = writer.note()
-						continue
-					}
 					return 0
 				}
 			case vimline.ActOut:
 				// Level two of the ladder: leave the field, keep the filter.
 				searching = false
 			case vimline.ActCancel:
-				if !writer.close(st) {
-					status = writer.note()
-					continue
-				}
 				return 0
 			case vimline.ActUp:
 				if sel > 0 {
@@ -4330,16 +4187,8 @@ func runPicker() int {
 		switch {
 		case key == "esc":
 			// esc unwinds one thing per press, the same ladder the field
-			// uses: a pending change first, then the search words, then the
-			// status filter, then the picker closes.
-			if writer.pending() {
-				if fresh, err := writer.discard(st); err == nil {
-					st = fresh
-					rows = rebase(rows)
-					status = ""
-				}
-				continue
-			}
+			// uses: the search words go first, then the status filter, then
+			// the picker closes.
 			if strings.TrimSpace(searchEd.Text()) != "" {
 				searchEd = vimline.New("")
 				status = ""
@@ -4373,10 +4222,6 @@ func runPicker() int {
 				}
 			}
 			if len(rows) == 0 {
-				if !writer.close(st) {
-					status = writer.note()
-					continue
-				}
 				return 0
 			}
 			target := rows[sel].PaneID
@@ -4384,10 +4229,6 @@ func runPicker() int {
 			if err := jumpTo(target); err != nil {
 				// keep the frame open with the reason instead of failing silently
 				status = "jump: " + err.Error()
-				continue
-			}
-			if !writer.close(st) {
-				status = writer.note()
 				continue
 			}
 			return 0
@@ -4615,10 +4456,6 @@ func runPicker() int {
 				sel = 0
 			}
 		case key == "q":
-			if !writer.close(st) {
-				status = writer.note()
-				continue
-			}
 			return 0
 		}
 	}
