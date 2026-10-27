@@ -3564,7 +3564,7 @@ func runPicker() int {
 		if pointedID == "" && len(rows) == 0 {
 			return true
 		}
-		status = "list changed - review and retry"
+		status = note.post("list changed - review and retry")
 		return false
 	}
 	persistView := func(list []row) {

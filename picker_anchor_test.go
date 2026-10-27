@@ -717,3 +717,68 @@ func TestOverlayActionsActOnDrawnItem(t *testing.T) {
 		}
 	}
 }
+
+// TestBrowseRefusalRendersAfterOverlayNote pins one tracking path for the
+// unified note: after an overlay guard note has shown and cleared, a browse
+// refusal with the same text still renders instead of being cleared as the
+// old note.
+func TestBrowseRefusalRendersAfterOverlayNote(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seedPicker(t, []string{"w1:pA", "w1:pB"}, func(s *store) {
+		s.ensureJev()
+		s.Jev.Weights = map[string]float64{"tok:alpha": 0.9, "tok:bravo": 0.5, "tok:charlie": 0.3}
+	})
+	const changed = "list changed - review and retry"
+
+	p := startPicker(t, bin, cfg)
+	frame := 1
+	p.frames(frame)
+	for _, k := range []string{"J", "j"} {
+		p.press(k)
+		frame++
+		p.frames(frame)
+	}
+
+	// The Jev list shifts under the cursor, so enter is ignored with the note,
+	// and the browse frame shows it once the panel closes.
+	ext := readStoreDirect(t)
+	delete(ext.Jev.Weights, "tok:alpha")
+	writeStoreDirect(t, ext)
+	for _, k := range []string{"\r", "q"} {
+		p.press(k)
+		frame++
+	}
+	out := p.frames(frame)
+	if !strings.Contains(out, changed) {
+		t.Fatalf("the overlay note must show once the panel closes:\n%s", stripANSI(out))
+	}
+	shown := len(out)
+
+	// The next key's save clears the shown note.
+	p.press("j")
+	frame++
+	out = p.frames(frame)
+	if strings.Contains(out[shown:], changed) {
+		t.Fatalf("the shown note must clear after the next save:\n%s", stripANSI(out[shown:]))
+	}
+	cleared := len(out)
+
+	// Another terminal un-favorites the row under the cursor, so m is refused.
+	ext = readStoreDirect(t)
+	ext.Favorites = []string{"w1:pA"}
+	writeStoreDirect(t, ext)
+	p.press("m")
+	frame++
+	out = p.frames(frame)
+	if !strings.Contains(out[cleared:], changed) {
+		t.Fatalf("the browse refusal must render its note:\n%s", stripANSI(out[cleared:]))
+	}
+	if final := mustLoad(t); !slices.Equal(final.Favorites, []string{"w1:pA"}) {
+		t.Fatalf("m acted on a row the last frame did not show: %v", final.Favorites)
+	}
+}
