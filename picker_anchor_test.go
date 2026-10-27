@@ -184,7 +184,7 @@ func TestVanishedAnchorNeverSubstitutes(t *testing.T) {
 			p.press(tc.key)
 			frame++
 			out := p.frames(frame)
-			if !strings.Contains(out, "row left the list") {
+			if !strings.Contains(out, "list changed - review and retry") {
 				t.Fatalf("key %q acted without naming the cause:\n%s", tc.key, stripANSI(out))
 			}
 
@@ -199,5 +199,112 @@ func TestVanishedAnchorNeverSubstitutes(t *testing.T) {
 				t.Fatalf("key %q changed the inbox: %v -> %v", tc.key, before.InboxOrder, after.InboxOrder)
 			}
 		})
+	}
+}
+
+// TestAppearedRowNeverTakesKey pins the other direction of the same rule: a
+// row another writer added after the frame was drawn was never in front of
+// the operator, so no mutation key acts on it. The refusal names the cause
+// with the same note the vanish direction shows.
+func TestAppearedRowNeverTakesKey(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	for _, tc := range []struct {
+		name string
+		pre  []string
+		key  string
+	}{
+		{"m", nil, "m"},
+		{"e", nil, "e"},
+		{"block", nil, "!"},
+		{"note", nil, "n"},
+		{"remind", nil, "h"},
+		{"teach", nil, "i"},
+		{"enter", nil, "\r"},
+		{"search enter", []string{"/", "\x0e"}, "\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seed := mustLoad(t)
+			seed.TabsInit = true
+			seed.Panes["w1:pA"] = &paneStat{Visits: 1, Label: "one"}
+			seed.Panes["w1:pB"] = &paneStat{Visits: 2, Label: "two"}
+			seed.Favorites = []string{}
+			seed.ActiveTabSet = true
+			seed.ActiveTab = 0
+			if err := saveStore(seed); err != nil {
+				t.Fatal(err)
+			}
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			for _, k := range tc.pre {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+
+			// Another terminal favorites w1:pB: a row appears after the frame.
+			ext := mustLoad(t)
+			ext.Favorites = []string{"w1:pB"}
+			writeStoreDirect(t, ext)
+
+			p.press(tc.key)
+			frame++
+			out := p.frames(frame)
+			if !strings.Contains(out, "list changed - review and retry") {
+				t.Fatalf("key %q acted without naming the cause:\n%s", tc.key, stripANSI(out))
+			}
+
+			after := mustLoad(t)
+			if !slices.Equal(after.Favorites, []string{"w1:pB"}) {
+				t.Fatalf("key %q changed favorites: %v", tc.key, after.Favorites)
+			}
+			if *after.Panes["w1:pA"] != (paneStat{Visits: 1, Label: "one"}) {
+				t.Fatalf("key %q touched the neighbor row: %+v", tc.key, after.Panes["w1:pA"])
+			}
+			if *after.Panes["w1:pB"] != (paneStat{Visits: 2, Label: "two"}) {
+				t.Fatalf("key %q mutated the appeared row: %+v", tc.key, after.Panes["w1:pB"])
+			}
+		})
+	}
+}
+
+// TestEnterOnEmptyListStillCloses pins the base behavior the row guard must
+// not swallow: with no row in the last frame and none under the cursor now,
+// enter still closes the picker.
+func TestEnterOnEmptyListStillCloses(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:pA"] = &paneStat{Visits: 1, Label: "one"}
+	seed.Favorites = []string{}
+	seed.ActiveTabSet = true
+	seed.ActiveTab = 0
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	p := startPicker(t, bin, cfg)
+	p.frames(1)
+	p.press("\r")
+	done := make(chan struct{})
+	go func() {
+		_ = p.cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("enter on an empty list must close the picker")
 	}
 }

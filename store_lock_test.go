@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -424,19 +425,18 @@ func TestPickerKeepsAndRematerializesStateWhenFileGone(t *testing.T) {
 	}
 }
 
-// TestPickerKeepsDatasetWhenFileRecreated pins picker-wins-after-vanish: a
-// recreated recall.json that drops panes the picker holds is a recreation, not
-// a writer's continuation, so the picker keeps its dataset and the next save
-// writes the full store. A recreation is recognised two ways: it drops a
-// pinned pane no writer may drop, or the picker watched the file vanish.
-func TestPickerKeepsDatasetWhenFileRecreated(t *testing.T) {
+// TestIdlePickerKeepsDatasetAndSaveWritesIt pins the idle-picker case: the
+// file vanishes and a hook rebuilds it from one pane while the picker sits
+// idle, with no refresh between the two events. The rebuild drops panes no
+// prune can drop, so it is a recreation and not a writer's continuation: the
+// picker keeps its dataset and the next save writes it back in full.
+func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		watch bool
-		pin   bool
 	}{
-		{"recreation dropping a pinned pane", false, true},
-		{"recreation after a watched vanish", true, false},
+		{"rebuild between events", false},
+		{"rebuild after a watched vanish", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useTempConfig(t)
@@ -445,9 +445,6 @@ func TestPickerKeepsDatasetWhenFileRecreated(t *testing.T) {
 			seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
 			seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
 			seed.Panes["w1:p3"] = &paneStat{Visits: 3, Label: "three"}
-			if tc.pin {
-				seed.Panes["w1:p1"].Note = "pinned"
-			}
 			if err := saveStore(seed); err != nil {
 				t.Fatal(err)
 			}
@@ -462,16 +459,17 @@ func TestPickerKeepsDatasetWhenFileRecreated(t *testing.T) {
 					t.Fatal("refresh must keep the in-memory store when the file vanishes")
 				}
 			}
-			// A hook's honest fresh-store write recreates the file from one pane.
+			// A hook's honest fresh-store write rebuilds the file from one
+			// pane; the picker is idle between the vanish and the rebuild.
 			writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
 				"w1:p9": {Visits: 1, Label: "hook"},
 			}})
 
 			if got := refreshStore(st); got != st {
-				t.Fatal("the recreated file must not replace the picker's dataset")
+				t.Fatal("the rebuilt file must not replace the picker's dataset")
 			}
 			if err := saveStore(st); err != nil {
-				t.Fatalf("the picker's save must re-materialize the full store: %v", err)
+				t.Fatalf("the picker's save must write the dataset: %v", err)
 			}
 			final := mustLoad(t)
 			for _, id := range []string{"w1:p1", "w1:p2", "w1:p3"} {
@@ -484,15 +482,128 @@ func TestPickerKeepsDatasetWhenFileRecreated(t *testing.T) {
 			}
 
 			// The episode is over once the dataset lands: a writer's write is
-			// adopted again, so a prune stays pruned.
+			// adopted again.
 			hook := mustLoad(t)
-			delete(hook.Panes, "w1:p2")
 			hook.Panes["w1:p1"].Visits++
+			hook.Panes["w1:p9"] = &paneStat{Visits: 2, Label: "hook"}
 			writeStoreDirect(t, hook)
 			if got := refreshStore(final); got == final {
 				t.Fatal("a writer's write must be adopted again after the dataset lands")
 			}
 		})
+	}
+}
+
+// TestRefusedSaveKeepsDatasetAfterRebuild pins the save-time half of the same
+// rule: a refused save during the rebuild episode must not roll back into the
+// rebuilt file. The rollback adopts only bytes that continue the held state,
+// so the held dataset survives the refusal.
+func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	seed.Panes["w1:p2"] = &paneStat{Visits: 2, Label: "two"}
+	seed.Panes["w1:p3"] = &paneStat{Visits: 3, Label: "three"}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	st := mustLoad(t)
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
+		"w1:p9": {Visits: 1, Label: "hook"},
+	}})
+	if err := os.Mkdir(lockPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := persistStore(&storeLock{}, st)
+	if err == nil {
+		t.Fatal("the save must be refused while the lock is unavailable")
+	}
+	if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p2"] == nil || kept.Panes["w1:p3"] == nil {
+		t.Fatalf("the rollback replaced the dataset with the rebuild: %+v", kept.Panes)
+	}
+}
+
+// TestLegitimateWriterWinsOverHeldPin pins legitimate-writer-wins: the CLI
+// un-favorite and a hook's prune are the writer's update, and a picker-held
+// pin never reverts them. A pruned old pane a later writer recreates is not a
+// recreation: only its fresh record is adopted, and a rebuild after it leaves
+// the un-favorite in effect with nothing resurrected.
+func TestLegitimateWriterWinsOverHeldPin(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:old"] = &paneStat{Visits: 9, Label: "old", Last: 1}
+	seed.Favorites = []string{"w1:old"}
+	for i := 0; i < pruneKeep; i++ {
+		seed.Panes["fill:"+strconv.Itoa(i)] = &paneStat{Label: "fill", Last: int64(2 + i)}
+	}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	st := mustLoad(t) // the picker opens holding the favorite
+
+	if out, err := exec.Command("go", "run", ".", "favorite", "w1:old").CombinedOutput(); err != nil {
+		t.Fatalf("favorite: %v: %s", err, out)
+	}
+
+	// A hook records a visit and prunes the unpinned old pane the keep
+	// window has passed.
+	hook := mustLoad(t)
+	hp := hook.ensurePane("w1:live")
+	hp.Visits++
+	hp.Last = time.Now().Unix()
+	hook.prune(map[string]bool{"w1:live": true}, pruneKeep)
+	writeStoreDirect(t, hook)
+
+	fresh := refreshStore(st)
+	if fresh == st {
+		t.Fatal("the writer's update must be adopted, not reverted by the held pin")
+	}
+	if fresh.isFavorite("w1:old") || fresh.Panes["w1:old"] != nil {
+		t.Fatalf("the un-favorite or prune was reverted: fav=%v pane=%+v", fresh.isFavorite("w1:old"), fresh.Panes["w1:old"])
+	}
+
+	// The old pane comes back in a writer's write. Only the fresh record is
+	// adopted; nothing of the held copy returns with it.
+	hook2 := mustLoad(t)
+	hook2.Panes["w1:old"] = &paneStat{Visits: 1, Label: "old", Last: time.Now().Unix()}
+	writeStoreDirect(t, hook2)
+	if fresh = refreshStore(fresh); fresh.Panes["w1:old"] == nil || fresh.Panes["w1:old"].Visits != 1 {
+		t.Fatalf("the recreated pane record was not adopted: %+v", fresh.Panes["w1:old"])
+	}
+	if fresh.isFavorite("w1:old") {
+		t.Fatal("the held favorite resurrected on the recreated pane")
+	}
+
+	// A rebuild after it is a recreation: the dataset wins and the save
+	// writes it, leaving the un-favorite in effect and nothing resurrected.
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	writeStoreDirect(t, &store{Version: 1, Panes: map[string]*paneStat{
+		"w1:p9": {Visits: 1, Label: "hook"},
+	}})
+	if got := refreshStore(fresh); got != fresh {
+		t.Fatal("the rebuild must not replace the picker's dataset")
+	}
+	if err := saveStore(fresh); err != nil {
+		t.Fatalf("the save must write the dataset: %v", err)
+	}
+	final := mustLoad(t)
+	if final.isFavorite("w1:old") {
+		t.Fatal("the un-favorite did not survive the rebuild")
+	}
+	if final.Panes["w1:old"] == nil || final.Panes["w1:old"].Visits != 1 {
+		t.Fatalf("the old pane record resurrected: %+v", final.Panes["w1:old"])
+	}
+	if final.Panes["fill:0"] == nil {
+		t.Fatal("the held dataset was dropped")
 	}
 }
 
@@ -664,15 +775,18 @@ func TestRefusedSaveRollsBackAndNotes(t *testing.T) {
 }
 
 // TestRefusedSaveKeepsConcurrentWrites pins the traced failure: after a
-// refused save the hook's visit bumps, un-Done writes, and prune deletions
-// are never persisted over.
+// refused save the hook's visit bumps, un-Done writes, and keep-window prune
+// deletions are never persisted over.
 func TestRefusedSaveKeepsConcurrentWrites(t *testing.T) {
 	useTempConfig(t)
 	seed := mustLoad(t)
 	seed.TabsInit = true
-	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "old", Done: true}
-	seed.Panes["w1:p2"] = &paneStat{Visits: 1, Label: "two"}
-	seed.Panes["w1:dead"] = &paneStat{Label: "dead"}
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one", Note: "old", Done: true, Last: 400}
+	seed.Panes["w1:p2"] = &paneStat{Visits: 1, Label: "two", Last: 300}
+	seed.Panes["w1:dead"] = &paneStat{Label: "dead", Last: 1}
+	for i := 0; i < pruneKeep; i++ {
+		seed.Panes["fill:"+strconv.Itoa(i)] = &paneStat{Label: "fill", Last: int64(2 + i)}
+	}
 	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
@@ -695,7 +809,7 @@ func TestRefusedSaveKeepsConcurrentWrites(t *testing.T) {
 	hook.Panes["w1:p1"].Visits++
 	hook.Panes["w1:p1"].Done = false
 	hook.Panes["w1:p2"].Visits += 5
-	delete(hook.Panes, "w1:dead")
+	hook.prune(map[string]bool{"w1:p1": true, "w1:p2": true}, pruneKeep)
 	writeStoreDirect(t, hook)
 
 	fresh := refreshStore(kept)

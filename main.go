@@ -340,20 +340,39 @@ func currentFP() string {
 }
 
 // pinned reports whether the pane carries state no writer may drop: a note,
-// a manual block, a reminder, or a favorite. prune keeps these, so a file
-// missing a pinned pane this process holds is a recreation, not a
-// continuation.
+// a manual block, a reminder, or a favorite. prune keeps these.
 func (s *store) pinned(id string) bool {
 	ps := s.Panes[id]
 	return s.isFavorite(id) || ps != nil && (ps.Note != "" || ps.ManualBlocked || ps.RemindAt > 0)
 }
 
-// dropsHeld reports whether fresh is missing panes this process holds. A
-// vanished watch makes any missing pane a recreation, so the held dataset
-// wins: it is the only copy left.
-func dropsHeld(fresh, held *store) bool {
-	for id := range held.Panes {
-		if fresh.Panes[id] == nil && (stateVanished.Load() || held.pinned(id)) {
+// pruneKeep is the history window prune keeps for closed panes.
+const pruneKeep = 200
+
+// recreatesState reports whether the store on disk is a recreation of the
+// state this process holds instead of a writer's continuation of it. A file
+// that vanished on this process's watch and comes back missing any held pane
+// was built again from nothing. Without the watch, a missing held pane is a
+// prune's work only when the file already carries a full keep window of
+// panes ranked at or above it: prune drops just the tail of a closed set it
+// has a window to drop. A held pin proves nothing here: a writer may
+// un-pin and prune a pane for real.
+func recreatesState(held, disk *store) bool {
+	watched := stateVanished.Load()
+	for id, hp := range held.Panes {
+		if disk.Panes[id] != nil {
+			continue
+		}
+		if watched {
+			return true
+		}
+		ahead := 0
+		for _, dp := range disk.Panes {
+			if dp.Last >= hp.Last {
+				ahead++
+			}
+		}
+		if ahead < pruneKeep {
 			return true
 		}
 	}
@@ -382,7 +401,7 @@ func refreshStore(st *store) *store {
 		return st
 	}
 	loadFailed.Store(false)
-	if dropsHeld(fresh, st) {
+	if recreatesState(st, fresh) {
 		return st
 	}
 	stateVanished.Store(false)
@@ -429,13 +448,12 @@ func (l *storeLock) release() {
 
 func (l *storeLock) held() bool { return l.f != nil }
 
-// persistStore writes st under the held lock. A refused write rolls the
-// uncommitted mutation back by reloading the store from disk under the lock,
-// so nothing unsaved lingers, and reports the refusal.
 // cleanReload replaces the in-memory store with the proven bytes on disk and
 // clears the taint: only a reload can show the state again after a failed
-// rollback.
-func cleanReload(lk *storeLock) (*store, error) {
+// rollback. The save evaluates the vanish watch and the recreation rule the
+// way the refresh does, so bytes that are a recreation of the held state
+// prove nothing and never replace the held dataset.
+func cleanReload(lk *storeLock, held *store) (*store, error) {
 	lk.acquire()
 	b, err := os.ReadFile(statePath())
 	if err != nil {
@@ -445,15 +463,21 @@ func cleanReload(lk *storeLock) (*store, error) {
 	if err != nil {
 		return nil, err
 	}
+	if recreatesState(held, fresh) {
+		return nil, errors.New("recall.json rebuilt, state unproven")
+	}
 	loadFailed.Store(false)
 	saveTaint.Store(false)
 	stampStore(b)
 	return fresh, nil
 }
 
+// persistStore writes st under the held lock. A refused write rolls the
+// uncommitted mutation back by reloading the store from disk under the lock,
+// so nothing unsaved lingers, and reports the refusal.
 func persistStore(lk *storeLock, st *store) (*store, error) {
 	if saveTaint.Load() {
-		fresh, err := cleanReload(lk)
+		fresh, err := cleanReload(lk, st)
 		if err != nil {
 			return st, err
 		}
@@ -468,7 +492,7 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 	if err == nil {
 		return st, nil
 	}
-	if fresh, rerr := cleanReload(lk); rerr == nil {
+	if fresh, rerr := cleanReload(lk, st); rerr == nil {
 		return fresh, err
 	}
 	saveTaint.Store(true)
@@ -851,7 +875,7 @@ func recordFocus() (string, error) {
 			ps.Done = false
 		}
 	}
-	st.prune(liveSet(snap), 200)
+	st.prune(liveSet(snap), pruneKeep)
 	return id, saveStore(st)
 }
 
@@ -3408,14 +3432,20 @@ func runPicker() int {
 		status = note.clear(status)
 		return true
 	}
-	// pointed reports whether the pane the drawn cursor pointed at is still
-	// the row under the cursor. A key never acts on the neighbor the clamp
-	// picked when the pointed pane left the list.
+	// pointed reports whether the row the drawn cursor pointed at is still
+	// the row under the cursor. A key never acts on a row the last frame did
+	// not draw: not the neighbor the clamp picked when the pointed row left
+	// the list, and not a row another writer added after the frame. With no
+	// row drawn and none now there is nothing to act on, so the key falls
+	// through to its empty-list behavior.
 	pointed := func() bool {
-		if pointedID == "" || (sel >= 0 && sel < len(rows) && rows[sel].PaneID == pointedID) {
+		if pointedID != "" && sel >= 0 && sel < len(rows) && rows[sel].PaneID == pointedID {
 			return true
 		}
-		status = "row left the list"
+		if pointedID == "" && len(rows) == 0 {
+			return true
+		}
+		status = "list changed - review and retry"
 		return false
 	}
 	persistView := func(list []row) {
