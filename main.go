@@ -480,19 +480,6 @@ func commitNote(st *store, paneID, label, text string) string {
 	return "note cleared: " + label
 }
 
-// checkPriorLife refuses creating recall.json from nothing when recall.lock
-// stands beside its absence: the store held state, and a fresh write would
-// erase it for good.
-func checkPriorLife() error {
-	if _, err := os.Stat(statePath()); !os.IsNotExist(err) {
-		return nil
-	}
-	if _, err := os.Stat(lockPath()); err != nil {
-		return nil
-	}
-	return errors.New("recall.json is deleted while recall.lock proves it existed; restore the file, or open the picker so it re-materializes from in-memory state on its next successful save")
-}
-
 func loadStore() (*store, error) {
 	b, err := os.ReadFile(statePath())
 	if err != nil {
@@ -777,9 +764,6 @@ func recordFocus() (string, error) {
 		return "", fmt.Errorf("no focused pane in snapshot")
 	}
 	label := paneLabel(snap, id)
-	if err := checkPriorLife(); err != nil {
-		return "", err
-	}
 	lk := &storeLock{}
 	if err := lk.acquire(); err != nil {
 		return "", err
@@ -3223,10 +3207,6 @@ func runPicker() int {
 	// for the whole session. It cannot drift and the frame is screenshot-exact.
 	tty.WriteString("\x1b[?25l")
 
-	if err := checkPriorLife(); err != nil {
-		fmt.Fprintf(os.Stderr, "recall: %v\n", err)
-		return 1
-	}
 	st, err := loadStore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "recall: %v\n", err)
@@ -4667,10 +4647,6 @@ func main() {
 		if len(os.Args) < 3 {
 			os.Exit(2)
 		}
-		if err := checkPriorLife(); err != nil {
-			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
-			os.Exit(1)
-		}
 		lk := &storeLock{}
 		if err := lk.acquire(); err != nil {
 			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
@@ -4710,10 +4686,6 @@ func main() {
 		}
 		switch os.Args[2] {
 		case "reset":
-			if err := checkPriorLife(); err != nil {
-				fmt.Fprintf(os.Stderr, "recall: %v\n", err)
-				os.Exit(1)
-			}
 			lk := &storeLock{}
 			if err := lk.acquire(); err != nil {
 				fmt.Fprintf(os.Stderr, "recall: %v\n", err)

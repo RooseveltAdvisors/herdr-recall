@@ -389,55 +389,54 @@ func TestCLIWriterRefusesWriteWithoutLock(t *testing.T) {
 	}
 }
 
-// TestWriterRefusesWhenLockProvesPriorLife pins the proven prior life rule:
-// recall.lock beside a missing recall.json refuses the write and creates no
-// file, a bare first run still creates state, and the writer works again once
-// the picker restores the json.
-func TestWriterRefusesWhenLockProvesPriorLife(t *testing.T) {
+// TestPickerKeepsAndRematerializesStateWhenFileGone pins the picker contract
+// behind the no-silent-loss intent: a vanished recall.json never empties the
+// in-memory dataset, and the next successful save writes it back.
+func TestPickerKeepsAndRematerializesStateWhenFileGone(t *testing.T) {
 	useTempConfig(t)
-	run := func(args ...string) ([]byte, error) {
-		argv := append([]string{"run", "."}, args...)
-		return exec.Command("go", argv...).CombinedOutput()
-	}
-
-	if err := os.WriteFile(lockPath(), nil, 0o600); err != nil {
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:p1"] = &paneStat{Visits: 1, Label: "one"}
+	seed.Favorites = []string{"w1:p1"}
+	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"favorite", "w1:p2"}, {"jev", "reset"}} {
-		out, err := run(args...)
-		if err == nil {
-			t.Fatalf("%v must refuse when recall.lock proves prior life: %s", args, out)
-		}
-		if !strings.Contains(string(out), "recall.lock proves it existed") || !strings.Contains(string(out), "restore") {
-			t.Fatalf("%v refusal must name the situation and the recovery: %s", args, out)
-		}
-		if _, err := os.Stat(statePath()); !os.IsNotExist(err) {
-			t.Fatalf("%v must create no recall.json", args)
-		}
-	}
 
-	if err := os.Remove(lockPath()); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := run("favorite", "w1:p2"); err != nil {
-		t.Fatalf("the bare first run must create state: %v: %s", err, out)
-	}
-	if _, err := os.Stat(statePath()); err != nil {
-		t.Fatalf("the first run must create recall.json: %v", err)
-	}
-
+	st := mustLoad(t)
+	st.Panes["w1:p1"].Note = "typed"
 	if err := os.Remove(statePath()); err != nil {
 		t.Fatal(err)
 	}
-	restored := &store{Version: 1, Panes: map[string]*paneStat{"w1:p1": {Visits: 1, Label: "one"}}, TabsInit: true}
-	if err := saveStore(restored); err != nil {
-		t.Fatalf("the picker restore must write: %v", err)
+
+	if got := refreshStore(st); got != st {
+		t.Fatal("refresh must keep the in-memory store when the file vanishes")
 	}
-	if out, err := run("favorite", "w1:p2"); err != nil {
-		t.Fatalf("the writer must work again once the json is restored: %v: %s", err, out)
+	if err := saveStore(st); err != nil {
+		t.Fatalf("the next successful save must re-materialize the file: %v", err)
+	}
+	final := mustLoad(t)
+	if final.Panes["w1:p1"] == nil || final.Panes["w1:p1"].Visits != 1 || final.Panes["w1:p1"].Note != "typed" {
+		t.Fatalf("the dataset must survive the gap: %+v", final.Panes["w1:p1"])
+	}
+	if len(final.Favorites) != 1 {
+		t.Fatalf("favorites must survive the gap: %v", final.Favorites)
+	}
+}
+
+// TestWriterCreatesFreshStateWhenFileGone pins that a missing recall.json is
+// honest fresh state: a stale recall.lock beside it proves nothing, because
+// acquire creates the lock before the first successful save.
+func TestWriterCreatesFreshStateWhenFileGone(t *testing.T) {
+	useTempConfig(t)
+	if err := os.WriteFile(lockPath(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	argv := append([]string{"run", "."}, "favorite", "w1:p2")
+	if out, err := exec.Command("go", argv...).CombinedOutput(); err != nil {
+		t.Fatalf("a missing recall.json must be fresh state: %v: %s", err, out)
 	}
 	if final := mustLoad(t); !final.isFavorite("w1:p2") {
-		t.Fatal("the writer's change must land after the restore")
+		t.Fatal("the writer's change must land in the fresh store")
 	}
 }
 
@@ -679,7 +678,10 @@ func TestUnitMergeKeepsOddKeys(t *testing.T) {
 // TestRefusedSaveKeepsStoreWhenStateGoneOrCorrupt pins that a fabricated
 // empty store never replaces proven live state: when recall.json is missing
 // or unparseable at rollback time the in-memory dataset stays intact, the
-// note stays a truthful refusal, and refresh adopts nothing.
+// note stays a truthful refusal, and refresh adopts nothing. A missing
+// recall.json stays honest fresh state: no lock-presence proof can say
+// otherwise, because acquire creates recall.lock before the first successful
+// save and so proves nothing about prior state.
 func TestRefusedSaveKeepsStoreWhenStateGoneOrCorrupt(t *testing.T) {
 	for _, tc := range []struct {
 		name string
