@@ -468,6 +468,7 @@ func cleanReload(lk *storeLock, held *store) (*store, error) {
 	}
 	loadFailed.Store(false)
 	saveTaint.Store(false)
+	stateVanished.Store(false)
 	stampStore(b)
 	return fresh, nil
 }

@@ -607,6 +607,95 @@ func TestLegitimateWriterWinsOverHeldPin(t *testing.T) {
 	}
 }
 
+// TestCleanReloadAdoptEndsVanishWatch pins the watch contract at the save
+// boundary: a rollback that adopts proven bytes ends the vanish watch, the
+// same as the refresh and write sites, so a keep-window prune landing in a
+// later idle gap is judged on its own merits. A stale watch reads that write
+// as a recreation, and the next save then restores the un-favorite the
+// writer removed.
+func TestCleanReloadAdoptEndsVanishWatch(t *testing.T) {
+	useTempConfig(t)
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:old"] = &paneStat{Visits: 9, Label: "old", Note: "call vendor", Last: 1}
+	seed.Favorites = []string{"w1:old"}
+	for i := 0; i < pruneKeep; i++ {
+		seed.Panes["fill:"+strconv.Itoa(i)] = &paneStat{Label: "fill", Last: int64(2 + i)}
+	}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	st := mustLoad(t) // the picker opens holding the favorite
+
+	// The file vanishes on the picker's watch.
+	if err := os.Remove(statePath()); err != nil {
+		t.Fatal(err)
+	}
+	if got := refreshStore(st); got != st {
+		t.Fatal("refresh must keep the in-memory store when the file vanishes")
+	}
+
+	// A rebuild that drops no held pane ID lands while the picker is idle.
+	rebuilt := &store{Version: 1, Panes: map[string]*paneStat{}, Favorites: append([]string(nil), st.Favorites...)}
+	for id, ps := range st.Panes {
+		rebuilt.Panes[id] = &paneStat{Visits: ps.Visits, Last: ps.Last, Label: ps.Label}
+	}
+	writeStoreDirect(t, rebuilt)
+
+	// A save fails, and its rollback adopts those bytes under the lock.
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := persistStore(lk, st)
+	lk.release()
+	if err == nil {
+		t.Fatal("the save must fail while recall.json.tmp blocks the rename")
+	}
+	if kept.Panes["w1:old"] == nil || !kept.isFavorite("w1:old") {
+		t.Fatalf("the rollback must adopt the rebuild: %+v", kept)
+	}
+	if err := os.Remove(statePath() + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// One idle gap: the CLI un-favorites the old pane and a hook's
+	// keep-window prune drops it.
+	if out, err := exec.Command("go", "run", ".", "favorite", "w1:old").CombinedOutput(); err != nil {
+		t.Fatalf("favorite: %v: %s", err, out)
+	}
+	hook := mustLoad(t)
+	hp := hook.ensurePane("w1:live")
+	hp.Visits++
+	hp.Last = time.Now().Unix()
+	hook.prune(map[string]bool{"w1:live": true}, pruneKeep)
+	writeStoreDirect(t, hook)
+
+	// The picker's next keypress resyncs, and its save lands the update.
+	if err := lk.acquire(); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release()
+	next := refreshStore(kept)
+	if next == kept {
+		t.Fatal("the un-favorite and prune write must be adopted")
+	}
+	if _, err := persistStore(lk, next); err != nil {
+		t.Fatalf("the picker's save must land: %v", err)
+	}
+	final := mustLoad(t)
+	if final.isFavorite("w1:old") {
+		t.Fatal("the picker's save restored a removed favorite")
+	}
+	if final.Panes["w1:old"] != nil {
+		t.Fatalf("the picker's save undid the prune: %+v", final.Panes["w1:old"])
+	}
+}
+
 // TestPickerAdoptsSupersetAfterVanish pins the other half of the rule: a
 // recreated file that holds everything the picker holds and more is another
 // saver writing more, not less, so the picker adopts it normally.
