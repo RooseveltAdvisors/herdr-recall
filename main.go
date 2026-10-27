@@ -590,12 +590,18 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 // no save and no other status write can clear a note that was never
 // rendered. The status line clips at the pane width, so the note can reach
 // the screen as a head of itself; what the emitted frame displays is what
-// marks it seen.
+// marks it seen. tok is the retry token of the refused mutation: an opaque
+// identity that every save from the same retry context carries, so a landed
+// save with it is the operator's retry. Zero means no retry context.
 type saveNote struct {
-	text    string
-	shown   bool
-	refused bool
+	text  string
+	shown bool
+	tok   uint64
 }
+
+// viewTok is the retry token every view autosave carries, so the next
+// autosave that lands is the retry of a refused one.
+const viewTok uint64 = 1
 
 // post sets a note the operator must see: a refusal, or an overlay action
 // ignored because its list changed. Overlay frames carry no status line, so
@@ -603,13 +609,19 @@ type saveNote struct {
 func (n *saveNote) post(text string) string {
 	n.text = text
 	n.shown = false
-	n.refused = false
+	n.tok = 0
 	return text
 }
 
-func (n *saveNote) refuse(err error) string {
-	n.post("not saved: " + err.Error())
-	n.refused = true
+// refuse posts a refusal stamped with tok, the retry token of the refused
+// save. A refused autosave leaves the token of an unseen note alone: the
+// operator's refused action outranks the view state.
+func (n *saveNote) refuse(err error, tok uint64) string {
+	if tok != viewTok || n.shown || n.text == "" {
+		n.tok = tok
+	}
+	n.text = "not saved: " + err.Error()
+	n.shown = false
 	return n.text
 }
 
@@ -622,20 +634,36 @@ func (n *saveNote) keep(status string) string {
 	return status
 }
 
-// landed returns the status to show after a save landed. A refusal no frame
-// has shown yet becomes the composed note, which acknowledges the save first
-// and keeps the refused action visible and repeatable second. A note a frame
-// has shown clears.
-func (n *saveNote) landed(status string) string {
-	if n.refused && !n.shown {
-		n.refused = false
+// landed returns the status to show after a save carrying tok landed. A note
+// a frame has shown clears. An unseen refusal stamped with tok was just
+// retried, so it reads plain "saved" and retires. Any other landed save turns
+// an unseen refusal that still has a retry context into the composed note,
+// which acknowledges the save first and keeps the refused action visible and
+// repeatable second.
+func (n *saveNote) landed(status string, tok uint64) string {
+	switch {
+	case n.shown:
+		n.tok = 0
+		if status == n.text {
+			return ""
+		}
+	case n.tok != 0 && tok == n.tok:
+		return n.post("saved")
+	case n.tok != 0:
 		n.text = "saved; earlier action was not applied - repeat it"
 		return n.text
 	}
-	if n.shown && status == n.text {
-		return ""
-	}
 	return status
+}
+
+// stale ends every retry context except the view autosave and open, the
+// token of the overlay still on screen. A refusal stamped by an overlay that
+// closed cannot be retried in place any more: it keeps its text, and no
+// later save turns it into a repeat instruction.
+func (n *saveNote) stale(open uint64) {
+	if n.tok != viewTok && n.tok != open {
+		n.tok = 0
+	}
 }
 
 func (n *saveNote) rendered(frame string) {
@@ -3551,17 +3579,18 @@ func runPicker() int {
 		sel = pinSel(visible(), sel, st.ActivePaneID)
 	}
 	note := saveNote{}
-	saveSt := func() bool {
+	ctxTok := viewTok
+	saveSt := func(tok uint64) bool {
 		next, err := persistStore(lk, st)
 		if next != st {
 			st = next
 			rows = rebase(rows)
 		}
 		if err != nil {
-			status = note.refuse(err)
+			status = note.refuse(err, tok)
 			return false
 		}
-		status = note.landed(status)
+		status = note.landed(status, tok)
 		return true
 	}
 	// pointed reports whether the row the drawn cursor pointed at is still
@@ -3589,7 +3618,7 @@ func runPicker() int {
 		if sel >= 0 && sel < len(list) {
 			st.ActivePaneID = list[sel].PaneID
 		}
-		saveSt()
+		saveSt(viewTok)
 	}
 
 	// commitTeach records full real-time teaching context and applies feedback.
@@ -3687,11 +3716,11 @@ func runPicker() int {
 			},
 		}
 
-		saved := commitTeaching(st, tRecord, saveSt)
+		saved := commitTeaching(st, tRecord, func() bool { return saveSt(ctxTok) })
 
 		taughtID := teachRow.PaneID
-		teaching = false
 		if saved {
+			teaching = false
 			if teachPref == 0 {
 				status = "taught Jev: prefer " + teachRow.Label
 			} else if teachPref == 2 {
@@ -3735,7 +3764,7 @@ func runPicker() int {
 		} else {
 			status = "no reminder set: " + remindLabel
 		}
-		saveSt()
+		saveSt(0)
 		reminding = false
 		rebuild()
 	}
@@ -3748,7 +3777,7 @@ func runPicker() int {
 		ps.Done = false
 		st.addToInbox(remindPaneID)
 		status = "reminder cleared: " + remindLabel
-		saveSt()
+		saveSt(0)
 		reminding = false
 		remindHas = false
 		remindExisting = 0
@@ -3839,7 +3868,7 @@ func runPicker() int {
 			st.Jev.ScoreKey[id] = v.key
 		}
 		st.Jev.Proxy = jevProxyBin()
-		saveSt()
+		saveSt(0)
 		rows = rebase(rows)
 	}
 
@@ -3851,6 +3880,11 @@ func runPicker() int {
 		if sel < 0 {
 			sel = 0
 		}
+		open := uint64(0)
+		if showJev || reminding || teaching {
+			open = ctxTok
+		}
+		note.stale(open)
 		persistView(rows)
 		status = note.keep(status)
 		w, h := termSize(tty)
@@ -4093,7 +4127,7 @@ func runPicker() int {
 					} else {
 						delete(st.Jev.Weights, it.feature)
 					}
-					saveSt()
+					saveSt(ctxTok)
 					items = jevSelectableItems(st)
 					if jevSel >= len(items) {
 						jevSel = max(0, len(items)-1)
@@ -4114,7 +4148,7 @@ func runPicker() int {
 					txt := strings.TrimSpace(remindEd.String())
 					if _, ok, _ := duration.Parse(txt, time.Now()); ok {
 						if st.pinSnoozePick(txt) {
-							if saveSt() {
+							if saveSt(ctxTok) {
 								status = "pinned quick pick: " + txt
 							}
 							remindField = pickField
@@ -4200,7 +4234,7 @@ func runPicker() int {
 				} else if remindField == pickField && len(picks) > 1 {
 					removed := picks[remindSel]
 					st.removeSnoozePick(remindSel)
-					if saveSt() {
+					if saveSt(ctxTok) {
 						status = "removed quick pick: " + removed
 					}
 					picks = st.getSnoozePicks()
@@ -4317,7 +4351,7 @@ func runPicker() int {
 			switch noteEd.Feed(key) {
 			case vimline.ActAccept:
 				status = commitNote(st, notePaneID, noteLabel, noteEd.String())
-				saveSt()
+				saveSt(0)
 				noting = false
 				rebuild()
 			case vimline.ActOut, vimline.ActCancel:
@@ -4379,7 +4413,7 @@ func runPicker() int {
 						status = note.post("list changed - review and retry")
 					} else {
 						st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
-						if saveSt() {
+						if saveSt(0) {
 							status = "deleted " + confirmName
 						}
 						tab = 0
@@ -4418,7 +4452,7 @@ func runPicker() int {
 					status = "created " + name
 					created = true
 				}
-				if saveSt() && created {
+				if saveSt(0) && created {
 					tab = 0
 					for i, v := range views(st) {
 						if v.Kind == "custom" && v.Idx == len(st.Tabs)-1 {
@@ -4600,6 +4634,7 @@ func runPicker() int {
 			helpEd = vimline.New("")
 		case key == "J" && !searching && !showHelp:
 			showJev = true
+			ctxTok++
 			jevSel = 0
 			jevScrollOffset = 0
 			jevTyping = false
@@ -4639,6 +4674,7 @@ func runPicker() int {
 			}
 			if len(rows) > 0 && sel < len(rows) {
 				teaching = true
+				ctxTok++
 				teachField = 0
 				teachPref = 0
 				teachRow = rows[sel]
@@ -4676,7 +4712,7 @@ func runPicker() int {
 				st.addToInbox(r.PaneID)
 				status = "moved to inbox: " + r.Label
 			}
-			if saveSt() {
+			if saveSt(0) {
 				lastDoneID = doneID
 			}
 			rebuild()
@@ -4689,7 +4725,7 @@ func runPicker() int {
 				break
 			}
 			status = "undone"
-			lastDoneID = undoDone(st, lastDoneID, saveSt)
+			lastDoneID = undoDone(st, lastDoneID, func() bool { return saveSt(0) })
 			rebuild()
 		case key == "h" && !searching && !showHelp:
 			if !pointed() {
@@ -4699,6 +4735,7 @@ func runPicker() int {
 				break
 			}
 			reminding = true
+			ctxTok++
 			remindAction = 0
 			remindSel = 0
 			psRemind := st.ensurePane(rows[sel].PaneID)
@@ -4752,7 +4789,7 @@ func runPicker() int {
 			} else {
 				status = "cleared manual blocked: " + r.Label
 			}
-			saveSt()
+			saveSt(0)
 			rebuild()
 		case key == "/" && !searching:
 			searching = true
@@ -4812,7 +4849,7 @@ func runPicker() int {
 				} else {
 					status = "unmarked favorite: " + rows[sel].Label
 				}
-				saveSt()
+				saveSt(0)
 				rebuild()
 			}
 		case key == "ctrl-u":

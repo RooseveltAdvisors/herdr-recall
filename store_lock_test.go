@@ -678,7 +678,7 @@ func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 				t.Fatal("the save that drops the refused mutation must report it, never a plain save")
 			}
 			note := &saveNote{}
-			if got := note.refuse(err); got != "not saved: last action not applied - repeat it" {
+			if got := note.refuse(err, 0); got != "not saved: last action not applied - repeat it" {
 				t.Fatalf("the note must name the last action as not applied: %q", got)
 			}
 			final := mustLoad(t)
@@ -1445,9 +1445,9 @@ func TestRefusedSaveKeepsStoreWhenStateGoneOrCorrupt(t *testing.T) {
 
 // TestRefusalNoteRendersBeforeAnySaveClearsIt pins the note contract: a
 // refusal note reaches a rendered frame before any save can clear it, and it
-// is gone only after a successful save. A save that lands before the
-// refusal rendered turns it into the composed note, which then follows the
-// same rule.
+// is gone only after a successful save. A different save that lands before
+// an overlay's refusal rendered turns it into the composed note, which then
+// follows the same rule.
 func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	const composed = "saved; earlier action was not applied - repeat it"
 	useTempConfig(t)
@@ -1467,12 +1467,12 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 		t.Fatal("the save must be refused while the lock is unavailable")
 	}
 	note := &saveNote{}
-	status := note.refuse(err)
+	status := note.refuse(err, viewTok+1)
 
 	if _, err := persistStore(lk, kept); err != nil {
 		t.Fatalf("the auto-save must succeed: %v", err)
 	}
-	status = note.landed(status)
+	status = note.landed(status, viewTok)
 	if status != composed {
 		t.Fatalf("a save that lands before the refusal rendered must compose the note: %q", status)
 	}
@@ -1490,7 +1490,7 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	if _, err := persistStore(lk, kept); err != nil {
 		t.Fatalf("the later save must succeed: %v", err)
 	}
-	status = note.landed(status)
+	status = note.landed(status, viewTok)
 	if status != composed {
 		t.Fatalf("an overlay frame must not mark the note seen: %q", status)
 	}
@@ -1499,7 +1499,7 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	if _, err := persistStore(lk, kept); err != nil {
 		t.Fatalf("the later save must succeed: %v", err)
 	}
-	status = note.landed(status)
+	status = note.landed(status, viewTok)
 	if status != "" {
 		t.Fatalf("the note must clear only after a successful save: %q", status)
 	}
@@ -1533,7 +1533,7 @@ func TestRefusalNoteSeenWhenStatusClips(t *testing.T) {
 		t.Fatal("the save must be refused while recall.json.tmp blocks it")
 	}
 	note := &saveNote{}
-	status := note.refuse(err)
+	status := note.refuse(err, viewTok)
 	if len(status) <= 24 {
 		t.Fatalf("the note must outlast the 24-column line it clips against: %q", status)
 	}
@@ -1554,7 +1554,7 @@ func TestRefusalNoteSeenWhenStatusClips(t *testing.T) {
 	if _, err := persistStore(lk, kept); err != nil {
 		t.Fatalf("the later save must succeed: %v", err)
 	}
-	if status = note.landed(status); status != "" {
+	if status = note.landed(status, viewTok); status != "" {
 		t.Fatalf("a clipped note the frame showed must clear after a landed save: %q", status)
 	}
 }
@@ -1715,7 +1715,7 @@ func TestTaintedRollbackNeverPersistsRefusedMutation(t *testing.T) {
 		t.Fatalf("the note must report the live failure: %v", err)
 	}
 	note := &saveNote{}
-	if got := note.refuse(err); strings.Contains(got, "recall.lock unavailable") {
+	if got := note.refuse(err, 0); strings.Contains(got, "recall.lock unavailable") {
 		t.Fatalf("the note must not replay the stale reason: %q", got)
 	}
 	if b, _ := os.ReadFile(statePath()); string(b) != "{" {

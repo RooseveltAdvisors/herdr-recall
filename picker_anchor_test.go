@@ -542,30 +542,44 @@ func TestNoteCommitLabelsCapturedPane(t *testing.T) {
 	}
 }
 
-// TestRefusalNoteOutlivesOverlayExit pins matrix row R3 with the composed
-// note: an action refused while an overlay is up never reaches the overlay's
-// frames, which carry no status line. When later saves land before any frame
-// shows the refusal, the next frame that carries a status line shows the
-// composed note, whether a hint overwrote the status first or the exit
-// cleared it. The note clears on the next landed save, and the refused
-// action stays repeatable.
-func TestRefusalNoteOutlivesOverlayExit(t *testing.T) {
+// lastFrame returns the stripped lines of the last frame in the output.
+func lastFrame(out string) []string {
+	frame := out[strings.LastIndex(out, "\x1b[2J\x1b[H")+len("\x1b[2J\x1b[H"):]
+	return strings.Split(stripANSI(frame), "\r\n")
+}
+
+// teachings returns how many teachings recall.json holds.
+func teachings(t *testing.T) int {
+	t.Helper()
+	if s := mustLoad(t); s.Jev != nil {
+		return len(s.Jev.Teachings)
+	}
+	return 0
+}
+
+// TestRetryInPlaceResolvesRefusal pins the retry token: an action refused
+// inside an overlay stays pending there, which draws no status line, and its
+// retry in place carries the same token. When the retry lands, the next frame
+// that carries a status line reads plain "saved", never the refusal or the
+// repeat instruction, and the action is on disk.
+func TestRetryInPlaceResolvesRefusal(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "herdr-recall")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v: %s", err, out)
 	}
-	const composed = "saved; earlier action was not applied - repeat it"
 	for _, tc := range []struct {
 		name    string
 		open    string
 		act     string
 		leave   []string
-		applied func(s *store) bool
+		applied func(t *testing.T) bool
 	}{
+		{"teach", "i", "\r", nil,
+			func(t *testing.T) bool { return teachings(t) == 1 }},
+		{"jev delete", "J", "\r", []string{"q"},
+			func(t *testing.T) bool { _, ok := mustLoad(t).Jev.Weights["tok:alpha"]; return !ok }},
 		{"remind quick pick removal", "h", "x", []string{"q"},
-			func(s *store) bool { return !slices.Contains(s.getSnoozePicks(), "20min") }},
-		{"jev delete", "J", "\r", []string{"i", "q"},
-			func(s *store) bool { _, ok := s.Jev.Weights["tok:alpha"]; return !ok }},
+			func(t *testing.T) bool { return !slices.Contains(mustLoad(t).getSnoozePicks(), "20min") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useTempConfig(t)
@@ -582,50 +596,143 @@ func TestRefusalNoteOutlivesOverlayExit(t *testing.T) {
 			frame++
 			p.frames(frame)
 
-			// The action's save fails while the overlay is up.
+			// The action's save fails, so the action stays pending in place.
 			if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
 				t.Fatal(err)
 			}
 			p.press(tc.act)
 			frame++
-			out := p.frames(frame)
-			if strings.Contains(out, "not saved: ") || strings.Contains(out, composed) {
-				t.Fatalf("the overlay frame must carry no status line:\n%s", stripANSI(out))
-			}
-			if tc.applied(mustLoad(t)) {
+			p.frames(frame)
+			if tc.applied(t) {
 				t.Fatal("the refused action reached disk")
 			}
 			if err := os.Remove(statePath() + ".tmp"); err != nil {
 				t.Fatal(err)
 			}
 
-			// The saves while leaving land before any frame showed the refusal.
+			p.press(tc.act)
+			frame++
 			for _, k := range tc.leave {
 				p.press(k)
 				frame++
 			}
-			out = p.frames(frame)
-			if !strings.Contains(out, composed) {
-				t.Fatalf("the next status line must show the composed note:\n%s", stripANSI(out))
+			out := p.frames(frame)
+			if !tc.applied(t) {
+				t.Fatal("the retry in place must land")
 			}
-			shown := len(out)
-
-			p.press("j")
-			frame++
-			out = p.frames(frame)
-			if strings.Contains(out[shown:], composed) {
-				t.Fatalf("the composed note must clear on the next landed save:\n%s", stripANSI(out[shown:]))
+			if strings.Contains(out, "not saved: ") || strings.Contains(out, "earlier action") {
+				t.Fatalf("a landed retry must not show the refusal or the repeat instruction:\n%s", stripANSI(out))
 			}
-
-			for _, k := range []string{tc.open, tc.act} {
-				p.press(k)
-				frame++
-				p.frames(frame)
-			}
-			if !tc.applied(mustLoad(t)) {
-				t.Fatal("the refused action must stay repeatable")
+			if lines := lastFrame(out); !slices.Contains(lines, "saved") {
+				t.Fatalf("the next status line must read plain saved:\n%s", strings.Join(lines, "\n"))
 			}
 		})
+	}
+}
+
+// TestDifferentSaveComposesRefusal pins the other branch of the retry token:
+// while a refused teach is still pending in its dialog, a save carrying a
+// different mutation lands first. The composed note shows on the next frame
+// that carries a status line, the teach is not on disk, and the note clears on
+// the next landed save.
+func TestDifferentSaveComposesRefusal(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	const composed = "saved; earlier action was not applied - repeat it"
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seedPicker(t, []string{"w1:pA"}, nil)
+
+	p := startPicker(t, bin, cfg)
+	frame := 1
+	p.frames(frame)
+	p.press("i")
+	frame++
+	p.frames(frame)
+
+	if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.press("\r")
+	frame++
+	p.frames(frame)
+	if err := os.Remove(statePath() + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The view save after the next key lands while the teach is still pending.
+	p.press("l")
+	frame++
+	p.frames(frame)
+	p.press("\x1b")
+	frame++
+	out := p.frames(frame)
+	if lines := lastFrame(out); !slices.Contains(lines, composed) {
+		t.Fatalf("the next status line must show the composed note:\n%s", strings.Join(lines, "\n"))
+	}
+	if n := teachings(t); n != 0 {
+		t.Fatalf("the refused teach reached disk: %d teachings", n)
+	}
+
+	p.press("j")
+	frame++
+	out = p.frames(frame)
+	if lines := lastFrame(out); slices.Contains(lines, composed) {
+		t.Fatalf("the composed note must clear on the next landed save:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestStaleRefusalNeverOrdersRetry pins the session boundary of the retry
+// token: a refused teach whose dialog closes before any other save lands keeps
+// the plain refusal text, even though the first save after the close lands.
+// The teach retried in a new dialog lands, and no frame ever tells the
+// operator to repeat it.
+func TestStaleRefusalNeverOrdersRetry(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seedPicker(t, []string{"w1:pA"}, nil)
+
+	p := startPicker(t, bin, cfg)
+	frame := 1
+	p.frames(frame)
+	p.press("i")
+	frame++
+	p.frames(frame)
+
+	// The teach is refused. The failure clears, and the dialog closes before
+	// any other save lands.
+	if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.press("\r")
+	frame++
+	p.frames(frame)
+	if err := os.Remove(statePath() + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	p.press("\x1b")
+	frame++
+	if lines := lastFrame(p.frames(frame)); !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "not saved: ") }) {
+		t.Fatalf("the closed dialog must leave the plain refusal on the status line:\n%s", strings.Join(lines, "\n"))
+	}
+
+	// The operator retries in a new dialog, and it lands.
+	for _, k := range []string{"i", "\r"} {
+		p.press(k)
+		frame++
+	}
+	out := p.frames(frame)
+	if n := teachings(t); n != 1 {
+		t.Fatalf("the retried teach must land: %d teachings", n)
+	}
+	if strings.Contains(out, "repeat it") {
+		t.Fatalf("a stale refusal must never order a retry:\n%s", stripANSI(out))
 	}
 }
 
