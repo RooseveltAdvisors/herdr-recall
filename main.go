@@ -424,7 +424,7 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 		if err != nil {
 			return st, err
 		}
-		st = fresh
+		return fresh, errors.New("recall state reloaded from disk")
 	}
 	var err error
 	if !lk.held() {
@@ -462,10 +462,22 @@ func (n *saveNote) clear(status string) string {
 	return status
 }
 
-func (n *saveNote) rendered(status string) {
-	if n.text != "" && status == n.text {
+func (n *saveNote) rendered(frame string) {
+	if n.text != "" && strings.Contains(frame, n.text) {
 		n.shown = true
 	}
+}
+
+// commitNote stores text on the pane captured when the note opened and labels
+// the status from the label captured with it.
+func commitNote(st *store, paneID, label, text string) string {
+	ps := st.ensurePane(paneID)
+	ps.Note = strings.TrimSpace(text)
+	if ps.Note != "" {
+		ps.Done = false
+		return "note saved: " + label
+	}
+	return "note cleared: " + label
 }
 
 // checkPriorLife refuses creating recall.json from nothing when recall.lock
@@ -3280,6 +3292,7 @@ func runPicker() int {
 	noting := false
 	noteEd := vimline.New("")
 	notePaneID := ""
+	noteLabel := ""
 	teaching := false
 	teachField := 0
 	teachPref := 0
@@ -3682,7 +3695,7 @@ func runPicker() int {
 			frame = renderFrame(rows, sel, scrollOffset, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
 		tty.WriteString(frame)
-		note.rendered(status)
+		note.rendered(frame)
 		// The lock is dropped while waiting for input so hooks never stall
 		// behind an idle picker, and re-taken before the next mutation.
 		lk.release()
@@ -4057,14 +4070,7 @@ func runPicker() int {
 		if noting && !showHelp {
 			switch noteEd.Feed(key) {
 			case vimline.ActAccept:
-				ps := st.ensurePane(notePaneID)
-				ps.Note = strings.TrimSpace(noteEd.String())
-				if ps.Note != "" {
-					ps.Done = false
-					status = "note saved: " + rows[sel].Label
-				} else {
-					status = "note cleared: " + rows[sel].Label
-				}
+				status = commitNote(st, notePaneID, noteLabel, noteEd.String())
 				saveSt()
 				noting = false
 				rebuild()
@@ -4383,6 +4389,7 @@ func runPicker() int {
 			r := rows[sel]
 			ps := st.ensurePane(r.PaneID)
 			now := time.Now().Unix()
+			doneID := ""
 			if views(st)[tab].Kind == "inbox" || ps.InInbox || inInbox(r, now) {
 				ps.Done = true
 				ps.DoneAt = now
@@ -4393,15 +4400,16 @@ func runPicker() int {
 				ps.DoneState = baselineState(liveStatusWord(frozen, r.PaneID))
 				st.removeFromInbox(r.PaneID)
 				// e archives. It is neutral, so it does not teach Jev.
-				lastDoneID = r.PaneID
 				status = "done: " + r.Label + " (z undo)"
+				doneID = r.PaneID
 			} else {
 				ps.Done = false
-				lastDoneID = ""
 				st.addToInbox(r.PaneID)
 				status = "moved to inbox: " + r.Label
 			}
-			saveSt()
+			if saveSt() {
+				lastDoneID = doneID
+			}
 			rebuild()
 		case (key == "z" || key == "u") && !searching && !showHelp:
 			// z is undo. u stays as the vim alias.
@@ -4452,6 +4460,7 @@ func runPicker() int {
 			}
 			noting = true
 			notePaneID = rows[sel].PaneID
+			noteLabel = rows[sel].Label
 			noteEd = vimline.New(rows[sel].Note)
 			status = ""
 		case key == "!" && !searching && !showHelp:

@@ -771,11 +771,59 @@ func TestRefusalNoteRendersBeforeAnySaveClearsIt(t *testing.T) {
 	if !strings.Contains(stripANSI(frame), "not saved: ") {
 		t.Fatalf("the refusal note must render:\n%s", frame)
 	}
-	note.rendered(status)
 
+	overlay := renderNote(80, 24, []string{"All"}, 0, vimline.View{Label: "note", Text: "x", Focused: true})
+	if strings.Contains(overlay, note.text) {
+		t.Fatalf("the overlay frame carries no status line:\n%s", overlay)
+	}
+	note.rendered(overlay)
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("the later save must succeed: %v", err)
+	}
+	status = note.clear(status)
+	if !strings.Contains(status, "not saved: ") {
+		t.Fatalf("an overlay frame must not mark the note seen: %q", status)
+	}
+
+	note.rendered(frame)
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("the later save must succeed: %v", err)
+	}
 	status = note.clear(status)
 	if status != "" {
 		t.Fatalf("the note must clear only after a successful save: %q", status)
+	}
+}
+
+// TestNoteCommitLabelsCapturedPane pins the note commit: the status names the
+// label captured when the note opened, and a resync that empties or reorders
+// the list cannot panic or relabel it.
+func TestNoteCommitLabelsCapturedPane(t *testing.T) {
+	useTempConfig(t)
+	st := mustLoad(t)
+
+	rows := []row{{PaneID: "w1:p1", Label: "one"}}
+	sel := 0
+	notePaneID := rows[sel].PaneID
+	noteLabel := rows[sel].Label
+
+	rows = nil
+	status := commitNote(st, notePaneID, noteLabel, "hello")
+	if status != "note saved: one" {
+		t.Fatalf("status must name the captured pane: %q", status)
+	}
+	if st.Panes["w1:p1"].Note != "hello" {
+		t.Fatalf("the note must land on the captured pane: %q", st.Panes["w1:p1"].Note)
+	}
+
+	rows = []row{{PaneID: "w1:p2", Label: "two"}, {PaneID: "w1:p1", Label: "one"}}
+	sel = 0
+	status = commitNote(st, notePaneID, noteLabel, "")
+	if status != "note cleared: one" {
+		t.Fatalf("status must keep naming the captured pane: %q", status)
+	}
+	if st.Panes["w1:p1"].Note != "" {
+		t.Fatalf("the clear must land on the captured pane: %q", st.Panes["w1:p1"].Note)
 	}
 }
 
@@ -821,11 +869,15 @@ func TestTaintedRollbackNeverPersistsRefusedMutation(t *testing.T) {
 
 	writeStoreDirect(t, seed)
 	kept, err = persistStore(lk, kept)
-	if err != nil {
-		t.Fatalf("the next persist must reload, clear the taint, and save: %v", err)
+	if err == nil {
+		t.Fatal("the reload that drops the caller's change must report a refusal, never a save")
 	}
 	if kept.Panes["w1:p1"] == nil || kept.Panes["w1:p1"].Note != "" {
 		t.Fatalf("the clean reload must drop the refused change: %+v", kept.Panes["w1:p1"])
+	}
+
+	if _, err := persistStore(lk, kept); err != nil {
+		t.Fatalf("persistence must resume after the reload: %v", err)
 	}
 	final := mustLoad(t)
 	if final.Panes["w1:p1"].Note != "" {
