@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	unlockPTY = 0x40045431 // Linux TIOCSPTLCK
-	ptyNumber = 0x80045430 // Linux TIOCGPTN
+	unlockPTY  = 0x40045431 // Linux TIOCSPTLCK
+	ptyNumber  = 0x80045430 // Linux TIOCGPTN
+	setWinsize = 0x5414     // Linux TIOCSWINSZ
 )
 
 // pickerRun drives the real picker binary on a pty: keys go to its stdin and
@@ -29,19 +30,27 @@ type pickerRun struct {
 	out    strings.Builder
 }
 
+// openPTY opens a pty pair sized 120 by 40. The master stays non-blocking,
+// so frames can wait on read deadlines: os.File.Fd would switch it to
+// blocking mode and turn the deadlines off.
 func openPTY(t *testing.T) (*os.File, *os.File) {
 	t.Helper()
-	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	fd, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		t.Skipf("no /dev/ptmx: %v", err)
 	}
+	master := os.NewFile(uintptr(fd), "/dev/ptmx")
+	ioctl := func(req uintptr, arg unsafe.Pointer) syscall.Errno {
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
+		return errno
+	}
 	var unlock int32
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), unlockPTY, uintptr(unsafe.Pointer(&unlock))); errno != 0 {
+	if errno := ioctl(unlockPTY, unsafe.Pointer(&unlock)); errno != 0 {
 		master.Close()
 		t.Skipf("unlock pty: %v", errno)
 	}
 	var num uint32
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), ptyNumber, uintptr(unsafe.Pointer(&num))); errno != 0 {
+	if errno := ioctl(ptyNumber, unsafe.Pointer(&num)); errno != 0 {
 		master.Close()
 		t.Skipf("pty number: %v", errno)
 	}
@@ -51,7 +60,7 @@ func openPTY(t *testing.T) (*os.File, *os.File) {
 		t.Skipf("open pty slave: %v", err)
 	}
 	ws := struct{ Row, Col, X, Y uint16 }{Row: 40, Col: 120}
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), uintptr(tiocgwinsz), uintptr(unsafe.Pointer(&ws))); errno != 0 {
+	if errno := ioctl(setWinsize, unsafe.Pointer(&ws)); errno != 0 {
 		slave.Close()
 		master.Close()
 		t.Skipf("pty size: %v", errno)
@@ -61,12 +70,12 @@ func openPTY(t *testing.T) (*os.File, *os.File) {
 
 const pickerSnapshot = `{"result":{"snapshot":{"focused_pane_id":"w1:pA","focused_tab_id":"tA","focused_workspace_id":"w1","panes":[{"pane_id":"w1:pA","tab_id":"tA","workspace_id":"w1","agent_status":"working","terminal_title_stripped":"alpha","cwd":"/a","focused":true},{"pane_id":"w1:pB","tab_id":"tB","workspace_id":"w1","agent_status":"idle","terminal_title_stripped":"bravo","cwd":"/b","focused":false}],"tabs":[{"tab_id":"tA","workspace_id":"w1","label":"alpha","focused":true},{"tab_id":"tB","workspace_id":"w1","label":"bravo","focused":false}],"workspaces":[{"workspace_id":"w1","label":"Work","active_tab_id":"tA","focused":true}],"layouts":[]}}}`
 
-// herdrShim writes a herdr stand-in that answers every call with the fixed
-// snapshot, and returns the PATH value that puts it first.
-func herdrShim(t *testing.T) string {
+// herdrShim writes a herdr stand-in that answers every call with snapshot,
+// and returns the PATH value that puts it first.
+func herdrShim(t *testing.T, snapshot string) string {
 	t.Helper()
 	dir := t.TempDir()
-	script := "#!/bin/sh\necho '" + pickerSnapshot + "'\n"
+	script := "#!/bin/sh\necho '" + snapshot + "'\n"
 	if err := os.WriteFile(filepath.Join(dir, "herdr"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +90,7 @@ func startPicker(t *testing.T, bin, cfgDir string, env ...string) *pickerRun {
 	cmd.Env = probeEnv(append([]string{
 		"HERDR_PLUGIN_CONFIG_DIR=" + cfgDir,
 		"HERDR_RECALL_JEV=off",
-		"PATH=" + herdrShim(t),
+		"PATH=" + herdrShim(t, pickerSnapshot),
 	}, env...)...)
 	if err := cmd.Start(); err != nil {
 		slave.Close()
@@ -115,26 +124,39 @@ func (p *pickerRun) press(keys string) {
 	}
 }
 
-// frames returns the picker output once n full-screen frames are painted.
+// frames returns the picker output once n full-screen frames are painted and
+// the picker has gone quiet. A frame can reach the pty master over several
+// reads, so the n-th frame is whole only once no more output follows it.
 func (p *pickerRun) frames(n int) string {
 	p.t.Helper()
 	buf := make([]byte, 4096)
 	deadline := time.Now().Add(20 * time.Second)
-	for strings.Count(p.out.String(), "\x1b[2J\x1b[H") < n {
+	for {
+		painted := strings.Count(p.out.String(), "\x1b[2J\x1b[H") >= n
 		if time.Now().After(deadline) {
+			if painted {
+				return p.out.String()
+			}
 			p.t.Fatalf("picker painted %d of %d frames; output so far:\n%s",
 				strings.Count(p.out.String(), "\x1b[2J\x1b[H"), n, stripANSI(p.out.String()))
 		}
-		_ = p.master.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		wait := 500 * time.Millisecond
+		if painted {
+			wait = 100 * time.Millisecond
+		}
+		_ = p.master.SetReadDeadline(time.Now().Add(wait))
 		nread, err := p.master.Read(buf)
 		if nread > 0 {
 			p.out.Write(buf[:nread])
+			continue
 		}
 		if err != nil && !os.IsTimeout(err) {
 			p.t.Fatalf("pty read: %v", err)
 		}
+		if painted {
+			return p.out.String()
+		}
 	}
-	return p.out.String()
 }
 
 // TestVanishedAnchorNeverSubstitutes pins the ruled refusal: when the pane the
@@ -350,7 +372,7 @@ func TestJumpLeavesHookWritersUnstalled(t *testing.T) {
 
 			// A focus hook fires while the jump waits on herdr.
 			hook := exec.Command(bin, "record")
-			hook.Env = probeEnv("HERDR_PLUGIN_CONFIG_DIR="+cfg, "PATH="+herdrShim(t))
+			hook.Env = probeEnv("HERDR_PLUGIN_CONFIG_DIR="+cfg, "PATH="+herdrShim(t, pickerSnapshot))
 			var out strings.Builder
 			hook.Stdout, hook.Stderr = &out, &out
 			if err := hook.Start(); err != nil {
@@ -372,6 +394,40 @@ func TestJumpLeavesHookWritersUnstalled(t *testing.T) {
 				t.Fatalf("the hook visit did not land: visits=%d", got)
 			}
 		})
+	}
+}
+
+// TestPickerPaintsAtPtySize pins the pty harness: openPTY sizes the slave to
+// 120 by 40, so the picker paints rules 119 columns wide and caps a long
+// list at 39 lines, not the 62 by 12 fallback termSize returns when the pty
+// carries no size.
+func TestPickerPaintsAtPtySize(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	var panes []string
+	for i := range 60 {
+		id := fmt.Sprintf("w1:p%d", i)
+		seed.Favorites = append(seed.Favorites, id)
+		panes = append(panes, fmt.Sprintf(`{"pane_id":%q,"tab_id":"tA","workspace_id":"w1","agent_status":"idle","terminal_title_stripped":"pane %d","cwd":"/p"}`, id, i))
+	}
+	seed.ActiveTabSet = true
+	seed.ActiveTab = 0
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := `{"result":{"snapshot":{"focused_pane_id":"w1:p0","focused_tab_id":"tA","focused_workspace_id":"w1","panes":[` + strings.Join(panes, ",") + `],"tabs":[{"tab_id":"tA","workspace_id":"w1","label":"alpha","focused":true}],"workspaces":[{"workspace_id":"w1","label":"Work","active_tab_id":"tA","focused":true}],"layouts":[]}}}`
+
+	p := startPicker(t, bin, cfg, "PATH="+herdrShim(t, snapshot))
+	_, frame, _ := strings.Cut(p.frames(1), "\x1b[2J\x1b[H")
+	lines := strings.Split(stripANSI(frame), "\r\n")
+	if len(lines) != 39 || !slices.Contains(lines, strings.Repeat("─", 119)) {
+		t.Fatalf("the picker must paint at 120 by 40: a 119-column rule and 39 lines, got %d lines:\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 }
 
