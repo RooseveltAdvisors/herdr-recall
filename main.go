@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -359,9 +358,9 @@ const pruneKeep = 200
 // recreatesState reports whether the store on disk is a recreation of the
 // proven state instead of a writer's continuation of it. Inside a vanish
 // episode only a file that continues the proven state may replace it.
-// Outside one, a file that strips content units no single legitimate action
-// removes was built again, and so was one that misses a proven pane prune
-// could not have dropped. A missing proven pane is a prune's work only when
+// Outside one, a file that strips a content unit only a picker removes was
+// built again, and so was one that misses a proven pane prune could not
+// have dropped. A missing proven pane is a prune's work only when
 // the file carries a full keep window of panes ranked at or above it: prune
 // drops just the tail of a closed set it has a window to drop. A held pin
 // proves nothing for a missing pane: a writer may un-pin and prune it for
@@ -422,15 +421,12 @@ func continues(held, disk *store) bool {
 	return !strips(held, disk)
 }
 
-// strips reports whether disk dropped content units of held that no single
-// legitimate action removes: the note, manual block, or reminder of a pane
-// disk still carries, a tab, or every held favorite when held had more than
-// one. No hook or command clears the pane units or tabs, and the favorite
-// command and m remove one favorite at a time, so a changed file that drops
-// these does not prove it continues the held state. Any drop of favorites
-// short of a multi-favorite wipe, and any drop of Jev weights, is left to
-// the episode check: the favorite and jev reset commands make such drops for
-// real.
+// strips reports whether disk dropped a content unit of held that only a
+// picker removes: the note, manual block, or reminder of a pane disk still
+// carries, or a tab. No hook or command clears these, so a changed file that
+// lacks one does not prove it continues the held state. Favorites and Jev
+// weights are left to the episode check: the favorite and jev reset
+// commands remove them for real, any number of times in one idle gap.
 func strips(held, disk *store) bool {
 	for id, hp := range held.Panes {
 		dp := disk.Panes[id]
@@ -450,7 +446,7 @@ func strips(held, disk *store) bool {
 			return true
 		}
 	}
-	return len(held.Favorites) > 1 && !slices.ContainsFunc(held.Favorites, disk.isFavorite)
+	return false
 }
 
 // refreshStore adopts on-disk writes made by hook or CLI processes since this
@@ -591,18 +587,35 @@ func persistStore(lk *storeLock, st *store) (*store, error) {
 }
 
 // saveNote keeps a refusal note on screen until the operator has seen it, so
-// no save can clear a note that was never rendered. The status line clips at
-// the pane width, so the note can reach the screen as a head of itself; what
-// the emitted frame displays is what marks it seen.
+// no save and no other status write can clear a note that was never
+// rendered. The status line clips at the pane width, so the note can reach
+// the screen as a head of itself; what the emitted frame displays is what
+// marks it seen.
 type saveNote struct {
 	text  string
 	shown bool
 }
 
-func (n *saveNote) refuse(err error) string {
-	n.text = "not saved: " + err.Error()
+// post sets a note the operator must see: a refusal, or an overlay action
+// ignored because its list changed. Overlay frames carry no status line, so
+// the note waits for a frame that does.
+func (n *saveNote) post(text string) string {
+	n.text = text
 	n.shown = false
-	return n.text
+	return text
+}
+
+func (n *saveNote) refuse(err error) string {
+	return n.post("not saved: " + err.Error())
+}
+
+// keep returns the note while no frame has shown it, so no later status
+// write, such as leaving an overlay, replaces a note the operator never saw.
+func (n *saveNote) keep(status string) string {
+	if n.text != "" && !n.shown {
+		return n.text
+	}
+	return status
 }
 
 func (n *saveNote) clear(status string) string {
@@ -3424,6 +3437,7 @@ func runPicker() int {
 	scrollOffset := 0
 	jevTyping := false
 	jevEd := vimline.New("")
+	jevPointed := jevItem{}
 	// The snapshot is frozen when the picker opens so j/k does not reshuffle
 	// rows. Tab and sort changes reorder that frozen set on purpose.
 	frozen, err := loadSnapshot()
@@ -3439,6 +3453,7 @@ func runPicker() int {
 	creating := false
 	editing := false
 	editIdx := -1
+	editName := ""
 	formField := 0
 	confirmName := ""
 	confirmSel := 1
@@ -3456,6 +3471,7 @@ func runPicker() int {
 	remindHas := false
 	remindExisting := int64(0)
 	remindSel := 0
+	remindPointed := ""
 	lastDoneID := ""
 	remindEd := vimline.New("")
 	remindPaneID := ""
@@ -3823,6 +3839,7 @@ func runPicker() int {
 			sel = 0
 		}
 		persistView(rows)
+		status = note.keep(status)
 		w, h := termSize(tty)
 		headerLines := 3
 		footerLines := 3
@@ -3865,12 +3882,25 @@ func runPicker() int {
 			if jevTyping {
 				frame = renderJevType(w, h, viewNames(st), tab, jevEd.Text(), sortedJevWeights(st))
 			} else {
-				frame = renderJev(w, h, viewNames(st), tab, jevSelectableItems(st), jevSel, jevScrollOffset, ex, inboxTopScored(frozen, st, 5))
+				items := jevSelectableItems(st)
+				if jevSel >= len(items) {
+					jevSel = max(0, len(items)-1)
+				}
+				jevPointed = jevItem{}
+				if jevSel < len(items) {
+					jevPointed = items[jevSel]
+				}
+				frame = renderJev(w, h, viewNames(st), tab, items, jevSel, jevScrollOffset, ex, inboxTopScored(frozen, st, 5))
 			}
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
-			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindAction, remindSel, st.getSnoozePicks(), remindEd.View("at", remindField == remindTimeField(remindHas)), remindLabel, remindHas, remindExisting, time.Now())
+			picks := st.getSnoozePicks()
+			remindPointed = ""
+			if remindSel < len(picks) {
+				remindPointed = picks[remindSel]
+			}
+			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindAction, remindSel, picks, remindEd.View("at", remindField == remindTimeField(remindHas)), remindLabel, remindHas, remindExisting, time.Now())
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
 		case teaching:
@@ -4037,12 +4067,18 @@ func runPicker() int {
 			case "ctrl-u":
 				jevSel = max(0, jevSel-half)
 			case "enter":
+				var it jevItem
 				if jevSel < len(items) {
+					it = items[jevSel]
+				}
+				if it.feature != jevPointed.feature || it.ruleID != jevPointed.ruleID {
+					status = note.post("list changed - review and retry")
+				} else if jevSel < len(items) {
 					st.ensureJev()
-					if items[jevSel].ruleID != "" {
-						st.removeJevRule(items[jevSel].ruleID)
+					if it.ruleID != "" {
+						st.removeJevRule(it.ruleID)
 					} else {
-						delete(st.Jev.Weights, items[jevSel].feature)
+						delete(st.Jev.Weights, it.feature)
 					}
 					saveSt()
 					items = jevSelectableItems(st)
@@ -4146,6 +4182,8 @@ func runPicker() int {
 			case "x":
 				if remindHas && remindField == 0 {
 					clearRemind()
+				} else if remindField == pickField && (remindSel >= len(picks) || picks[remindSel] != remindPointed) {
+					status = note.post("list changed - review and retry")
 				} else if remindField == pickField && len(picks) > 1 {
 					removed := picks[remindSel]
 					st.removeSnoozePick(remindSel)
@@ -4324,7 +4362,9 @@ func runPicker() int {
 			case "enter":
 				if confirmSel == 0 {
 					v := views(st)[tab]
-					if v.Kind == "custom" {
+					if v.Kind != "custom" || st.Tabs[v.Idx].Name != confirmName {
+						status = note.post("list changed - review and retry")
+					} else {
 						st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
 						if saveSt() {
 							status = "deleted " + confirmName
@@ -4348,9 +4388,15 @@ func runPicker() int {
 					status = "Type a name, then press enter."
 					return
 				}
+				if editing && (editIdx >= len(st.Tabs) || st.Tabs[editIdx].Name != editName) {
+					status = note.post("list changed - review and retry")
+					creating = false
+					editing = false
+					return
+				}
 				ct := customTab{Name: name, Sort: canonicalSort(newSort, ""), Limit: newLimit, Only: newOnly, Where: newWhere}
 				created := false
-				if editing && editIdx >= 0 && editIdx < len(st.Tabs) {
+				if editing {
 					ct.Fixed = st.Tabs[editIdx].Fixed
 					st.Tabs[editIdx] = ct
 					status = "saved " + name
@@ -4466,6 +4512,7 @@ func runPicker() int {
 				creating = true
 				editing = true
 				editIdx = v.Idx
+				editName = ct.Name
 				formField = 1
 				formEd = vimline.New(ct.Name)
 				newSort, newOnly, newWhere, newLimit = canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit

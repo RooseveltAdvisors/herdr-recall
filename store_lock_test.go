@@ -608,8 +608,7 @@ func TestIdlePickerKeepsDatasetAndSaveWritesIt(t *testing.T) {
 // rule and the taint scope inside the episode. A refused save while the file
 // is rebuilt or still gone must not roll back into that file, so the store is
 // tainted with the refused mutation in memory. That holds for a rebuild that
-// re-records every held pane without its content or without the held
-// favorites too. The taint stops only
+// re-records every held pane without its content too. The taint stops only
 // the refused mutation: the next save writes the held dataset back without
 // it, the note names the last action as not applied, and repeating the
 // action lands.
@@ -623,11 +622,6 @@ func TestRefusedSaveKeepsDatasetAfterRebuild(t *testing.T) {
 		}},
 		{"rebuilt from every pane, stripped", map[string]*paneStat{
 			"w1:p1": {Visits: 1, Label: "one"},
-			"w1:p2": {Visits: 1, Label: "two"},
-			"w1:p3": {Visits: 1, Label: "three"},
-		}},
-		{"rebuilt from every pane, favorites wiped", map[string]*paneStat{
-			"w1:p1": {Visits: 1, Label: "one", Note: "call vendor"},
 			"w1:p2": {Visits: 1, Label: "two"},
 			"w1:p3": {Visits: 1, Label: "three"},
 		}},
@@ -1081,54 +1075,24 @@ func seedFavoritesOnly(t *testing.T, favorites ...string) {
 	}
 }
 
-// TestIdlePickerRefusesFavoriteWipe pins the favorite rule at every
-// adoption: when the picker held more than one favorite, a rebuild that
-// drops all of them is refused even with no other content unit to miss and
-// no refresh in the gap, because no single action wipes them. The next save
-// writes the favorites and the Jev weight back.
-func TestIdlePickerRefusesFavoriteWipe(t *testing.T) {
-	useTempConfig(t)
-	seedFavoritesOnly(t, "w1:p1", "w1:p2")
-
-	st := mustLoad(t)
-	rerecordStripped(t, st, "w1:p1", "w1:p2", "w1:p3")
-
-	lk := &storeLock{}
-	if err := lk.acquire(); err != nil {
-		t.Fatal(err)
-	}
-	defer lk.release()
-	if got := refreshStore(st); got != st {
-		t.Fatal("a rebuild that wipes the held favorites must not replace the picker's dataset")
-	}
-	if _, err := persistStore(lk, st); err != nil {
-		t.Fatalf("the next save must write the dataset back: %v", err)
-	}
-	final := mustLoad(t)
-	if !final.isFavorite("w1:p1") || !final.isFavorite("w1:p2") {
-		t.Fatalf("the favorites were not written back: %v", final.Favorites)
-	}
-	if final.Jev == nil || final.Jev.Weights["label:docs"] != 0.5 {
-		t.Fatalf("the Jev weight was not written back: %+v", final.Jev)
-	}
-}
-
-// TestSingleUnfavoriteAndJevResetAdopt pins the other side of the boundary
-// with the real commands: one un-favorite, whether of the only favorite or
-// one of two, and a jev reset outside an episode are legitimate writes. The
-// picker adopts each one, and its next save keeps it.
-func TestSingleUnfavoriteAndJevResetAdopt(t *testing.T) {
+// TestUnfavoritesAndJevResetAdopt pins the favorite and Jev weight side of
+// the every-adoption check with the real commands. Un-favorites, one or
+// several in one idle gap, and a jev reset outside an episode are
+// legitimate writes: the picker adopts them, and its next save keeps them.
+func TestUnfavoritesAndJevResetAdopt(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		favorites []string
-		args      []string
+		cmds      [][]string
 		check     func(s *store) bool
 	}{
-		{"un-favorite the only favorite", []string{"w1:p1"}, []string{"favorite", "w1:p1"},
+		{"un-favorite the only favorite", []string{"w1:p1"}, [][]string{{"favorite", "w1:p1"}},
 			func(s *store) bool { return !s.isFavorite("w1:p1") }},
-		{"un-favorite one of two", []string{"w1:p1", "w1:p2"}, []string{"favorite", "w1:p1"},
+		{"un-favorite one of two", []string{"w1:p1", "w1:p2"}, [][]string{{"favorite", "w1:p1"}},
 			func(s *store) bool { return !s.isFavorite("w1:p1") && s.isFavorite("w1:p2") }},
-		{"jev reset", []string{"w1:p1", "w1:p2"}, []string{"jev", "reset"},
+		{"un-favorite both of two in one gap", []string{"w1:p1", "w1:p2"}, [][]string{{"favorite", "w1:p1"}, {"favorite", "w1:p2"}},
+			func(s *store) bool { return !s.isFavorite("w1:p1") && !s.isFavorite("w1:p2") }},
+		{"jev reset", []string{"w1:p1", "w1:p2"}, [][]string{{"jev", "reset"}},
 			func(s *store) bool { return s.Jev == nil || len(s.Jev.Weights) == 0 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1136,8 +1100,10 @@ func TestSingleUnfavoriteAndJevResetAdopt(t *testing.T) {
 			seedFavoritesOnly(t, tc.favorites...)
 
 			st := mustLoad(t)
-			if out, err := exec.Command("go", append([]string{"run", "."}, tc.args...)...).CombinedOutput(); err != nil {
-				t.Fatalf("%v: %v: %s", tc.args, err, out)
+			for _, args := range tc.cmds {
+				if out, err := exec.Command("go", append([]string{"run", "."}, args...)...).CombinedOutput(); err != nil {
+					t.Fatalf("%v: %v: %s", args, err, out)
+				}
 			}
 
 			lk := &storeLock{}
@@ -1147,13 +1113,13 @@ func TestSingleUnfavoriteAndJevResetAdopt(t *testing.T) {
 			defer lk.release()
 			fresh := refreshStore(st)
 			if fresh == st || !tc.check(fresh) {
-				t.Fatalf("%v must be adopted: %v %+v", tc.args, fresh.Favorites, fresh.Jev)
+				t.Fatalf("%v must be adopted: %v %+v", tc.cmds, fresh.Favorites, fresh.Jev)
 			}
 			if _, err := persistStore(lk, fresh); err != nil {
 				t.Fatalf("the picker's save must land: %v", err)
 			}
 			if final := mustLoad(t); !tc.check(final) {
-				t.Fatalf("the picker's save reverted %v: %v %+v", tc.args, final.Favorites, final.Jev)
+				t.Fatalf("the picker's save reverted %v: %v %+v", tc.cmds, final.Favorites, final.Jev)
 			}
 		})
 	}
@@ -1706,38 +1672,6 @@ func TestRefusedTeachLeavesNoLogRecord(t *testing.T) {
 	}
 	if got := mustLoad(t); got.Jev == nil || len(got.Jev.Teachings) != 1 {
 		t.Fatalf("the landed teach must reach recall.json: %+v", got.Jev)
-	}
-}
-
-// TestNoteCommitLabelsCapturedPane pins the note commit: the status names the
-// label captured when the note opened, and a resync that empties or reorders
-// the list cannot panic or relabel it.
-func TestNoteCommitLabelsCapturedPane(t *testing.T) {
-	useTempConfig(t)
-	st := mustLoad(t)
-
-	rows := []row{{PaneID: "w1:p1", Label: "one"}}
-	sel := 0
-	notePaneID := rows[sel].PaneID
-	noteLabel := rows[sel].Label
-
-	rows = nil
-	status := commitNote(st, notePaneID, noteLabel, "hello")
-	if status != "note saved: one" {
-		t.Fatalf("status must name the captured pane: %q", status)
-	}
-	if st.Panes["w1:p1"].Note != "hello" {
-		t.Fatalf("the note must land on the captured pane: %q", st.Panes["w1:p1"].Note)
-	}
-
-	rows = []row{{PaneID: "w1:p2", Label: "two"}, {PaneID: "w1:p1", Label: "one"}}
-	sel = 0
-	status = commitNote(st, notePaneID, noteLabel, "")
-	if status != "note cleared: one" {
-		t.Fatalf("status must keep naming the captured pane: %q", status)
-	}
-	if st.Panes["w1:p1"].Note != "" {
-		t.Fatalf("the clear must land on the captured pane: %q", st.Panes["w1:p1"].Note)
 	}
 }
 

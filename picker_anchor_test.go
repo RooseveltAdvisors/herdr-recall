@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -463,5 +464,256 @@ func TestEnterOnEmptyListStillCloses(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("enter on an empty list must close the picker")
+	}
+}
+
+// seedPicker saves panes w1:pA and w1:pB with the given favorites, so the
+// picker opens on the Favorites view with the cursor on w1:pA. edit adjusts
+// the store before the save.
+func seedPicker(t *testing.T, favorites []string, edit func(s *store)) {
+	t.Helper()
+	seed := mustLoad(t)
+	seed.Version = 2
+	seed.TabsInit = true
+	seed.Panes["w1:pA"] = &paneStat{Visits: 1, Label: "one"}
+	seed.Panes["w1:pB"] = &paneStat{Visits: 2, Label: "two"}
+	seed.Favorites = favorites
+	seed.ActiveTabSet = true
+	seed.ActiveTab = 0
+	seed.ActivePaneID = "w1:pA"
+	if edit != nil {
+		edit(seed)
+	}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNoteCommitLabelsCapturedPane pins matrix row T5 through the real
+// picker: the note commit names and writes the pane captured when n was
+// pressed, even when a resync before the commit empties the list or puts
+// another row under the cursor.
+func TestNoteCommitLabelsCapturedPane(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	for _, tc := range []struct {
+		name      string
+		favorites []string
+		after     []string
+	}{
+		{"list emptied", []string{"w1:pA"}, []string{}},
+		{"neighbor under the cursor", []string{"w1:pA", "w1:pB"}, []string{"w1:pB"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seedPicker(t, tc.favorites, nil)
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			p.press("n")
+			frame++
+			p.frames(frame)
+
+			// Another terminal un-favorites the pane while its note is open.
+			ext := readStoreDirect(t)
+			ext.Favorites = tc.after
+			writeStoreDirect(t, ext)
+
+			p.press("hello")
+			frame += len("hello")
+			p.frames(frame)
+			p.press("\r")
+			frame++
+			if out := p.frames(frame); !strings.Contains(out, "note saved: alpha") {
+				t.Fatalf("the commit must name the pane captured at n:\n%s", stripANSI(out))
+			}
+			final := mustLoad(t)
+			if final.Panes["w1:pA"].Note != "hello" {
+				t.Fatalf("the note must land on the captured pane: %+v", final.Panes["w1:pA"])
+			}
+			if final.Panes["w1:pB"].Note != "" {
+				t.Fatalf("the note landed on the row under the cursor: %+v", final.Panes["w1:pB"])
+			}
+		})
+	}
+}
+
+// TestRefusalNoteOutlivesOverlayExit pins matrix row R3: a save refused
+// while an overlay is up never reaches the overlay's frames, which carry no
+// status line, and leaving the overlay must not discard the note, whether a
+// hint overwrites it first or the exit clears the status. The next frame
+// that carries a status line shows it.
+func TestRefusalNoteOutlivesOverlayExit(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	for _, tc := range []struct {
+		name  string
+		open  string
+		churn string
+		leave []string
+	}{
+		{"remind", "h", "k", []string{"q"}},
+		{"jev", "J", "j", []string{"i", "q"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seedPicker(t, []string{"w1:pA"}, nil)
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			p.press(tc.open)
+			frame++
+			p.frames(frame)
+
+			// The save after the next key fails while the overlay is up.
+			if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			p.press(tc.churn)
+			frame++
+			if out := p.frames(frame); strings.Contains(out, "not saved: ") {
+				t.Fatalf("the overlay frame must carry no status line:\n%s", stripANSI(out))
+			}
+			if err := os.Remove(statePath() + ".tmp"); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, k := range tc.leave {
+				p.press(k)
+				frame++
+			}
+			if out := p.frames(frame); !strings.Contains(out, "not saved: ") {
+				t.Fatalf("leaving the overlay discarded the unseen refusal note:\n%s", stripANSI(out))
+			}
+		})
+	}
+}
+
+// TestOverlayActionsActOnDrawnItem pins the last-frame target rule on the
+// overlay lists: a Jev delete, a quick pick removal, a tab delete, and a tab
+// revise act only on the item the last frame showed. When another writer
+// shifts that list under the cursor, the action is ignored, the list stays as
+// the writer left it, and the unified note shows on the next frame that
+// carries a status line.
+func TestOverlayActionsActOnDrawnItem(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	withTabs := func(s *store) {
+		s.Tabs = []customTab{{Name: "Work", Sort: "last", Limit: 50}, {Name: "Play", Sort: "last", Limit: 50}}
+		s.ActiveTab = 3
+	}
+	insertTab := func(s *store) {
+		s.Tabs = append([]customTab{{Name: "Alpha", Sort: "last", Limit: 50}}, s.Tabs...)
+	}
+	tabNamed := func(s *store, name string) *customTab {
+		for i := range s.Tabs {
+			if s.Tabs[i].Name == name {
+				return &s.Tabs[i]
+			}
+		}
+		return nil
+	}
+	for _, tc := range []struct {
+		name  string
+		seed  func(s *store)
+		reach []string
+		shift func(s *store)
+		act   []string
+		acted func(s *store) bool
+		list  func(s *store) any
+	}{
+		{"jev delete",
+			func(s *store) {
+				s.ensureJev()
+				s.Jev.Weights = map[string]float64{"tok:alpha": 0.9, "tok:bravo": 0.5, "tok:charlie": 0.3}
+			},
+			[]string{"J", "j"},
+			func(s *store) { delete(s.Jev.Weights, "tok:alpha") },
+			[]string{"\r", "q"},
+			func(s *store) bool {
+				_, bravo := s.Jev.Weights["tok:bravo"]
+				return !bravo && len(s.Jev.Weights) == 2
+			},
+			func(s *store) any { return s.Jev.Weights }},
+		{"quick pick removal",
+			nil,
+			[]string{"h", "l"},
+			func(s *store) { s.SnoozePicks = []string{"1h", "3h", "tomorrow", "clear"} },
+			[]string{"x", "q"},
+			func(s *store) bool {
+				return slices.Equal(s.getSnoozePicks(), []string{"20min", "3h", "tomorrow", "clear"})
+			},
+			func(s *store) any { return s.getSnoozePicks() }},
+		{"tab delete",
+			withTabs,
+			[]string{"t", "x", "h"},
+			insertTab,
+			[]string{"\r"},
+			func(s *store) bool { return tabNamed(s, "Work") == nil && tabNamed(s, "Play") != nil },
+			func(s *store) any { return s.Tabs }},
+		{"tab revise",
+			withTabs,
+			[]string{"t", "r", "l"},
+			insertTab,
+			[]string{"\r"},
+			func(s *store) bool { w := tabNamed(s, "Work"); return w != nil && w.Sort != "last" },
+			func(s *store) any { return s.Tabs }},
+	} {
+		for _, shifted := range []bool{false, true} {
+			name := tc.name + "/item unchanged"
+			if shifted {
+				name = tc.name + "/item shifted away"
+			}
+			t.Run(name, func(t *testing.T) {
+				useTempConfig(t)
+				cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+				seedPicker(t, []string{"w1:pA"}, tc.seed)
+
+				p := startPicker(t, bin, cfg)
+				frame := 1
+				p.frames(frame)
+				for _, k := range tc.reach {
+					p.press(k)
+					frame++
+					p.frames(frame)
+				}
+				var want any
+				if shifted {
+					ext := readStoreDirect(t)
+					tc.shift(ext)
+					writeStoreDirect(t, ext)
+					want = tc.list(ext)
+				}
+				for _, k := range tc.act {
+					p.press(k)
+					frame++
+				}
+				out := p.frames(frame)
+				final := mustLoad(t)
+				noted := strings.Contains(out, "list changed - review and retry")
+				if !shifted {
+					if noted || !tc.acted(final) {
+						t.Fatalf("the action must land on the drawn item: noted=%v %+v\n%s", noted, tc.list(final), stripANSI(out))
+					}
+					return
+				}
+				if !noted {
+					t.Fatalf("the ignored action must show the note:\n%s", stripANSI(out))
+				}
+				if got := tc.list(final); !reflect.DeepEqual(got, want) {
+					t.Fatalf("the action touched the shifted list: got %+v, want %+v", got, want)
+				}
+			})
+		}
 	}
 }
