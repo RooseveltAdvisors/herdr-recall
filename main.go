@@ -323,9 +323,10 @@ var loadFailed atomic.Bool
 var saveTaint atomic.Bool
 
 // stateVanished marks a vanish episode open: this process saw recall.json
-// gone, or saw it come back missing a pane no writer could have dropped. The
-// episode stays open until the held dataset is proven on disk again, by a
-// landed save or by adopting bytes that prove continuation.
+// gone, or saw it come back as a recreation of the proven state (see
+// recreatesState). The episode stays open until the held dataset is proven
+// on disk again, by a landed save or by adopting bytes that prove
+// continuation.
 var stateVanished atomic.Bool
 
 func stampStore(b []byte) {
@@ -525,7 +526,7 @@ func (l *storeLock) held() bool { return l.f != nil }
 // watch opens the vanish episode, and bytes that are a recreation of the
 // proven state prove nothing and never replace the held dataset.
 func cleanReload(lk *storeLock) (*store, error) {
-	lk.acquire()
+	_ = lk.acquire()
 	b, err := os.ReadFile(statePath())
 	if err != nil {
 		if os.IsNotExist(err) {
