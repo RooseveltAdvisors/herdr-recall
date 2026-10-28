@@ -7,7 +7,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 
 	"fmt"
 	"github.com/RooseveltAdvisors/vimline"
@@ -17,9 +19,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -263,7 +269,23 @@ type view struct {
 	Idx  int
 }
 
+var (
+	configDirOnce sync.Once
+	configDirVal  string
+)
+
 func configDir() string {
+	configDirOnce.Do(func() { configDirVal = resolveConfigDir() })
+	return configDirVal
+}
+
+// resolveConfigDir answers with the herdr CLI directory and falls back to
+// the deterministic encoded layout herdr uses. Cross-process serialization
+// holds while every process resolves one directory: the memo plus this
+// byte-identical fallback give that on this platform, and a herdr layout
+// whose real config dir differs from the encoded fallback would still split
+// writers.
+func resolveConfigDir() string {
 	if v := os.Getenv("HERDR_PLUGIN_CONFIG_DIR"); v != "" {
 		return v
 	}
@@ -273,7 +295,6 @@ func configDir() string {
 			return d
 		}
 	}
-	// Deterministic fallback: the same encoded-id layout herdr uses.
 	enc := strings.ReplaceAll(pluginID, "R", "%52")
 	enc = strings.ReplaceAll(enc, "A", "%41")
 	return filepath.Join(os.Getenv("HOME"), ".config", "herdr", "plugins", "config", enc)
@@ -281,19 +302,534 @@ func configDir() string {
 
 func statePath() string { return filepath.Join(configDir(), "recall.json") }
 
-func loadStore() *store {
-	s := &store{Version: 1, Panes: map[string]*paneStat{}}
-	b, err := os.ReadFile(statePath())
-	if err != nil {
+// proven holds the recall.json bytes this process last loaded, adopted, or
+// saved: the content fingerprint a long-lived picker compares before
+// touching shared state, so a concurrent hook or CLI write is never
+// overwritten by a stale copy. The bytes decide, so an external write that
+// reuses a coarse modtime is still adopted. They are also the held dataset
+// without this process's unsaved changes, so every recreation check and
+// every re-materialization after a refused save reads them, never the live
+// store.
+var proven atomic.Value // []byte
+
+// loadFailed records that the last read of recall.json hit a real error, so
+// the in-memory store is unproven against disk and must not be written back
+// over whatever is there.
+var loadFailed atomic.Bool
+
+// saveTaint marks the store tainted while a refused save could not be
+// rolled back: the in-memory store may carry unsaved state that must never
+// reach disk until a clean reload proves the state again.
+var saveTaint atomic.Bool
+
+// stateVanished marks a vanish episode open: this process saw recall.json
+// gone, or saw it come back as a recreation of the proven state (see
+// recreatesState). The episode stays open until the held dataset is proven
+// on disk again, by a landed save or by adopting bytes that prove
+// continuation.
+var stateVanished atomic.Bool
+
+func stampStore(b []byte) {
+	proven.Store(b)
+}
+
+func provenBytes() []byte {
+	b, _ := proven.Load().([]byte)
+	return b
+}
+
+// provenState parses the proven bytes into a store of its own. With nothing
+// proven yet it is the fresh state loadStore starts from.
+func provenState() *store {
+	if s, err := parseStore(provenBytes()); err == nil {
 		return s
 	}
-	if err := json.Unmarshal(b, s); err != nil || s.Panes == nil {
-		s = &store{Version: 1, Panes: map[string]*paneStat{}}
+	return &store{Version: 1, Panes: map[string]*paneStat{}}
+}
+
+// pinned reports whether the pane carries state no writer may drop: a note,
+// a manual block, a reminder, or a favorite. prune keeps these.
+func (s *store) pinned(id string) bool {
+	ps := s.Panes[id]
+	return s.isFavorite(id) || ps != nil && (ps.Note != "" || ps.ManualBlocked || ps.RemindAt > 0)
+}
+
+// pruneKeep is the history window prune keeps for closed panes.
+const pruneKeep = 200
+
+// recreatesState reports whether the store on disk is a recreation of the
+// proven state instead of a writer's continuation of it. Inside a vanish
+// episode only a file that continues the proven state may replace it.
+// Outside one, a file that strips a content unit only a picker removes was
+// built again, and so was one that misses a proven pane prune could not
+// have dropped. A missing proven pane is a prune's work only when
+// the file carries a full keep window of panes ranked at or above it: prune
+// drops just the tail of a closed set it has a window to drop. A held pin
+// proves nothing for a missing pane: a writer may un-pin and prune it for
+// real. Either finding opens the episode. The proven state is the reference,
+// so this process's own unsaved changes are no evidence either way.
+func recreatesState(disk *store) bool {
+	held := provenState()
+	if stateVanished.Load() {
+		return !continues(held, disk)
+	}
+	if strips(held, disk) {
+		stateVanished.Store(true)
+		return true
+	}
+	for id, hp := range held.Panes {
+		if disk.Panes[id] != nil {
+			continue
+		}
+		ahead := 0
+		for _, dp := range disk.Panes {
+			if dp.Last >= hp.Last {
+				ahead++
+			}
+		}
+		if ahead < pruneKeep {
+			stateVanished.Store(true)
+			return true
+		}
+	}
+	return false
+}
+
+// continues reports whether disk carries every pane of held and every
+// content unit on it: each note, manual block, reminder, and favorite, each
+// tab, and each Jev weight. A file that reappears during a vanish episode
+// must prove that before it replaces the held dataset.
+func continues(held, disk *store) bool {
+	for id := range held.Panes {
+		if disk.Panes[id] == nil {
+			return false
+		}
+	}
+	for _, id := range held.Favorites {
+		if !disk.isFavorite(id) {
+			return false
+		}
+	}
+	if held.Jev != nil {
+		for k := range held.Jev.Weights {
+			if disk.Jev == nil {
+				return false
+			}
+			if _, ok := disk.Jev.Weights[k]; !ok {
+				return false
+			}
+		}
+	}
+	return !strips(held, disk)
+}
+
+// strips reports whether disk dropped a content unit of held that only a
+// picker removes: the note, manual block, or reminder of a pane disk still
+// carries, or a tab. No hook or command clears these, so a changed file that
+// lacks one does not prove it continues the held state. Favorites and Jev
+// weights are left to the episode check: the favorite and jev reset
+// commands remove them for real, any number of times in one idle gap.
+func strips(held, disk *store) bool {
+	for id, hp := range held.Panes {
+		dp := disk.Panes[id]
+		if dp != nil && (hp.Note != "" && dp.Note == "" || hp.ManualBlocked && !dp.ManualBlocked || hp.RemindAt > 0 && dp.RemindAt == 0) {
+			return true
+		}
+	}
+	for _, ht := range held.Tabs {
+		found := false
+		for _, dt := range disk.Tabs {
+			if dt.Name == ht.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshStore adopts on-disk writes made by hook or CLI processes since this
+// process last loaded or saved recall.json. It reloads only when the file
+// content changed, so rows stay frozen while no other writer ran.
+func refreshStore(st *store) *store {
+	b, err := os.ReadFile(statePath())
+	if err != nil {
+		loadFailed.Store(!os.IsNotExist(err))
+		if os.IsNotExist(err) {
+			stateVanished.Store(true)
+		}
+		return st
+	}
+	if p := provenBytes(); p != nil && bytes.Equal(b, p) {
+		loadFailed.Store(false)
+		return st
+	}
+	fresh, perr := parseStore(b)
+	if perr != nil {
+		loadFailed.Store(true)
+		return st
+	}
+	loadFailed.Store(false)
+	if recreatesState(fresh) {
+		return st
+	}
+	stateVanished.Store(false)
+	stampStore(b)
+	return fresh
+}
+
+// storeLock serializes read-modify-write cycles on recall.json across the
+// long-lived picker and the short-lived hook and CLI processes, while they
+// resolve one config directory (see resolveConfigDir). Without it the last
+// full-file write wins and erases concurrent visits, un-done threads, and
+// prune results.
+type storeLock struct{ f *os.File }
+
+func lockPath() string { return filepath.Join(configDir(), "recall.lock") }
+
+func (l *storeLock) acquire() error {
+	if l.f != nil {
+		return nil
+	}
+	if err := os.MkdirAll(configDir(), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return err
+	}
+	l.f = f
+	return nil
+}
+
+func (l *storeLock) release() {
+	if l.f == nil {
+		return
+	}
+	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
+	_ = l.f.Close()
+	l.f = nil
+}
+
+func (l *storeLock) held() bool { return l.f != nil }
+
+// cleanReload replaces the in-memory store with the proven bytes on disk and
+// clears the taint: only a reload can show the state again after a failed
+// rollback. It judges the file the way the refresh does: a file gone on its
+// watch opens the vanish episode, and bytes that are a recreation of the
+// proven state prove nothing and never replace the held dataset.
+func cleanReload(lk *storeLock) (*store, error) {
+	_ = lk.acquire()
+	b, err := os.ReadFile(statePath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			stateVanished.Store(true)
+		}
+		return nil, err
+	}
+	fresh, err := parseStore(b)
+	if err != nil {
+		return nil, err
+	}
+	if recreatesState(fresh) {
+		return nil, errors.New("recall.json rebuilt, state unproven")
+	}
+	loadFailed.Store(false)
+	saveTaint.Store(false)
+	stateVanished.Store(false)
+	stampStore(b)
+	return fresh, nil
+}
+
+// persistStore writes st under the held lock. A refused write rolls the
+// uncommitted mutation back by reloading the store from disk under the lock,
+// so nothing unsaved lingers, and reports the refusal. When that reload
+// fails the store is tainted, and nothing it holds may persist until a clean
+// reload proves the state again. The taint never blocks re-materialization:
+// inside an open vanish episode the proven state, which is the held dataset
+// without the refused mutation, is written back instead.
+func persistStore(lk *storeLock, st *store) (*store, error) {
+	write := func(s *store) error {
+		if !lk.held() {
+			return errors.New("recall.lock unavailable")
+		}
+		return saveStore(s)
+	}
+	if saveTaint.Load() {
+		fresh, err := cleanReload(lk)
+		if err == nil {
+			return fresh, errors.New("recall state reloaded from disk")
+		}
+		if !stateVanished.Load() {
+			return st, err
+		}
+		held := provenState()
+		if err := write(held); err != nil {
+			return st, err
+		}
+		saveTaint.Store(false)
+		return held, errors.New("last action not applied - repeat it")
+	}
+	err := write(st)
+	if err == nil {
+		return st, nil
+	}
+	if fresh, rerr := cleanReload(lk); rerr == nil {
+		return fresh, err
+	}
+	saveTaint.Store(true)
+	return st, err
+}
+
+// saveNote keeps every note on screen until the operator has seen it, so no
+// save and no other status write can clear a note that was never rendered.
+// Refusals outrank successes: the newest refusal shows first, coalesced with
+// every pending note of the same text and counted, and no success shows
+// while a refusal is pending. The status line clips at the pane width, so a
+// note can reach the screen as a head of itself; what the emitted frame
+// displays is what marks it seen.
+type saveNote struct {
+	recs []noteRec // notes no frame has shown yet, oldest first
+	last string    // the note a frame showed last, until a landed save clears it
+}
+
+// noteRec is one note the operator must see. ok marks a success. tok is the
+// retry token of the refused mutation a refusal reports: an opaque identity
+// stamped on it at refusal, which only a later save of the same mutation
+// carries, so a landed save with it is the operator's retry. Zero means no
+// retry context.
+type noteRec struct {
+	text string
+	tok  uint64
+	ok   bool
+}
+
+// composedNote acknowledges a landed save while a refused action is still
+// not applied.
+const composedNote = "saved; earlier action was not applied - repeat it"
+
+// viewTok is the retry token every view autosave carries, so the next
+// autosave that lands is the retry of a refused one. The tokens stamped on
+// refused in-place mutations count up from it.
+const viewTok uint64 = 1
+
+// post queues a note the operator must see, such as an overlay action
+// ignored because its list changed. Overlay frames carry no status line, so
+// the note waits for a frame that does.
+func (n *saveNote) post(text string) string {
+	n.push(noteRec{text: text})
+	return n.keep(text)
+}
+
+// push queues r as the newest note. A refusal supersedes every older
+// success, which must never show after it, and a refused autosave, which
+// reports itself only while no other refusal is pending.
+func (n *saveNote) push(r noteRec) {
+	if !r.ok {
+		n.recs = slices.DeleteFunc(n.recs, func(p noteRec) bool { return p.ok || p.tok == viewTok })
+	}
+	n.recs = append(n.recs, r)
+}
+
+// find returns the index of the note stamped with tok, or -1.
+func (n *saveNote) find(tok uint64) int {
+	return slices.IndexFunc(n.recs, func(r noteRec) bool { return tok != 0 && r.tok == tok })
+}
+
+// refuse records the refusal of a save that carried tok as the newest note.
+// A refused mutation that already has a note moves it there, and every other
+// refusal queues its own, so no refusal erases another. A refused autosave
+// queues one only while no other refusal is pending.
+func (n *saveNote) refuse(err error, tok uint64) string {
+	text := "not saved: " + err.Error()
+	i := n.find(tok)
+	if i >= 0 {
+		n.recs = slices.Delete(n.recs, i, i+1)
+	}
+	if i >= 0 || tok != viewTok || !slices.ContainsFunc(n.recs, func(r noteRec) bool { return !r.ok }) {
+		n.push(noteRec{text: text, tok: tok})
+	}
+	return n.keep(text)
+}
+
+// next returns the note the next frame shows and its text on the status
+// line: the newest refusal ahead of any success, standing for every pending
+// note of the same text and counted when that is more than one action.
+func (n *saveNote) next() (noteRec, string) {
+	top := -1
+	for i, r := range n.recs {
+		if top < 0 || !r.ok || n.recs[top].ok {
+			top = i
+		}
+	}
+	if top < 0 {
+		return noteRec{}, ""
+	}
+	t := n.recs[top]
+	count := 0
+	for _, r := range n.recs {
+		if r.ok == t.ok && r.text == t.text {
+			count++
+		}
+	}
+	switch {
+	case t.ok || count == 1:
+		return t, t.text
+	case t.text == composedNote:
+		return t, fmt.Sprintf("saved; %d earlier actions were not applied - repeat them", count)
+	}
+	return t, fmt.Sprintf("%d actions: %s", count, t.text)
+}
+
+// keep returns the note the next frame shows, so no later status write, such
+// as leaving an overlay, replaces a note the operator never saw.
+func (n *saveNote) keep(status string) string {
+	if _, text := n.next(); text != "" {
+		return text
+	}
+	return status
+}
+
+// landed returns the status to show after a save carrying tok landed. A note
+// a frame has shown clears. The refusal stamped with tok was just retried,
+// so its note retires. Every other refusal that still has a retry context
+// turns into the composed note, which acknowledges the save first and keeps
+// the refused action visible and repeatable second. A retry that leaves none
+// reads plain "saved".
+func (n *saveNote) landed(status string, tok uint64) string {
+	if status == n.last {
+		status = ""
+	}
+	n.last = ""
+	i := n.find(tok)
+	if i >= 0 {
+		n.recs = slices.Delete(n.recs, i, i+1)
+	}
+	pending := false
+	for j := range n.recs {
+		if n.recs[j].tok != 0 {
+			n.recs[j].text = composedNote
+			pending = true
+		}
+	}
+	if i >= 0 && !pending {
+		n.push(noteRec{text: "saved", ok: true})
+	}
+	return n.keep(status)
+}
+
+// stale ends the retry context of every refused in-place mutation once no
+// overlay is open. A refusal whose overlay closed cannot be retried in place
+// any more: it keeps its text, and no later save turns it into a repeat
+// instruction. The view autosave keeps its context.
+func (n *saveNote) stale() {
+	for i := range n.recs {
+		if n.recs[i].tok != viewTok {
+			n.recs[i].tok = 0
+		}
+	}
+}
+
+// rendered marks the note seen once the emitted frame displays it, together
+// with every pending note it stands for.
+func (n *saveNote) rendered(frame string) {
+	t, text := n.next()
+	if text == "" {
+		return
+	}
+	seen := strings.Contains(frame, text)
+	// Clipping cuts the note's tail, never its head, so an emitted status
+	// line is exactly a head of the note. That visible head marks it seen.
+	for _, line := range strings.Split(strings.ReplaceAll(frame, "\r\n", "\n"), "\n") {
+		if line := stripANSI(line); line != "" && strings.HasPrefix(text, line) {
+			seen = true
+		}
+	}
+	if seen {
+		n.last = text
+		n.recs = slices.DeleteFunc(n.recs, func(r noteRec) bool { return r.ok == t.ok && r.text == t.text })
+	}
+}
+
+// commitNote stores text on the pane captured when the note opened and labels
+// the status from the label captured with it.
+func commitNote(st *store, paneID, label, text string) string {
+	ps := st.ensurePane(paneID)
+	ps.Note = strings.TrimSpace(text)
+	if ps.Note != "" {
+		ps.Done = false
+		return "note saved: " + label
+	}
+	return "note cleared: " + label
+}
+
+// commitTeaching records t in the store and saves it. Only a landed save
+// appends t to the learning log, so a refused teach leaves no record behind
+// and its retry appends exactly once.
+func commitTeaching(st *store, t jevTeaching, save func() bool) bool {
+	recordJevTeaching(st, t)
+	if !save() {
+		return false
+	}
+	_ = logJevTeaching(t)
+	return true
+}
+
+// undoDone reverts the done marker behind mark and returns the mark that
+// stays armed. Only a landed save spends it: a refused save rolls the marker
+// back and keeps the mark, so the next z retries the same undo. The e handler
+// arms the mark the same way, only on a landed save.
+func undoDone(st *store, mark string, save func() bool) string {
+	ps := st.Panes[mark]
+	if ps == nil {
+		return mark
+	}
+	ps.Done = false
+	ps.DoneState = ""
+	st.addToInbox(mark)
+	if save() {
+		return ""
+	}
+	return mark
+}
+
+func loadStore() (*store, error) {
+	b, err := os.ReadFile(statePath())
+	if err != nil {
+		loadFailed.Store(!os.IsNotExist(err))
+		if os.IsNotExist(err) {
+			return &store{Version: 1, Panes: map[string]*paneStat{}}, nil
+		}
+		return nil, err
+	}
+	s, perr := parseStore(b)
+	if perr != nil {
+		loadFailed.Store(true)
+		return nil, perr
+	}
+	loadFailed.Store(false)
+	stampStore(b)
+	return s, nil
+}
+
+func parseStore(b []byte) (*store, error) {
+	s := &store{Version: 1, Panes: map[string]*paneStat{}}
+	if err := json.Unmarshal(b, s); err != nil {
+		return nil, err
+	}
+	if s.Panes == nil {
+		return nil, errors.New("recall.json has no panes")
 	}
 	if !s.TabsInit {
 		s.Tabs = defaultTabs()
 		s.TabsInit = true
-		_ = saveStore(s)
 	}
 	// Later was inserted at index 2. Shift a saved index so Recent stays Recent.
 	if s.Version < 2 {
@@ -301,7 +837,6 @@ func loadStore() *store {
 			s.ActiveTab++
 		}
 		s.Version = 2
-		_ = saveStore(s)
 	}
 	// Bump persisted 20 limits to 50 so Most used fills the popup.
 	for i := range s.Tabs {
@@ -309,7 +844,7 @@ func loadStore() *store {
 			s.Tabs[i].Limit = 50
 		}
 	}
-	return s
+	return s, nil
 }
 
 func defaultTabs() []customTab {
@@ -454,8 +989,10 @@ func openTab(st *store) int {
 }
 
 func saveStore(s *store) error {
-	dir := configDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if loadFailed.Load() {
+		return errors.New("recall.json unreadable")
+	}
+	if err := os.MkdirAll(configDir(), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
@@ -466,7 +1003,12 @@ func saveStore(s *store) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, statePath())
+	if err := os.Rename(tmp, statePath()); err != nil {
+		return err
+	}
+	stateVanished.Store(false)
+	stampStore(b)
+	return nil
 }
 
 // prune drops history for panes that are closed. A live pane keeps its triage
@@ -488,9 +1030,7 @@ func (s *store) prune(live map[string]bool, keep int) {
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ts > all[j].ts })
 	for _, e := range all[keep:] {
-		ps := s.Panes[e.id]
-		keepPin := ps != nil && (ps.Note != "" || ps.ManualBlocked || ps.RemindAt > 0)
-		if !s.isFavorite(e.id) && !keepPin {
+		if !s.pinned(e.id) {
 			delete(s.Panes, e.id)
 		}
 	}
@@ -543,7 +1083,15 @@ func recordFocus() (string, error) {
 		return "", fmt.Errorf("no focused pane in snapshot")
 	}
 	label := paneLabel(snap, id)
-	st := loadStore()
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		return "", err
+	}
+	defer lk.release()
+	st, err := loadStore()
+	if err != nil {
+		return "", err
+	}
 	now := time.Now().Unix()
 	ps := st.ensurePane(id)
 	ps.Visits++
@@ -558,7 +1106,7 @@ func recordFocus() (string, error) {
 			ps.Done = false
 		}
 	}
-	st.prune(liveSet(snap), 200)
+	st.prune(liveSet(snap), pruneKeep)
 	return id, saveStore(st)
 }
 
@@ -2034,7 +2582,6 @@ func jevApplyFeedback(st *store, text string, up bool) {
 		}
 	}
 	st.applyJevDirective(adj, rules)
-	_ = saveStore(st)
 }
 
 type jevWeight struct {
@@ -2091,6 +2638,32 @@ func filterRows(rows []row, query string) []row {
 		}
 	}
 	return out
+}
+
+// pinSel returns the index of paneID in rows, or sel clamped into rows.
+func pinSel(rows []row, sel int, paneID string) int {
+	for i, r := range rows {
+		if r.PaneID == paneID {
+			return i
+		}
+	}
+	if sel >= len(rows) {
+		sel = len(rows) - 1
+	}
+	if sel < 0 {
+		sel = 0
+	}
+	return sel
+}
+
+// anchorSel returns the index in next of the pane the cursor holds in cur.
+// With no row at sel the fallback pane pins the selection.
+func anchorSel(cur, next []row, sel int, fallback string) int {
+	id := fallback
+	if sel >= 0 && sel < len(cur) {
+		id = cur[sel].PaneID
+	}
+	return pinSel(next, sel, id)
 }
 
 func formatLabelWithNote(label, note, remind string, labelW int, selected, due bool) string {
@@ -2953,7 +3526,16 @@ func runPicker() int {
 	// for the whole session. It cannot drift and the frame is screenshot-exact.
 	tty.WriteString("\x1b[?25l")
 
-	st := loadStore()
+	st, err := loadStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+		return 1
+	}
+	// Recall state is shared with hook and CLI processes. Under the flock and
+	// the content fingerprint, a refused save rolls back under the lock and
+	// the note never claims a save that did not happen.
+	lk := &storeLock{}
+	defer lk.release()
 	searchEd := vimline.New(st.ActiveQuery)
 	sel := 0
 	status := ""
@@ -2970,6 +3552,7 @@ func runPicker() int {
 	scrollOffset := 0
 	jevTyping := false
 	jevEd := vimline.New("")
+	jevPointed := jevItem{}
 	// The snapshot is frozen when the picker opens so j/k does not reshuffle
 	// rows. Tab and sort changes reorder that frozen set on purpose.
 	frozen, err := loadSnapshot()
@@ -2985,6 +3568,7 @@ func runPicker() int {
 	creating := false
 	editing := false
 	editIdx := -1
+	editName := ""
 	formField := 0
 	confirmName := ""
 	confirmSel := 1
@@ -3002,6 +3586,7 @@ func runPicker() int {
 	remindHas := false
 	remindExisting := int64(0)
 	remindSel := 0
+	remindPointed := ""
 	lastDoneID := ""
 	remindEd := vimline.New("")
 	remindPaneID := ""
@@ -3009,6 +3594,7 @@ func runPicker() int {
 	noting := false
 	noteEd := vimline.New("")
 	notePaneID := ""
+	noteLabel := ""
 	teaching := false
 	teachField := 0
 	teachPref := 0
@@ -3022,6 +3608,8 @@ func runPicker() int {
 	newSort, newOnly, newWhere := "newest", "", ""
 	newLimit := 20
 	var allRows []row
+	var rows []row
+	pointedID := ""
 	rebuild := func() {
 		vs := views(st)
 		if tab >= len(vs) {
@@ -3032,29 +3620,99 @@ func runPicker() int {
 		}
 		allRows = rowsFor(frozen, st, vs[tab], sortMode)
 	}
-	rebuild()
-	if st.ActivePaneID != "" {
-		cur := filterByState(allRows, stateFilter)
+	visible := func() []row {
+		out := filterByState(allRows, stateFilter)
 		if q := strings.TrimSpace(searchEd.String()); q != "" {
-			cur = filterRows(cur, q)
+			out = filterRows(out, q)
 		}
-		for i, r := range cur {
-			if r.PaneID == st.ActivePaneID {
-				sel = i
-				break
-			}
-		}
+		return out
 	}
-	persistView := func(rows []row) {
+	rebase := func(cur []row) []row {
+		if cur != nil {
+			cur = visible()
+		}
+		rebuild()
+		next := visible()
+		sel = anchorSel(cur, next, sel, st.ActivePaneID)
+		return next
+	}
+	rebuild()
+	// resync adopts another writer's on-disk update before this event is
+	// handled, keeping the row the captain is pointing at selected by pane ID.
+	resync := func(cur []row) []row {
+		if lk.acquire() != nil {
+			return visible()
+		}
+		if fresh := refreshStore(st); fresh != st {
+			st = fresh
+			return rebase(cur)
+		}
+		return visible()
+	}
+	if st.ActivePaneID != "" {
+		sel = pinSel(visible(), sel, st.ActivePaneID)
+	}
+	note := saveNote{}
+	saveSt := func(tok uint64) bool {
+		next, err := persistStore(lk, st)
+		if next != st {
+			st = next
+			rows = rebase(rows)
+		}
+		if err != nil {
+			status = note.refuse(err, tok)
+			return false
+		}
+		status = note.landed(status, tok)
+		return true
+	}
+	// retry holds the token stamped on each refused mutation that an open
+	// overlay can still retry in place, by the mutation's action and target.
+	retry := map[string]uint64{}
+	minted := viewTok
+	// saveIn saves a mutation that an open overlay can retry in place, named
+	// by its action and target. A refusal stamps it with a fresh token, and
+	// only a later save of the same mutation carries that token, so each
+	// retry resolves only its own refusal.
+	saveIn := func(at string) bool {
+		tok, ok := retry[at]
+		if !ok {
+			minted++
+			tok = minted
+		}
+		if saveSt(tok) {
+			delete(retry, at)
+			return true
+		}
+		retry[at] = tok
+		return false
+	}
+	// pointed reports whether the row the drawn cursor pointed at is still
+	// the row under the cursor. A key never acts on a row the last frame did
+	// not draw: not the neighbor the clamp picked when the pointed row left
+	// the list, and not a row another writer added after the frame. With no
+	// row drawn and none now there is nothing to act on, so the key falls
+	// through to its empty-list behavior.
+	pointed := func() bool {
+		if pointedID != "" && sel >= 0 && sel < len(rows) && rows[sel].PaneID == pointedID {
+			return true
+		}
+		if pointedID == "" && len(rows) == 0 {
+			return true
+		}
+		status = note.post("list changed - review and retry")
+		return false
+	}
+	persistView := func(list []row) {
 		st.ActiveTab = tab
 		st.ActiveTabSet = true
 		st.ActiveSort = sortMode
 		st.ActiveState = stateFilter
 		st.ActiveQuery = searchEd.String()
-		if sel >= 0 && sel < len(rows) {
-			st.ActivePaneID = rows[sel].PaneID
+		if sel >= 0 && sel < len(list) {
+			st.ActivePaneID = list[sel].PaneID
 		}
-		_ = saveStore(st)
+		saveSt(viewTok)
 	}
 
 	// commitTeach records full real-time teaching context and applies feedback.
@@ -3152,27 +3810,25 @@ func runPicker() int {
 			},
 		}
 
-		_ = recordJevTeaching(st, tRecord)
-		_ = saveStore(st)
+		saved := commitTeaching(st, tRecord, func() bool {
+			return saveIn(fmt.Sprintf("teach %q %d %q %q", teachRow.PaneID, teachPref, selected, text))
+		})
 
 		taughtID := teachRow.PaneID
-		teaching = false
-		if teachPref == 0 {
-			status = "taught Jev: prefer " + teachRow.Label
-		} else if teachPref == 2 {
-			status = "taught Jev: demote " + teachRow.Label
-		} else if text != "" {
-			status = "taught Jev: " + clip(text, 28)
-		} else {
-			status = "saved teaching for " + teachRow.Label
-		}
-		rebuild()
-		for i, r := range allRows {
-			if r.PaneID == taughtID {
-				sel = i
-				break
+		if saved {
+			teaching = false
+			if teachPref == 0 {
+				status = "taught Jev: prefer " + teachRow.Label
+			} else if teachPref == 2 {
+				status = "taught Jev: demote " + teachRow.Label
+			} else if text != "" {
+				status = "taught Jev: " + clip(text, 28)
+			} else {
+				status = "saved teaching for " + teachRow.Label
 			}
 		}
+		rebuild()
+		sel = pinSel(visible(), sel, taughtID)
 	}
 
 	// commitRemind parses the typed time and applies the snooze contract.
@@ -3204,7 +3860,7 @@ func runPicker() int {
 		} else {
 			status = "no reminder set: " + remindLabel
 		}
-		_ = saveStore(st)
+		saveSt(0)
 		reminding = false
 		rebuild()
 	}
@@ -3217,7 +3873,7 @@ func runPicker() int {
 		ps.Done = false
 		st.addToInbox(remindPaneID)
 		status = "reminder cleared: " + remindLabel
-		_ = saveStore(st)
+		saveSt(0)
 		reminding = false
 		remindHas = false
 		remindExisting = 0
@@ -3308,34 +3964,24 @@ func runPicker() int {
 			st.Jev.ScoreKey[id] = v.key
 		}
 		st.Jev.Proxy = jevProxyBin()
-		_ = saveStore(st)
-		activePane := ""
-		if sel >= 0 && sel < len(allRows) {
-			activePane = allRows[sel].PaneID
-		}
-		rebuild()
-		if activePane != "" {
-			for i, r := range allRows {
-				if r.PaneID == activePane {
-					sel = i
-					break
-				}
-			}
-		}
+		saveSt(0)
+		rows = rebase(rows)
 	}
 
 	for {
-		rows := filterByState(allRows, stateFilter)
-		if q := strings.TrimSpace(searchEd.String()); q != "" {
-			rows = filterRows(rows, q)
-		}
+		rows = resync(rows)
 		if sel >= len(rows) {
 			sel = len(rows) - 1
 		}
 		if sel < 0 {
 			sel = 0
 		}
+		if !showJev && !reminding && !teaching {
+			note.stale()
+			clear(retry)
+		}
 		persistView(rows)
+		status = note.keep(status)
 		w, h := termSize(tty)
 		headerLines := 3
 		footerLines := 3
@@ -3362,6 +4008,10 @@ func runPicker() int {
 		if maxS := max(0, len(rows)-vis); scrollOffset > maxS {
 			scrollOffset = maxS
 		}
+		pointedID = ""
+		if sel < len(rows) {
+			pointedID = rows[sel].PaneID
+		}
 		var frame string
 		switch {
 		case showHelp:
@@ -3374,12 +4024,25 @@ func runPicker() int {
 			if jevTyping {
 				frame = renderJevType(w, h, viewNames(st), tab, jevEd.Text(), sortedJevWeights(st))
 			} else {
-				frame = renderJev(w, h, viewNames(st), tab, jevSelectableItems(st), jevSel, jevScrollOffset, ex, inboxTopScored(frozen, st, 5))
+				items := jevSelectableItems(st)
+				if jevSel >= len(items) {
+					jevSel = max(0, len(items)-1)
+				}
+				jevPointed = jevItem{}
+				if jevSel < len(items) {
+					jevPointed = items[jevSel]
+				}
+				frame = renderJev(w, h, viewNames(st), tab, items, jevSel, jevScrollOffset, ex, inboxTopScored(frozen, st, 5))
 			}
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
 		case reminding:
-			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindAction, remindSel, st.getSnoozePicks(), remindEd.View("at", remindField == remindTimeField(remindHas)), remindLabel, remindHas, remindExisting, time.Now())
+			picks := st.getSnoozePicks()
+			remindPointed = ""
+			if remindSel < len(picks) {
+				remindPointed = picks[remindSel]
+			}
+			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindAction, remindSel, picks, remindEd.View("at", remindField == remindTimeField(remindHas)), remindLabel, remindHas, remindExisting, time.Now())
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
 		case teaching:
@@ -3394,7 +4057,12 @@ func runPicker() int {
 			}
 			frame = renderFrame(rows, sel, scrollOffset, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}
+		// The lock is dropped before the frame write and the wait for input,
+		// so hooks never stall behind a slow terminal or an idle picker, and
+		// re-taken before the next mutation.
+		lk.release()
 		tty.WriteString(frame)
+		note.rendered(frame)
 
 		var key string
 		if ed := activeEd(); ed != nil && ed.PendingJ() {
@@ -3417,10 +4085,12 @@ func runPicker() int {
 				}
 				key = k
 			case sc := <-jevCh:
+				rows = resync(rows)
 				applyJev(sc)
 				continue
 			}
 		}
+		rows = resync(rows)
 		if key == "" {
 			continue
 		}
@@ -3430,6 +4100,9 @@ func runPicker() int {
 				fmt.Fprintf(f, "key=%q tab=%d searching=%v rows=%d sel=%d\n", key, tab, searching, len(rows), sel)
 				f.Close()
 			}
+		}
+		if key == "\x03" || key == "ctrl-c" {
+			return 0
 		}
 		half := max(1, (h-3)/2)
 		if showHelp {
@@ -3536,14 +4209,20 @@ func runPicker() int {
 			case "ctrl-u":
 				jevSel = max(0, jevSel-half)
 			case "enter":
+				var it jevItem
 				if jevSel < len(items) {
+					it = items[jevSel]
+				}
+				if it.feature != jevPointed.feature || it.ruleID != jevPointed.ruleID {
+					status = note.post("list changed - review and retry")
+				} else if jevSel < len(items) {
 					st.ensureJev()
-					if items[jevSel].ruleID != "" {
-						st.removeJevRule(items[jevSel].ruleID)
+					if it.ruleID != "" {
+						st.removeJevRule(it.ruleID)
 					} else {
-						delete(st.Jev.Weights, items[jevSel].feature)
+						delete(st.Jev.Weights, it.feature)
 					}
-					_ = saveStore(st)
+					saveIn(fmt.Sprintf("jev %q %q", it.feature, it.ruleID))
 					items = jevSelectableItems(st)
 					if jevSel >= len(items) {
 						jevSel = max(0, len(items)-1)
@@ -3564,8 +4243,9 @@ func runPicker() int {
 					txt := strings.TrimSpace(remindEd.String())
 					if _, ok, _ := duration.Parse(txt, time.Now()); ok {
 						if st.pinSnoozePick(txt) {
-							_ = saveStore(st)
-							status = "pinned quick pick: " + txt
+							if saveIn(fmt.Sprintf("pin %q", txt)) {
+								status = "pinned quick pick: " + txt
+							}
 							remindField = pickField
 							picks = st.getSnoozePicks()
 							remindSel = indexOf(picks, txt)
@@ -3644,11 +4324,14 @@ func runPicker() int {
 			case "x":
 				if remindHas && remindField == 0 {
 					clearRemind()
+				} else if remindField == pickField && (remindSel >= len(picks) || picks[remindSel] != remindPointed) {
+					status = note.post("list changed - review and retry")
 				} else if remindField == pickField && len(picks) > 1 {
 					removed := picks[remindSel]
 					st.removeSnoozePick(remindSel)
-					_ = saveStore(st)
-					status = "removed quick pick: " + removed
+					if saveIn(fmt.Sprintf("unpick %q", removed)) {
+						status = "removed quick pick: " + removed
+					}
 					picks = st.getSnoozePicks()
 					if remindSel >= len(picks) {
 						remindSel = len(picks) - 1
@@ -3762,15 +4445,8 @@ func runPicker() int {
 		if noting && !showHelp {
 			switch noteEd.Feed(key) {
 			case vimline.ActAccept:
-				ps := st.ensurePane(notePaneID)
-				ps.Note = strings.TrimSpace(noteEd.String())
-				if ps.Note != "" {
-					ps.Done = false
-					status = "note saved: " + rows[sel].Label
-				} else {
-					status = "note cleared: " + rows[sel].Label
-				}
-				_ = saveStore(st)
+				status = commitNote(st, notePaneID, noteLabel, noteEd.String())
+				saveSt(0)
 				noting = false
 				rebuild()
 			case vimline.ActOut, vimline.ActCancel:
@@ -3782,8 +4458,12 @@ func runPicker() int {
 		if searching && !showHelp {
 			switch searchEd.Feed(key) {
 			case vimline.ActAccept:
+				if !pointed() {
+					break
+				}
 				if len(rows) > 0 {
 					target := rows[sel].PaneID
+					lk.release()
 					tty.WriteString("\x1b[2J\x1b[H")
 					if err := jumpTo(target); err != nil {
 						status = "jump: " + err.Error()
@@ -3824,11 +4504,14 @@ func runPicker() int {
 			case "enter":
 				if confirmSel == 0 {
 					v := views(st)[tab]
-					if v.Kind == "custom" {
+					if v.Kind != "custom" || st.Tabs[v.Idx].Name != confirmName {
+						status = note.post("list changed - review and retry")
+					} else {
 						st.Tabs = append(st.Tabs[:v.Idx], st.Tabs[v.Idx+1:]...)
-						_ = saveStore(st)
+						if saveSt(0) {
+							status = "deleted " + confirmName
+						}
 						tab = 0
-						status = "deleted " + confirmName
 						rebuild()
 					}
 				}
@@ -3847,13 +4530,24 @@ func runPicker() int {
 					status = "Type a name, then press enter."
 					return
 				}
+				if editing && (editIdx >= len(st.Tabs) || st.Tabs[editIdx].Name != editName) {
+					status = note.post("list changed - review and retry")
+					creating = false
+					editing = false
+					return
+				}
 				ct := customTab{Name: name, Sort: canonicalSort(newSort, ""), Limit: newLimit, Only: newOnly, Where: newWhere}
-				if editing && editIdx >= 0 && editIdx < len(st.Tabs) {
+				created := false
+				if editing {
 					ct.Fixed = st.Tabs[editIdx].Fixed
 					st.Tabs[editIdx] = ct
 					status = "saved " + name
 				} else {
 					st.Tabs = append(st.Tabs, ct)
+					status = "created " + name
+					created = true
+				}
+				if saveSt(0) && created {
 					tab = 0
 					for i, v := range views(st) {
 						if v.Kind == "custom" && v.Idx == len(st.Tabs)-1 {
@@ -3861,9 +4555,7 @@ func runPicker() int {
 							break
 						}
 					}
-					status = "created " + name
 				}
-				_ = saveStore(st)
 				creating = false
 				editing = false
 				sel = 0
@@ -3962,6 +4654,7 @@ func runPicker() int {
 				creating = true
 				editing = true
 				editIdx = v.Idx
+				editName = ct.Name
 				formField = 1
 				formEd = vimline.New(ct.Name)
 				newSort, newOnly, newWhere, newLimit = canonicalSort(ct.Sort, ct.Dir), ct.Only, ct.Where, ct.Limit
@@ -4003,6 +4696,9 @@ func runPicker() int {
 				sel++
 			}
 		case key == "enter":
+			if !pointed() {
+				break
+			}
 			if dbgEnter := os.Getenv("RECALL_DEBUG"); dbgEnter != "" {
 				f, _ := os.OpenFile("/tmp/recall-enter.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 				if f != nil {
@@ -4017,6 +4713,7 @@ func runPicker() int {
 				return 0
 			}
 			target := rows[sel].PaneID
+			lk.release()
 			tty.WriteString("\x1b[2J\x1b[H")
 			if err := jumpTo(target); err != nil {
 				// keep the frame open with the reason instead of failing silently
@@ -4066,6 +4763,9 @@ func runPicker() int {
 			status = "sort: " + activeSortLabel(st, v, sortMode)
 			rebuild()
 		case key == "i" && !searching && !showHelp && !showJev:
+			if !pointed() {
+				break
+			}
 			if len(rows) > 0 && sel < len(rows) {
 				teaching = true
 				teachField = 0
@@ -4078,12 +4778,16 @@ func runPicker() int {
 				teachEd = vimline.New("")
 			}
 		case key == "e" && !searching && !showHelp:
+			if !pointed() {
+				break
+			}
 			if len(rows) == 0 {
 				break
 			}
 			r := rows[sel]
 			ps := st.ensurePane(r.PaneID)
 			now := time.Now().Unix()
+			doneID := ""
 			if views(st)[tab].Kind == "inbox" || ps.InInbox || inInbox(r, now) {
 				ps.Done = true
 				ps.DoneAt = now
@@ -4094,31 +4798,32 @@ func runPicker() int {
 				ps.DoneState = baselineState(liveStatusWord(frozen, r.PaneID))
 				st.removeFromInbox(r.PaneID)
 				// e archives. It is neutral, so it does not teach Jev.
-				lastDoneID = r.PaneID
 				status = "done: " + r.Label + " (z undo)"
+				doneID = r.PaneID
 			} else {
 				ps.Done = false
-				lastDoneID = ""
 				st.addToInbox(r.PaneID)
 				status = "moved to inbox: " + r.Label
 			}
-			_ = saveStore(st)
+			if saveSt(0) {
+				lastDoneID = doneID
+			}
 			rebuild()
 		case (key == "z" || key == "u") && !searching && !showHelp:
 			// z is undo. u stays as the vim alias.
 			if lastDoneID == "" {
 				break
 			}
-			if ps := st.Panes[lastDoneID]; ps != nil {
-				ps.Done = false
-				ps.DoneState = ""
-				st.addToInbox(lastDoneID)
-				status = "undone"
-				lastDoneID = ""
-				_ = saveStore(st)
-				rebuild()
+			if st.Panes[lastDoneID] == nil {
+				break
 			}
+			status = "undone"
+			lastDoneID = undoDone(st, lastDoneID, func() bool { return saveSt(0) })
+			rebuild()
 		case key == "h" && !searching && !showHelp:
+			if !pointed() {
+				break
+			}
 			if len(rows) == 0 {
 				break
 			}
@@ -4148,14 +4853,21 @@ func runPicker() int {
 			remindLabel = rows[sel].Label
 			status = ""
 		case key == "n" && !searching && !showHelp:
+			if !pointed() {
+				break
+			}
 			if len(rows) == 0 {
 				break
 			}
 			noting = true
 			notePaneID = rows[sel].PaneID
+			noteLabel = rows[sel].Label
 			noteEd = vimline.New(rows[sel].Note)
 			status = ""
 		case key == "!" && !searching && !showHelp:
+			if !pointed() {
+				break
+			}
 			if len(rows) == 0 {
 				break
 			}
@@ -4169,7 +4881,7 @@ func runPicker() int {
 			} else {
 				status = "cleared manual blocked: " + r.Label
 			}
-			_ = saveStore(st)
+			saveSt(0)
 			rebuild()
 		case key == "/" && !searching:
 			searching = true
@@ -4219,6 +4931,9 @@ func runPicker() int {
 			stateFilter = ""
 			searchEd = vimline.New("")
 		case key == "m" && !searching:
+			if !pointed() {
+				break
+			}
 			if len(rows) > 0 {
 				id := rows[sel].PaneID
 				if st.toggleFavorite(id) {
@@ -4226,7 +4941,7 @@ func runPicker() int {
 				} else {
 					status = "unmarked favorite: " + rows[sel].Label
 				}
-				_ = saveStore(st)
+				saveSt(0)
 				rebuild()
 			}
 		case key == "ctrl-u":
@@ -4270,7 +4985,11 @@ func openPicker() int {
 }
 
 func renderOnce() int {
-	st := loadStore()
+	st, err := loadStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+		return 1
+	}
 	snap, err := loadSnapshot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "recall: snapshot: %v\n", err)
@@ -4344,13 +5063,28 @@ func main() {
 			os.Exit(1)
 		}
 	case "stats":
-		b, _ := json.MarshalIndent(loadStore(), "", "  ")
+		st, err := loadStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(st, "", "  ")
 		fmt.Println(string(b))
 	case "favorite":
 		if len(os.Args) < 3 {
 			os.Exit(2)
 		}
-		st := loadStore()
+		lk := &storeLock{}
+		if err := lk.acquire(); err != nil {
+			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+			os.Exit(1)
+		}
+		defer lk.release()
+		st, err := loadStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+			os.Exit(1)
+		}
 		added := st.toggleFavorite(os.Args[2])
 		if err := saveStore(st); err != nil {
 			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
@@ -4362,7 +5096,11 @@ func main() {
 			fmt.Println("favorite removed")
 		}
 	case "jev":
-		st := loadStore()
+		st, err := loadStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+			os.Exit(1)
+		}
 		if len(os.Args) < 3 {
 			// list
 			for _, w := range sortedJevWeights(st) {
@@ -4375,17 +5113,36 @@ func main() {
 		}
 		switch os.Args[2] {
 		case "reset":
+			lk := &storeLock{}
+			if err := lk.acquire(); err != nil {
+				fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+				os.Exit(1)
+			}
+			defer lk.release()
+			st, err = loadStore()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+				os.Exit(1)
+			}
+			feature := ""
 			if len(os.Args) > 3 {
-				// reset one feature
-				st.ensureJev()
-				delete(st.Jev.Weights, os.Args[3])
-				fmt.Println("cleared:", os.Args[3])
+				feature = os.Args[3]
+			}
+			st.ensureJev()
+			if feature != "" {
+				delete(st.Jev.Weights, feature)
 			} else {
-				st.ensureJev()
 				st.Jev.Weights = map[string]float64{}
+			}
+			if err := saveStore(st); err != nil {
+				fmt.Fprintf(os.Stderr, "recall: %v\n", err)
+				os.Exit(1)
+			}
+			if feature != "" {
+				fmt.Println("cleared:", feature)
+			} else {
 				fmt.Println("all learnings cleared")
 			}
-			_ = saveStore(st)
 		case "scores":
 			if st.Jev != nil {
 				for id, sc := range st.Jev.Scores {

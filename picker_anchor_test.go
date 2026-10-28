@@ -1,0 +1,1119 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"maps"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+	"unsafe"
+)
+
+const (
+	unlockPTY  = 0x40045431 // Linux TIOCSPTLCK
+	ptyNumber  = 0x80045430 // Linux TIOCGPTN
+	setWinsize = 0x5414     // Linux TIOCSWINSZ
+)
+
+// pickerRun drives the real picker binary on a pty: keys go to its stdin and
+// every frame it paints comes back through the pty master.
+type pickerRun struct {
+	t      *testing.T
+	master *os.File
+	cmd    *exec.Cmd
+	out    strings.Builder
+}
+
+// openPTY opens a pty pair sized 120 by 40. The master stays non-blocking,
+// so frames can wait on read deadlines: os.File.Fd would switch it to
+// blocking mode and turn the deadlines off.
+func openPTY(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	fd, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("no /dev/ptmx: %v", err)
+	}
+	master := os.NewFile(uintptr(fd), "/dev/ptmx")
+	ioctl := func(req uintptr, arg unsafe.Pointer) syscall.Errno {
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
+		return errno
+	}
+	var unlock int32
+	if errno := ioctl(unlockPTY, unsafe.Pointer(&unlock)); errno != 0 {
+		master.Close()
+		t.Skipf("unlock pty: %v", errno)
+	}
+	var num uint32
+	if errno := ioctl(ptyNumber, unsafe.Pointer(&num)); errno != 0 {
+		master.Close()
+		t.Skipf("pty number: %v", errno)
+	}
+	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", num), os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		master.Close()
+		t.Skipf("open pty slave: %v", err)
+	}
+	ws := struct{ Row, Col, X, Y uint16 }{Row: 40, Col: 120}
+	if errno := ioctl(setWinsize, unsafe.Pointer(&ws)); errno != 0 {
+		slave.Close()
+		master.Close()
+		t.Skipf("pty size: %v", errno)
+	}
+	return master, slave
+}
+
+const pickerSnapshot = `{"result":{"snapshot":{"focused_pane_id":"w1:pA","focused_tab_id":"tA","focused_workspace_id":"w1","panes":[{"pane_id":"w1:pA","tab_id":"tA","workspace_id":"w1","agent_status":"working","terminal_title_stripped":"alpha","cwd":"/a","focused":true},{"pane_id":"w1:pB","tab_id":"tB","workspace_id":"w1","agent_status":"idle","terminal_title_stripped":"bravo","cwd":"/b","focused":false}],"tabs":[{"tab_id":"tA","workspace_id":"w1","label":"alpha","focused":true},{"tab_id":"tB","workspace_id":"w1","label":"bravo","focused":false}],"workspaces":[{"workspace_id":"w1","label":"Work","active_tab_id":"tA","focused":true}],"layouts":[]}}}`
+
+// herdrShim writes a herdr stand-in that answers every call with snapshot,
+// and returns the PATH value that puts it first.
+func herdrShim(t *testing.T, snapshot string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho '" + snapshot + "'\n"
+	if err := os.WriteFile(filepath.Join(dir, "herdr"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+func startPicker(t *testing.T, bin, cfgDir string, env ...string) *pickerRun {
+	t.Helper()
+	master, slave := openPTY(t)
+	cmd := exec.Command(bin, "picker")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.Env = probeEnv(append([]string{
+		"HERDR_PLUGIN_CONFIG_DIR=" + cfgDir,
+		"HERDR_RECALL_JEV=off",
+		"PATH=" + herdrShim(t, pickerSnapshot),
+	}, env...)...)
+	if err := cmd.Start(); err != nil {
+		slave.Close()
+		master.Close()
+		t.Fatal(err)
+	}
+	slave.Close()
+	p := &pickerRun{t: t, master: master, cmd: cmd}
+	t.Cleanup(func() {
+		_, _ = p.master.WriteString("\x03q")
+		done := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+		_ = master.Close()
+	})
+	return p
+}
+
+func (p *pickerRun) press(keys string) {
+	p.t.Helper()
+	if _, err := p.master.WriteString(keys); err != nil {
+		p.t.Fatalf("pty write: %v", err)
+	}
+}
+
+// frames returns the picker output once n full-screen frames are painted and
+// the picker has gone quiet. A frame can reach the pty master over several
+// reads, so the n-th frame is whole only once no more output follows it.
+func (p *pickerRun) frames(n int) string {
+	p.t.Helper()
+	buf := make([]byte, 4096)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		painted := strings.Count(p.out.String(), "\x1b[2J\x1b[H") >= n
+		if time.Now().After(deadline) {
+			if painted {
+				return p.out.String()
+			}
+			p.t.Fatalf("picker painted %d of %d frames; output so far:\n%s",
+				strings.Count(p.out.String(), "\x1b[2J\x1b[H"), n, stripANSI(p.out.String()))
+		}
+		wait := 500 * time.Millisecond
+		if painted {
+			wait = 100 * time.Millisecond
+		}
+		_ = p.master.SetReadDeadline(time.Now().Add(wait))
+		nread, err := p.master.Read(buf)
+		if nread > 0 {
+			p.out.Write(buf[:nread])
+			continue
+		}
+		if err != nil && !os.IsTimeout(err) {
+			p.t.Fatalf("pty read: %v", err)
+		}
+		if painted {
+			return p.out.String()
+		}
+	}
+}
+
+// TestVanishedAnchorNeverSubstitutes pins the ruled refusal: when the pane the
+// drawn cursor pointed at leaves the list between the frame and the keypress,
+// the row action is ignored with a visible note and the neighbor row is
+// untouched. Movement keys still clamp; they are not row actions.
+func TestVanishedAnchorNeverSubstitutes(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	for _, tc := range []struct {
+		name string
+		pre  []string
+		key  string
+	}{
+		{"m", nil, "m"},
+		{"e", nil, "e"},
+		{"block", nil, "!"},
+		{"note", nil, "n"},
+		{"remind", nil, "h"},
+		{"teach", nil, "i"},
+		{"enter", nil, "\r"},
+		{"search enter", []string{"/", "\x0e"}, "\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seed := mustLoad(t)
+			seed.TabsInit = true
+			seed.Panes["w1:pA"] = &paneStat{Visits: 1, Label: "one"}
+			seed.Panes["w1:pB"] = &paneStat{Visits: 2, Label: "two"}
+			seed.Favorites = []string{"w1:pA", "w1:pB"}
+			seed.ActiveTabSet = true
+			seed.ActiveTab = 0
+			seed.ActivePaneID = "w1:pB"
+			if err := saveStore(seed); err != nil {
+				t.Fatal(err)
+			}
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			for _, k := range tc.pre {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+
+			// Another terminal unfavorites w1:pB: the pointed row leaves the list.
+			ext := mustLoad(t)
+			ext.Favorites = []string{"w1:pA"}
+			writeStoreDirect(t, ext)
+			before := mustLoad(t)
+
+			p.press(tc.key)
+			frame++
+			out := p.frames(frame)
+			if !strings.Contains(out, "list changed - review and retry") {
+				t.Fatalf("key %q acted without naming the cause:\n%s", tc.key, stripANSI(out))
+			}
+
+			after := mustLoad(t)
+			if after.Panes["w1:pA"] == nil || *after.Panes["w1:pA"] != *before.Panes["w1:pA"] {
+				t.Fatalf("key %q touched the neighbor row: %+v -> %+v", tc.key, before.Panes["w1:pA"], after.Panes["w1:pA"])
+			}
+			if !slices.Equal(after.Favorites, before.Favorites) {
+				t.Fatalf("key %q changed favorites: %v -> %v", tc.key, before.Favorites, after.Favorites)
+			}
+			if !slices.Equal(after.InboxOrder, before.InboxOrder) {
+				t.Fatalf("key %q changed the inbox: %v -> %v", tc.key, before.InboxOrder, after.InboxOrder)
+			}
+		})
+	}
+}
+
+// TestAppearedRowNeverTakesKey pins the other direction of the same rule: a
+// row another writer added after the frame was drawn was never in front of
+// the operator, so no mutation key acts on it. The refusal names the cause
+// with the same note the vanish direction shows.
+func TestAppearedRowNeverTakesKey(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	for _, tc := range []struct {
+		name string
+		pre  []string
+		key  string
+	}{
+		{"m", nil, "m"},
+		{"e", nil, "e"},
+		{"block", nil, "!"},
+		{"note", nil, "n"},
+		{"remind", nil, "h"},
+		{"teach", nil, "i"},
+		{"enter", nil, "\r"},
+		{"search enter", []string{"/", "\x0e"}, "\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seed := mustLoad(t)
+			seed.TabsInit = true
+			seed.Panes["w1:pA"] = &paneStat{Visits: 1, Label: "one"}
+			seed.Panes["w1:pB"] = &paneStat{Visits: 2, Label: "two"}
+			seed.Favorites = []string{}
+			seed.ActiveTabSet = true
+			seed.ActiveTab = 0
+			if err := saveStore(seed); err != nil {
+				t.Fatal(err)
+			}
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			for _, k := range tc.pre {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+
+			// Another terminal favorites w1:pB: a row appears after the frame.
+			ext := mustLoad(t)
+			ext.Favorites = []string{"w1:pB"}
+			writeStoreDirect(t, ext)
+
+			p.press(tc.key)
+			frame++
+			out := p.frames(frame)
+			if !strings.Contains(out, "list changed - review and retry") {
+				t.Fatalf("key %q acted without naming the cause:\n%s", tc.key, stripANSI(out))
+			}
+
+			after := mustLoad(t)
+			if !slices.Equal(after.Favorites, []string{"w1:pB"}) {
+				t.Fatalf("key %q changed favorites: %v", tc.key, after.Favorites)
+			}
+			if *after.Panes["w1:pA"] != (paneStat{Visits: 1, Label: "one"}) {
+				t.Fatalf("key %q touched the neighbor row: %+v", tc.key, after.Panes["w1:pA"])
+			}
+			if *after.Panes["w1:pB"] != (paneStat{Visits: 2, Label: "two"}) {
+				t.Fatalf("key %q mutated the appeared row: %+v", tc.key, after.Panes["w1:pB"])
+			}
+		})
+	}
+}
+
+// TestJumpLeavesHookWritersUnstalled pins the flock-free jump: the picker
+// drops recall.lock before it asks herdr to focus the pane, so a focus RPC
+// that never answers leaves the focus hooks free to record visits.
+func TestJumpLeavesHookWritersUnstalled(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	for _, tc := range []struct {
+		name string
+		pre  []string
+	}{
+		{"enter", nil},
+		{"search enter", []string{"/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seed := mustLoad(t)
+			seed.TabsInit = true
+			seed.Panes["w1:pA"] = &paneStat{Visits: 1, Label: "one"}
+			seed.Panes["w1:pB"] = &paneStat{Visits: 2, Label: "two"}
+			seed.Favorites = []string{"w1:pA", "w1:pB"}
+			seed.ActiveTabSet = true
+			seed.ActiveTab = 0
+			seed.ActivePaneID = "w1:pB"
+			if err := saveStore(seed); err != nil {
+				t.Fatal(err)
+			}
+
+			// herdr's socket takes the focus request and never answers.
+			sock := filepath.Join(t.TempDir(), "herdr.sock")
+			ln, err := net.Listen("unix", sock)
+			if err != nil {
+				t.Skipf("unix socket: %v", err)
+			}
+			defer ln.Close()
+			rpc := make(chan net.Conn, 1)
+			go func() {
+				if c, err := ln.Accept(); err == nil {
+					rpc <- c
+				}
+			}()
+
+			p := startPicker(t, bin, cfg, "HERDR_SOCKET_PATH="+sock)
+			frame := 1
+			p.frames(frame)
+			for _, k := range tc.pre {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+			p.press("\r")
+			var conn net.Conn
+			select {
+			case conn = <-rpc:
+			case <-time.After(20 * time.Second):
+				t.Fatalf("the picker never sent the focus request:\n%s", stripANSI(p.out.String()))
+			}
+			defer conn.Close()
+			req, err := bufio.NewReader(conn).ReadString('\n')
+			if err != nil || !strings.Contains(req, "pane.focus") {
+				t.Fatalf("focus request = %q, %v", req, err)
+			}
+
+			// A focus hook fires while the jump waits on herdr.
+			hook := exec.Command(bin, "record")
+			hook.Env = probeEnv("HERDR_PLUGIN_CONFIG_DIR="+cfg, "PATH="+herdrShim(t, pickerSnapshot))
+			var out strings.Builder
+			hook.Stdout, hook.Stderr = &out, &out
+			if err := hook.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- hook.Wait() }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("the focus hook failed: %v: %s", err, out.String())
+				}
+			case <-time.After(10 * time.Second):
+				_ = hook.Process.Kill()
+				<-done
+				t.Fatal("the focus hook stalled behind the wedged jump")
+			}
+			if got := mustLoad(t).Panes["w1:pA"].Visits; got != 2 {
+				t.Fatalf("the hook visit did not land: visits=%d", got)
+			}
+		})
+	}
+}
+
+// TestPickerPaintsAtPtySize pins the pty harness: openPTY sizes the slave to
+// 120 by 40, so the picker paints rules 119 columns wide and caps a long
+// list at 39 lines, not the 62 by 12 fallback termSize returns when the pty
+// carries no size.
+func TestPickerPaintsAtPtySize(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	var panes []string
+	for i := range 60 {
+		id := fmt.Sprintf("w1:p%d", i)
+		seed.Favorites = append(seed.Favorites, id)
+		panes = append(panes, fmt.Sprintf(`{"pane_id":%q,"tab_id":"tA","workspace_id":"w1","agent_status":"idle","terminal_title_stripped":"pane %d","cwd":"/p"}`, id, i))
+	}
+	seed.ActiveTabSet = true
+	seed.ActiveTab = 0
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := `{"result":{"snapshot":{"focused_pane_id":"w1:p0","focused_tab_id":"tA","focused_workspace_id":"w1","panes":[` + strings.Join(panes, ",") + `],"tabs":[{"tab_id":"tA","workspace_id":"w1","label":"alpha","focused":true}],"workspaces":[{"workspace_id":"w1","label":"Work","active_tab_id":"tA","focused":true}],"layouts":[]}}}`
+
+	p := startPicker(t, bin, cfg, "PATH="+herdrShim(t, snapshot))
+	_, frame, _ := strings.Cut(p.frames(1), "\x1b[2J\x1b[H")
+	lines := strings.Split(stripANSI(frame), "\r\n")
+	if len(lines) != 39 || !slices.Contains(lines, strings.Repeat("─", 119)) {
+		t.Fatalf("the picker must paint at 120 by 40: a 119-column rule and 39 lines, got %d lines:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+}
+
+// TestEnterOnEmptyListStillCloses pins the base behavior the row guard must
+// not swallow: with no row in the last frame and none under the cursor now,
+// enter still closes the picker.
+func TestEnterOnEmptyListStillCloses(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seed := mustLoad(t)
+	seed.TabsInit = true
+	seed.Panes["w1:pA"] = &paneStat{Visits: 1, Label: "one"}
+	seed.Favorites = []string{}
+	seed.ActiveTabSet = true
+	seed.ActiveTab = 0
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	p := startPicker(t, bin, cfg)
+	p.frames(1)
+	p.press("\r")
+	done := make(chan struct{})
+	go func() {
+		_ = p.cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("enter on an empty list must close the picker")
+	}
+}
+
+// seedPicker saves panes w1:pA and w1:pB with the given favorites, so the
+// picker opens on the Favorites view with the cursor on w1:pA. edit adjusts
+// the store before the save.
+func seedPicker(t *testing.T, favorites []string, edit func(s *store)) {
+	t.Helper()
+	seed := mustLoad(t)
+	seed.Version = 2
+	seed.TabsInit = true
+	seed.Panes["w1:pA"] = &paneStat{Visits: 1, Label: "one"}
+	seed.Panes["w1:pB"] = &paneStat{Visits: 2, Label: "two"}
+	seed.Favorites = favorites
+	seed.ActiveTabSet = true
+	seed.ActiveTab = 0
+	seed.ActivePaneID = "w1:pA"
+	if edit != nil {
+		edit(seed)
+	}
+	if err := saveStore(seed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNoteCommitLabelsCapturedPane pins matrix row T5 through the real
+// picker: the note commit names and writes the pane captured when n was
+// pressed, even when a resync before the commit empties the list or puts
+// another row under the cursor.
+func TestNoteCommitLabelsCapturedPane(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	for _, tc := range []struct {
+		name      string
+		favorites []string
+		after     []string
+	}{
+		{"list emptied", []string{"w1:pA"}, []string{}},
+		{"neighbor under the cursor", []string{"w1:pA", "w1:pB"}, []string{"w1:pB"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seedPicker(t, tc.favorites, nil)
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			p.press("n")
+			frame++
+			p.frames(frame)
+
+			// Another terminal un-favorites the pane while its note is open.
+			ext := readStoreDirect(t)
+			ext.Favorites = tc.after
+			writeStoreDirect(t, ext)
+
+			p.press("hello")
+			frame += len("hello")
+			p.frames(frame)
+			p.press("\r")
+			frame++
+			if out := p.frames(frame); !strings.Contains(out, "note saved: alpha") {
+				t.Fatalf("the commit must name the pane captured at n:\n%s", stripANSI(out))
+			}
+			final := mustLoad(t)
+			if final.Panes["w1:pA"].Note != "hello" {
+				t.Fatalf("the note must land on the captured pane: %+v", final.Panes["w1:pA"])
+			}
+			if final.Panes["w1:pB"].Note != "" {
+				t.Fatalf("the note landed on the row under the cursor: %+v", final.Panes["w1:pB"])
+			}
+		})
+	}
+}
+
+// lastFrame returns the stripped lines of the last frame in the output.
+func lastFrame(out string) []string {
+	frame := out[strings.LastIndex(out, "\x1b[2J\x1b[H")+len("\x1b[2J\x1b[H"):]
+	return strings.Split(stripANSI(frame), "\r\n")
+}
+
+// teachings returns the intent of every teaching recall.json holds.
+func teachings(t *testing.T) []string {
+	t.Helper()
+	var intents []string
+	if s := mustLoad(t); s.Jev != nil {
+		for _, tr := range s.Jev.Teachings {
+			intents = append(intents, tr.Intent)
+		}
+	}
+	return intents
+}
+
+// TestRetryInPlaceResolvesRefusal pins the retry token: an action refused
+// inside an overlay stays pending there, which draws no status line, and its
+// retry in place carries the same token. When the retry lands, the next frame
+// that carries a status line reads plain "saved", never the refusal or the
+// repeat instruction, and the action is on disk.
+func TestRetryInPlaceResolvesRefusal(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	for _, tc := range []struct {
+		name    string
+		open    string
+		act     string
+		leave   []string
+		applied func(t *testing.T) bool
+	}{
+		{"teach", "i", "\r", nil,
+			func(t *testing.T) bool { return len(teachings(t)) == 1 }},
+		{"jev delete", "J", "\r", []string{"q"},
+			func(t *testing.T) bool { _, ok := mustLoad(t).Jev.Weights["tok:alpha"]; return !ok }},
+		{"remind quick pick removal", "h", "x", []string{"q"},
+			func(t *testing.T) bool { return !slices.Contains(mustLoad(t).getSnoozePicks(), "20min") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seedPicker(t, []string{"w1:pA"}, func(s *store) {
+				s.ensureJev()
+				s.Jev.Weights = map[string]float64{"tok:alpha": 0.9}
+			})
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			p.press(tc.open)
+			frame++
+			p.frames(frame)
+
+			// The action's save fails, so the action stays pending in place.
+			if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			p.press(tc.act)
+			frame++
+			p.frames(frame)
+			if tc.applied(t) {
+				t.Fatal("the refused action reached disk")
+			}
+			if err := os.Remove(statePath() + ".tmp"); err != nil {
+				t.Fatal(err)
+			}
+
+			p.press(tc.act)
+			frame++
+			for _, k := range tc.leave {
+				p.press(k)
+				frame++
+			}
+			out := p.frames(frame)
+			if !tc.applied(t) {
+				t.Fatal("the retry in place must land")
+			}
+			if strings.Contains(out, "not saved: ") || strings.Contains(out, "earlier action") {
+				t.Fatalf("a landed retry must not show the refusal or the repeat instruction:\n%s", stripANSI(out))
+			}
+			if lines := lastFrame(out); !slices.Contains(lines, "saved") {
+				t.Fatalf("the next status line must read plain saved:\n%s", strings.Join(lines, "\n"))
+			}
+		})
+	}
+}
+
+// TestDifferentSaveComposesRefusal pins the other branch of the retry token:
+// while a refused teach is still pending in its dialog, a save carrying a
+// different mutation lands first. The composed note shows on the next frame
+// that carries a status line, the teach is not on disk, and the note clears on
+// the next landed save.
+func TestDifferentSaveComposesRefusal(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	const composed = "saved; earlier action was not applied - repeat it"
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seedPicker(t, []string{"w1:pA"}, nil)
+
+	p := startPicker(t, bin, cfg)
+	frame := 1
+	p.frames(frame)
+	p.press("i")
+	frame++
+	p.frames(frame)
+
+	if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.press("\r")
+	frame++
+	p.frames(frame)
+	if err := os.Remove(statePath() + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The view save after the next key lands while the teach is still pending.
+	p.press("l")
+	frame++
+	p.frames(frame)
+	p.press("\x1b")
+	frame++
+	out := p.frames(frame)
+	if lines := lastFrame(out); !slices.Contains(lines, composed) {
+		t.Fatalf("the next status line must show the composed note:\n%s", strings.Join(lines, "\n"))
+	}
+	if n := len(teachings(t)); n != 0 {
+		t.Fatalf("the refused teach reached disk: %d teachings", n)
+	}
+
+	p.press("j")
+	frame++
+	out = p.frames(frame)
+	if lines := lastFrame(out); slices.Contains(lines, composed) {
+		t.Fatalf("the composed note must clear on the next landed save:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestStaleRefusalNeverOrdersRetry pins the session boundary of the retry
+// token: a refused teach whose dialog closes before any other save lands keeps
+// the plain refusal text, even though the first save after the close lands.
+// The teach retried in a new dialog lands, and no frame ever tells the
+// operator to repeat it.
+func TestStaleRefusalNeverOrdersRetry(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seedPicker(t, []string{"w1:pA"}, nil)
+
+	p := startPicker(t, bin, cfg)
+	frame := 1
+	p.frames(frame)
+	p.press("i")
+	frame++
+	p.frames(frame)
+
+	// The teach is refused. The failure clears, and the dialog closes before
+	// any other save lands.
+	if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.press("\r")
+	frame++
+	p.frames(frame)
+	if err := os.Remove(statePath() + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	p.press("\x1b")
+	frame++
+	if lines := lastFrame(p.frames(frame)); !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "not saved: ") }) {
+		t.Fatalf("the closed dialog must leave the plain refusal on the status line:\n%s", strings.Join(lines, "\n"))
+	}
+
+	// The operator retries in a new dialog, and it lands.
+	for _, k := range []string{"i", "\r"} {
+		p.press(k)
+		frame++
+	}
+	out := p.frames(frame)
+	if n := len(teachings(t)); n != 1 {
+		t.Fatalf("the retried teach must land: %d teachings", n)
+	}
+	if strings.Contains(out, "repeat it") {
+		t.Fatalf("a stale refusal must never order a retry:\n%s", stripANSI(out))
+	}
+}
+
+// TestRetryTokenStaysOnRefusedMutation pins the retry token on the refused
+// mutation, not on the overlay that hosts it. When a different mutation lands
+// in the same overlay after a refusal, the next frame that carries a status
+// line shows the composed note, the refused mutation is still not on disk,
+// and repeating it lands. When the refused mutation itself is retried after
+// the other save, even with its dialog changed and changed back, the note
+// reads plain "saved". With two refusals pending in one overlay, each retry
+// resolves only its own: the composed note shows while the other is still
+// not on disk, and plain "saved" once both retries landed, in either order.
+// When a different save lands while both are pending, one note counts them.
+func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	const composed = "saved; earlier action was not applied - repeat it"
+	const counted = "saved; 2 earlier actions were not applied - repeat them"
+	taught := func(want ...string) func(t *testing.T) bool {
+		return func(t *testing.T) bool { return slices.Equal(teachings(t), want) }
+	}
+	weights := func(want ...string) func(t *testing.T) bool {
+		return func(t *testing.T) bool {
+			return slices.Equal(slices.Sorted(maps.Keys(mustLoad(t).Jev.Weights)), want)
+		}
+	}
+	picks := func(want ...string) func(t *testing.T) bool {
+		return func(t *testing.T) bool { return slices.Equal(mustLoad(t).getSnoozePicks(), want) }
+	}
+	for _, tc := range []struct {
+		name   string
+		open   string
+		act    string
+		second []string // refuses a second mutation in the same overlay
+		keys   []string
+		note   string
+		disk   func(t *testing.T) bool
+		repeat func(t *testing.T) bool
+	}{
+		{"teach then a different teach", "i", "\r", nil, []string{"l", "\r"}, composed,
+			taught("neutral"), taught("neutral", "prefer")},
+		{"teach retried after the view save", "i", "\r", nil, []string{"l", "h", "\r"}, "saved",
+			taught("prefer"), nil},
+		{"jev delete then a different delete", "J", "\r", nil, []string{"j", "\r", "q"}, composed,
+			weights("tok:alpha"), weights()},
+		{"jev delete retried after a different delete", "J", "\r", nil, []string{"j", "\r", "\r", "q"}, "saved",
+			weights(), nil},
+		{"quick pick removal then a different removal", "h", "x", nil, []string{"l", "x", "q"}, composed,
+			picks("20min", "3h", "tomorrow", "clear"), picks("3h", "tomorrow", "clear")},
+		{"quick pick removal retried after a different removal", "h", "x", nil, []string{"l", "x", "h", "x", "q"}, "saved",
+			picks("3h", "tomorrow", "clear"), nil},
+		{"two refused jev deletes, the second retried", "J", "\r", []string{"j", "\r"}, []string{"\r", "q"}, composed,
+			weights("tok:alpha"), weights()},
+		{"two refused jev deletes, the second then the first retried", "J", "\r", []string{"j", "\r"}, []string{"\r", "\r", "q"}, "saved",
+			weights(), nil},
+		{"two refused jev deletes, the first retried", "J", "\r", []string{"j", "\r"}, []string{"k", "\r", "q"}, composed,
+			weights("tok:bravo"), weights()},
+		{"two refused jev deletes, the first then the second retried", "J", "\r", []string{"j", "\r"}, []string{"k", "\r", "\r", "q"}, "saved",
+			weights(), nil},
+		{"two refused quick pick removals, the second retried", "h", "x", []string{"l", "x"}, []string{"x", "q"}, composed,
+			picks("20min", "3h", "tomorrow", "clear"), picks("3h", "tomorrow", "clear")},
+		{"two refused quick pick removals, the second then the first retried", "h", "x", []string{"l", "x"}, []string{"x", "h", "x", "q"}, "saved",
+			picks("3h", "tomorrow", "clear"), nil},
+		{"two refused quick pick removals, the first retried", "h", "x", []string{"l", "x"}, []string{"h", "x", "q"}, composed,
+			picks("1h", "3h", "tomorrow", "clear"), picks("3h", "tomorrow", "clear")},
+		{"two refused quick pick removals, the first then the second retried", "h", "x", []string{"l", "x"}, []string{"h", "x", "x", "q"}, "saved",
+			picks("3h", "tomorrow", "clear"), nil},
+		{"two refused jev deletes, then a different save", "J", "\r", []string{"j", "\r"}, []string{"k", "q"}, counted,
+			weights("tok:alpha", "tok:bravo"), weights("tok:bravo")},
+		{"two refused quick pick removals, then a different save", "h", "x", []string{"l", "x"}, []string{"h", "q"}, counted,
+			picks("20min", "1h", "3h", "tomorrow", "clear"), picks("1h", "3h", "tomorrow", "clear")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempConfig(t)
+			cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+			seedPicker(t, []string{"w1:pA"}, func(s *store) {
+				s.ensureJev()
+				s.Jev.Weights = map[string]float64{"tok:alpha": 0.9, "tok:bravo": 0.5}
+			})
+
+			p := startPicker(t, bin, cfg)
+			frame := 1
+			p.frames(frame)
+			p.press(tc.open)
+			frame++
+			p.frames(frame)
+
+			// Saves fail while the refused actions are taken, so they stay
+			// pending in place.
+			if err := os.Mkdir(statePath()+".tmp", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range append([]string{tc.act}, tc.second...) {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+			if err := os.Remove(statePath() + ".tmp"); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, k := range tc.keys {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+			if lines := lastFrame(p.frames(frame)); !slices.Contains(lines, tc.note) {
+				t.Fatalf("the next status line must read %q:\n%s", tc.note, strings.Join(lines, "\n"))
+			}
+			if !tc.disk(t) {
+				t.Fatalf("wrong state on disk: %+v %v %v", mustLoad(t).Jev, teachings(t), mustLoad(t).getSnoozePicks())
+			}
+			if tc.repeat == nil {
+				return
+			}
+
+			for _, k := range []string{tc.open, tc.act} {
+				p.press(k)
+				frame++
+				p.frames(frame)
+			}
+			if !tc.repeat(t) {
+				t.Fatalf("the refused action must stay repeatable: %+v %v %v", mustLoad(t).Jev, teachings(t), mustLoad(t).getSnoozePicks())
+			}
+		})
+	}
+}
+
+// TestNewerRefusalOutranksOlderSaved pins ruling 033 on the close-panel
+// sequence. A refused Jev delete is retried and lands, so "saved" waits for
+// a status line, and then a second delete in the same panel is refused. The
+// first frame that carries a status line reads the newer refusal, the next
+// action's own status follows it, and no frame ever shows "saved".
+func TestNewerRefusalOutranksOlderSaved(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seedPicker(t, []string{"w1:pA"}, func(s *store) {
+		s.ensureJev()
+		s.Jev.Weights = map[string]float64{"tok:alpha": 0.9, "tok:bravo": 0.5}
+	})
+
+	p := startPicker(t, bin, cfg)
+	frame := 1
+	p.frames(frame)
+	press := func(keys ...string) string {
+		for _, k := range keys {
+			p.press(k)
+			frame++
+			p.frames(frame)
+		}
+		return p.frames(frame)
+	}
+	block := func(on bool) {
+		var err error
+		if on {
+			err = os.Mkdir(statePath()+".tmp", 0o700)
+		} else {
+			err = os.Remove(statePath() + ".tmp")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	press("J")
+	block(true)
+	press("\r") // the delete of alpha is refused
+	block(false)
+	press("\r") // its retry lands, so "saved" waits for a status line
+	block(true)
+	press("\r") // the delete of bravo is refused
+	block(false)
+	if lines := lastFrame(press("q")); !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "not saved: ") }) {
+		t.Fatalf("the first status line must read the newer refusal:\n%s", strings.Join(lines, "\n"))
+	}
+	out := press("s")
+	if lines := lastFrame(out); !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "sort: ") }) {
+		t.Fatalf("the next action must read its own status:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, f := range strings.Split(out, "\x1b[2J\x1b[H") {
+		if slices.Contains(strings.Split(stripANSI(f), "\r\n"), "saved") {
+			t.Fatalf("no frame may show saved over the refusal:\n%s", stripANSI(f))
+		}
+	}
+	if w := slices.Sorted(maps.Keys(mustLoad(t).Jev.Weights)); !slices.Equal(w, []string{"tok:bravo"}) {
+		t.Fatalf("only the retried delete may reach disk: %v", w)
+	}
+}
+
+// TestOverlayActionsActOnDrawnItem pins the last-frame target rule on the
+// overlay lists: a Jev delete, a quick pick removal, a tab delete, and a tab
+// revise act only on the item the last frame showed. When another writer
+// shifts that list under the cursor, the action is ignored, the list stays as
+// the writer left it, and the unified note shows on the next frame that
+// carries a status line.
+func TestOverlayActionsActOnDrawnItem(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	withTabs := func(s *store) {
+		s.Tabs = []customTab{{Name: "Work", Sort: "last", Limit: 50}, {Name: "Play", Sort: "last", Limit: 50}}
+		s.ActiveTab = 3
+	}
+	insertTab := func(s *store) {
+		s.Tabs = append([]customTab{{Name: "Alpha", Sort: "last", Limit: 50}}, s.Tabs...)
+	}
+	tabNamed := func(s *store, name string) *customTab {
+		for i := range s.Tabs {
+			if s.Tabs[i].Name == name {
+				return &s.Tabs[i]
+			}
+		}
+		return nil
+	}
+	for _, tc := range []struct {
+		name  string
+		seed  func(s *store)
+		reach []string
+		shift func(s *store)
+		act   []string
+		acted func(s *store) bool
+		list  func(s *store) any
+	}{
+		{"jev delete",
+			func(s *store) {
+				s.ensureJev()
+				s.Jev.Weights = map[string]float64{"tok:alpha": 0.9, "tok:bravo": 0.5, "tok:charlie": 0.3}
+			},
+			[]string{"J", "j"},
+			func(s *store) { delete(s.Jev.Weights, "tok:alpha") },
+			[]string{"\r", "q"},
+			func(s *store) bool {
+				_, bravo := s.Jev.Weights["tok:bravo"]
+				return !bravo && len(s.Jev.Weights) == 2
+			},
+			func(s *store) any { return s.Jev.Weights }},
+		{"quick pick removal",
+			nil,
+			[]string{"h", "l"},
+			func(s *store) { s.SnoozePicks = []string{"1h", "3h", "tomorrow", "clear"} },
+			[]string{"x", "q"},
+			func(s *store) bool {
+				return slices.Equal(s.getSnoozePicks(), []string{"20min", "3h", "tomorrow", "clear"})
+			},
+			func(s *store) any { return s.getSnoozePicks() }},
+		{"tab delete",
+			withTabs,
+			[]string{"t", "x", "h"},
+			insertTab,
+			[]string{"\r"},
+			func(s *store) bool { return tabNamed(s, "Work") == nil && tabNamed(s, "Play") != nil },
+			func(s *store) any { return s.Tabs }},
+		{"tab revise",
+			withTabs,
+			[]string{"t", "r", "l"},
+			insertTab,
+			[]string{"\r"},
+			func(s *store) bool { w := tabNamed(s, "Work"); return w != nil && w.Sort != "last" },
+			func(s *store) any { return s.Tabs }},
+	} {
+		for _, shifted := range []bool{false, true} {
+			name := tc.name + "/item unchanged"
+			if shifted {
+				name = tc.name + "/item shifted away"
+			}
+			t.Run(name, func(t *testing.T) {
+				useTempConfig(t)
+				cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+				seedPicker(t, []string{"w1:pA"}, tc.seed)
+
+				p := startPicker(t, bin, cfg)
+				frame := 1
+				p.frames(frame)
+				for _, k := range tc.reach {
+					p.press(k)
+					frame++
+					p.frames(frame)
+				}
+				var want any
+				if shifted {
+					ext := readStoreDirect(t)
+					tc.shift(ext)
+					writeStoreDirect(t, ext)
+					want = tc.list(ext)
+				}
+				for _, k := range tc.act {
+					p.press(k)
+					frame++
+				}
+				out := p.frames(frame)
+				final := mustLoad(t)
+				noted := strings.Contains(out, "list changed - review and retry")
+				if !shifted {
+					if noted || !tc.acted(final) {
+						t.Fatalf("the action must land on the drawn item: noted=%v %+v\n%s", noted, tc.list(final), stripANSI(out))
+					}
+					return
+				}
+				if !noted {
+					t.Fatalf("the ignored action must show the note:\n%s", stripANSI(out))
+				}
+				if got := tc.list(final); !reflect.DeepEqual(got, want) {
+					t.Fatalf("the action touched the shifted list: got %+v, want %+v", got, want)
+				}
+			})
+		}
+	}
+}
+
+// TestBrowseRefusalRendersAfterOverlayNote pins one tracking path for the
+// unified note: after an overlay guard note has shown and cleared, a browse
+// refusal with the same text still renders instead of being cleared as the
+// old note.
+func TestBrowseRefusalRendersAfterOverlayNote(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "herdr-recall")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	useTempConfig(t)
+	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
+	seedPicker(t, []string{"w1:pA", "w1:pB"}, func(s *store) {
+		s.ensureJev()
+		s.Jev.Weights = map[string]float64{"tok:alpha": 0.9, "tok:bravo": 0.5, "tok:charlie": 0.3}
+	})
+	const changed = "list changed - review and retry"
+
+	p := startPicker(t, bin, cfg)
+	frame := 1
+	p.frames(frame)
+	for _, k := range []string{"J", "j"} {
+		p.press(k)
+		frame++
+		p.frames(frame)
+	}
+
+	// The Jev list shifts under the cursor, so enter is ignored with the note,
+	// and the browse frame shows it once the panel closes.
+	ext := readStoreDirect(t)
+	delete(ext.Jev.Weights, "tok:alpha")
+	writeStoreDirect(t, ext)
+	for _, k := range []string{"\r", "q"} {
+		p.press(k)
+		frame++
+	}
+	out := p.frames(frame)
+	if !strings.Contains(out, changed) {
+		t.Fatalf("the overlay note must show once the panel closes:\n%s", stripANSI(out))
+	}
+	shown := len(out)
+
+	// The next key's save clears the shown note.
+	p.press("j")
+	frame++
+	out = p.frames(frame)
+	if strings.Contains(out[shown:], changed) {
+		t.Fatalf("the shown note must clear after the next save:\n%s", stripANSI(out[shown:]))
+	}
+	cleared := len(out)
+
+	// Another terminal un-favorites the row under the cursor, so m is refused.
+	ext = readStoreDirect(t)
+	ext.Favorites = []string{"w1:pA"}
+	writeStoreDirect(t, ext)
+	p.press("m")
+	frame++
+	out = p.frames(frame)
+	if !strings.Contains(out[cleared:], changed) {
+		t.Fatalf("the browse refusal must render its note:\n%s", stripANSI(out[cleared:]))
+	}
+	if final := mustLoad(t); !slices.Equal(final.Favorites, []string{"w1:pA"}) {
+		t.Fatalf("m acted on a row the last frame did not show: %v", final.Favorites)
+	}
+}
