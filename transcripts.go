@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RooseveltAdvisors/vimline"
 )
@@ -329,7 +330,7 @@ func searchTranscripts(query, role, order string) ([]txHit, error) {
 			if !ok {
 				continue
 			}
-			h.Snippet = strings.Join(strings.Fields(body), " ")
+			h.Snippet = matchWindow(body, query, 180)
 			kept = append(kept, h)
 			if len(kept) == 40 {
 				break
@@ -338,6 +339,9 @@ func searchTranscripts(query, role, order string) ([]txHit, error) {
 		hits = kept
 	} else if len(hits) > 40 {
 		hits = hits[:40]
+	}
+	for i := range hits {
+		hits[i].Snippet = matchWindow(hits[i].Snippet, query, 180)
 	}
 	hits = sortTxHits(hits, order, time.Now())
 	if len(hits) > 40 {
@@ -492,7 +496,7 @@ for raw in sys.stdin:
             sender = req.get("sender") or ""
             sql = """
             SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
-                   substr(ifnull(m.text_content,''), 1, 800), ifnull(m.timestamp,''), bm25(messages_fts)
+                   substr(ifnull(m.text_content,''), 1, 1600), ifnull(m.timestamp,''), bm25(messages_fts)
             FROM messages_fts
             JOIN messages m ON m.id = messages_fts.rowid
             JOIN sessions s ON s.id = m.session_id
@@ -587,28 +591,213 @@ func mustJSON(v any) string {
 func transcriptRows(hits []txHit) []row {
 	out := make([]row, 0, len(hits))
 	for _, h := range hits {
-		label := h.Snippet
+		label := txTitle(h, txLive{})
 		if label == "" {
-			label = h.Summary
-		}
-		if label == "" {
-			label = h.SessionID
-		}
-		note := h.Provider
-		if h.When != "" {
-			if note != "" {
-				note += " · "
-			}
-			note += h.When
+			label = h.Snippet
 		}
 		out = append(out, row{
 			PaneID: h.SessionID,
 			Label:  label,
-			Note:   note,
+			Note:   h.Snippet,
+			Agent:  h.Provider,
 			CWD:    h.CWD,
 		})
 	}
 	return out
+}
+
+type txLive struct {
+	Tab   string
+	Pane  string
+	Agent string
+}
+
+func txLiveMeta(s *snapshot, sessionID string) txLive {
+	if s == nil || sessionID == "" {
+		return txLive{}
+	}
+	for _, p := range s.Panes {
+		if !sessionMatchesPane(sessionID, p.AgentSession.Value) {
+			continue
+		}
+		tab := ""
+		for _, t := range s.Tabs {
+			if t.TabID == p.TabID {
+				tab = strings.TrimSpace(t.Label)
+				break
+			}
+		}
+		pane := strings.TrimSpace(p.TerminalTitleStrip)
+		if pane == "" || strings.Contains(pane, "/") || len([]rune(pane)) > 28 {
+			pane = p.PaneID
+		}
+		return txLive{Tab: tab, Pane: pane, Agent: p.Agent}
+	}
+	return txLive{}
+}
+
+func agentLabel(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "pi":
+		return "Pi"
+	case "claude":
+		return "Claude"
+	case "codex":
+		return "Codex"
+	case "antigravity", "agy":
+		return "Antigravity"
+	default:
+		return strings.TrimSpace(name)
+	}
+}
+
+func projectName(cwd string) string {
+	base := filepath.Base(strings.TrimRight(cwd, "/"))
+	if base == "" || base == "." || base == "/" {
+		return ""
+	}
+	return base
+}
+
+func txTitle(hit txHit, live txLive) string {
+	var parts []string
+	if live.Tab != "" {
+		parts = append(parts, live.Tab)
+	} else if name := projectName(hit.CWD); name != "" {
+		parts = append(parts, name)
+	}
+	if live.Pane != "" && live.Pane != live.Tab {
+		parts = append(parts, live.Pane)
+	}
+	who := agentLabel(live.Agent)
+	if who == "" {
+		who = agentLabel(hit.Provider)
+	}
+	if who != "" {
+		parts = append(parts, who)
+	}
+	if len(parts) == 0 {
+		return "session"
+	}
+	return strings.Join(parts, " · ")
+}
+
+func txWhenShort(when string, now time.Time) string {
+	t, ok := parseTxTime(when)
+	if !ok {
+		return ""
+	}
+	d := now.Sub(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < 14*24*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	default:
+		return t.Format("Jan 2")
+	}
+}
+
+func matchWindow(text, query string, width int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" || width < 8 {
+		return text
+	}
+	low := strings.ToLower(text)
+	pos := -1
+	for _, w := range strings.Fields(query) {
+		w = strings.ToLower(strings.Trim(w, `"`))
+		if w == "" {
+			continue
+		}
+		if i := strings.Index(low, w); i >= 0 && (pos < 0 || i < pos) {
+			pos = i
+		}
+	}
+	if pos < 0 {
+		return clip(text, width)
+	}
+	r := []rune(text)
+	posR := len([]rune(text[:pos]))
+	start := posR - width/3
+	if start < 0 {
+		start = 0
+	}
+	end := start + width
+	if end > len(r) {
+		end = len(r)
+		start = max(0, end-width)
+	}
+	out := string(r[start:end])
+	if start > 0 {
+		out = "…" + out
+	}
+	return out
+}
+
+func highlightWords(text, query string, selected bool) string {
+	markOn := keyBold + keyAccentFg
+	markOff := keyText
+	if selected {
+		markOn = "\x1b[4m"
+		markOff = "\x1b[24m"
+	}
+	var words []string
+	for _, w := range strings.Fields(query) {
+		w = strings.ToLower(strings.Trim(w, `"`))
+		if len(w) >= 2 {
+			words = append(words, w)
+		}
+	}
+	if len(words) == 0 {
+		return text
+	}
+	var b strings.Builder
+	i := 0
+	for i < len(text) {
+		best, blen := -1, 0
+		rest := strings.ToLower(text[i:])
+		for _, w := range words {
+			if strings.HasPrefix(rest, w) && len(w) > blen {
+				best, blen = i, len(w)
+			}
+		}
+		if best < 0 {
+			_, size := utf8.DecodeRuneInString(text[i:])
+			if size < 1 {
+				size = 1
+			}
+			b.WriteString(text[i : i+size])
+			i += size
+			continue
+		}
+		b.WriteString(markOn)
+		b.WriteString(text[best : best+blen])
+		b.WriteString(markOff)
+		i = best + blen
+	}
+	return b.String()
+}
+
+func txHitLines(hit txHit, query string, live txLive, width int, now time.Time) (string, string) {
+	title := txTitle(hit, live)
+	age := txWhenShort(hit.When, now)
+	if age != "" {
+		title += " · " + age
+	}
+	if live.Tab != "" {
+		title += " · live"
+	}
+	match := highlightWords(hit.Snippet, query, false)
+	if match == "" {
+		match = "no snippet"
+	}
+	return fitLine(title, width), fitLine(match, width)
 }
 
 func sessionMatchesPane(sessionID, sessionPath string) bool {
@@ -736,7 +925,7 @@ func txActionLine(hit txHit, live bool) string {
 
 // renderTranscriptSplit draws the hit list on the left and the nearby
 // conversation on the right. Panes without a reminder are not involved.
-func renderTranscriptSplit(width, height int, names []string, active int, fv vimline.View, status, role, order string, rows []row, sel, scrollOffset int, hit txHit, live bool, preview []string) string {
+func renderTranscriptSplit(width, height int, names []string, active int, fv vimline.View, status, role, order, query string, hits []txHit, snap *snapshot, sel, scrollOffset int, hit txHit, live bool, preview []string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -764,39 +953,42 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 	if body < 3 {
 		body = 3
 	}
+	hitsVisible := body / 2
+	if hitsVisible < 1 {
+		hitsVisible = 1
+	}
 	start := scrollOffset
 	if sel < start {
 		start = sel
 	}
-	if sel >= start+body {
-		start = sel - body + 1
+	if sel >= start+hitsVisible {
+		start = sel - hitsVisible + 1
 	}
 	if start < 0 {
 		start = 0
 	}
+	now := time.Now()
 	for i := 0; i < body; i++ {
-		idx := start + i
-		leftText := ""
-		if idx < len(rows) {
-			label := rows[idx].Label
-			if rows[idx].Note != "" {
-				label = rows[idx].Note + "  " + label
+		idx := start + i/2
+		leftText := strings.Repeat(" ", left)
+		if idx >= 0 && idx < len(hits) {
+			meta := txLiveMeta(snap, hits[idx].SessionID)
+			title, _ := txHitLines(hits[idx], query, meta, left-2, now)
+			text := title
+			color := keyText
+			if i%2 == 1 {
+				text = fitLine(highlightWords(hits[idx].Snippet, query, idx == sel), left-2)
+				color = keySub
 			}
-			leftText = clip(label, left-2)
 			if idx == sel {
-				leftText = keySelectBg + keySelectFg + pad(" "+leftText, left) + keyReset
+				leftText = keySelectBg + keySelectFg + pad(" "+text, left) + keyReset
 			} else {
-				leftText = pad(" "+leftText, left)
+				leftText = color + pad(" "+text, left) + keyReset
 			}
-		} else {
-			leftText = strings.Repeat(" ", left)
 		}
 		rightText := ""
 		if i == 0 && hit.SessionID != "" {
-			who := hit.Provider
-			if who == "" {
-				who = "session"
-			}
+			who := txTitle(hit, txLiveMeta(snap, hit.SessionID))
 			rightText = keyAccentFg + clip(who+"  "+txActionLine(hit, live), right) + keyReset
 		} else if i-1 >= 0 && i-1 < len(preview) {
 			line := preview[i-1]

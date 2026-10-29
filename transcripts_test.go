@@ -69,6 +69,30 @@ func TestRelevancePutsRecentStrongHitFirst(t *testing.T) {
 	}
 }
 
+func TestTxTitleShowsTabPaneAndAgent(t *testing.T) {
+	hit := txHit{CWD: "/opt/ra/firstmate/projects/portal", Provider: "pi", When: "2026-10-12 04:45:24.873 +0000 UTC", Snippet: "the portal chart"}
+	live := txLive{Tab: "billing", Pane: "w1:pSZ", Agent: "pi"}
+	title := txTitle(hit, live)
+	if !strings.Contains(title, "billing") || !strings.Contains(title, "w1:pSZ") || !strings.Contains(title, "Pi") {
+		t.Fatalf("title = %q", title)
+	}
+	if strings.Contains(title, "+0000") {
+		t.Fatal("raw timestamp leaked into the title")
+	}
+	plain := txTitle(hit, txLive{})
+	if !strings.Contains(plain, "portal") || !strings.Contains(plain, "Pi") {
+		t.Fatalf("plain = %q", plain)
+	}
+	marked := highlightWords("fix the portal chart", "portal", false)
+	if !strings.Contains(marked, keyAccentFg) || !strings.Contains(marked, "portal") {
+		t.Fatalf("highlight = %q", marked)
+	}
+	win := matchWindow(strings.Repeat("x", 400)+" portal billing", "portal", 40)
+	if !strings.Contains(win, "portal") {
+		t.Fatalf("window = %q", win)
+	}
+}
+
 func TestFilterHitsNarrowsWithoutAQuery(t *testing.T) {
 	hits := []txHit{
 		{Snippet: "waiting on stripe keys"},

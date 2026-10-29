@@ -4203,7 +4203,7 @@ func runPicker() int {
 					hit = txHits[sel]
 					live = livePaneForSession(frozen, hit.SessionID) != ""
 				}
-				frame = renderTranscriptSplit(w, h, viewNames(st), tab, searchEd.View("/", searching), status, txRole, txSort, rows, sel, scrollOffset, hit, live, txPrevLines)
+				frame = renderTranscriptSplit(w, h, viewNames(st), tab, searchEd.View("/", searching), status, txRole, txSort, searchEd.String(), txHits, frozen, sel, scrollOffset, hit, live, txPrevLines)
 				break
 			}
 			kind := "both"
