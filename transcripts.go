@@ -43,6 +43,10 @@ func transcriptsEnabled() bool {
 	return err == nil
 }
 
+func transcriptIndexPath() string {
+	return filepath.Join(configDir(), "transcripts.db")
+}
+
 func ccriderDB() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -393,7 +397,7 @@ func searchTranscripts(query, role, order string) ([]txHit, error) {
 		return nil, nil
 	}
 	var resp txReply
-	if err := txAsk(map[string]any{"op": "search", "match": match, "sender": transcriptSender(role), "sort": order}, &resp); err != nil {
+	if err := txAsk(map[string]any{"op": "search", "match": match, "sender": transcriptSender(role), "role": role, "sort": order}, &resp); err != nil {
 		return nil, err
 	}
 	if resp.Err != "" {
@@ -515,7 +519,7 @@ func (p *txProc) ensure() error {
 	if _, err := os.Stat(db); err != nil {
 		return fmt.Errorf("ccrider index is not ready")
 	}
-	cmd := exec.Command("nice", "-n", "15", "python3", "-u", "-c", txWorkerScript, db)
+	cmd := exec.Command("nice", "-n", "15", "python3", "-u", "-c", txWorkerScript, db, transcriptIndexPath())
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -537,7 +541,15 @@ func (p *txProc) ensure() error {
 const txWorkerScript = `
 import json, sqlite3, sys, time
 db = sys.argv[1]
+index = sys.argv[2] if len(sys.argv) > 2 else ""
 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+ix = None
+if index:
+    try:
+        ix = sqlite3.connect(f"file:{index}?mode=ro", uri=True)
+        ix.execute("SELECT 1 FROM tx LIMIT 1")
+    except Exception:
+        ix = None
 con.execute("PRAGMA query_only=ON")
 con.execute("PRAGMA temp_store=MEMORY")
 deadline = 0.0
@@ -556,6 +568,32 @@ for raw in sys.stdin:
     try:
         req = json.loads(raw)
         op = req.get("op")
+        if op == "search" and ix is not None:
+            role = req.get("role") or "typed"
+            extra = " AND kind:typed"
+            if role == "any-user":
+                extra = " AND sender:human"
+            elif role in ("replies", "agent"):
+                extra = " AND sender:assistant"
+            elif role in ("everything", "all"):
+                extra = ""
+            q = (req.get("match") or "") + extra
+            try:
+                rows = ix.execute(
+                    "SELECT session_id, msg_id, provider, cwd, summary, body, ts, rank FROM tx WHERE tx MATCH ? ORDER BY rank LIMIT 24",
+                    (q,)).fetchall()
+            except sqlite3.OperationalError as exc:
+                emit({"err": str(exc)})
+                continue
+            hits = []
+            for row in rows:
+                hits.append({
+                    "SessionID": row[0], "MsgID": int(row[1] or 0), "Provider": row[2] or "",
+                    "CWD": row[3] or "", "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()),
+                    "When": row[6] or "", "Rank": row[7] or 0,
+                })
+            emit({"hits": hits})
+            continue
         if op == "search":
             # Rank the FTS table alone. A join in that step scans every match
             # and can stall the machine. The id lookup after it is cheap.
