@@ -51,6 +51,17 @@ func TestTranscriptsTabFollowsCcrider(t *testing.T) {
 	}
 }
 
+func TestFilterHitsNarrowsWithoutAQuery(t *testing.T) {
+	hits := []txHit{
+		{Snippet: "waiting on stripe keys"},
+		{Snippet: "portal docs only"},
+	}
+	got := filterHits(hits, "stripe keys")
+	if len(got) != 1 || !strings.Contains(got[0].Snippet, "stripe") {
+		t.Fatalf("filtered = %+v", got)
+	}
+}
+
 func TestTranscriptRoleSender(t *testing.T) {
 	if transcriptSender("user") != "human" {
 		t.Fatal("user search must use human messages")

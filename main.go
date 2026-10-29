@@ -3656,6 +3656,8 @@ func runPicker() int {
 	txHits := []txHit{}
 	txRole := "user"
 	txStamp := ""
+	txLastQ := ""
+	txGen := 0
 	txBrowse := false
 	txLines := []string{}
 	txLine := 0
@@ -4028,6 +4030,36 @@ func runPicker() int {
 		rows = rebase(rows)
 	}
 
+	txJobCh := make(chan txJob, 8)
+	txResCh := make(chan txAsync, 8)
+	go serveTranscriptJobs(txJobCh, txResCh)
+	applyTx := func(res txAsync) {
+		if res.Kind == "preview" {
+			if sel >= 0 && sel < len(txHits) && txHits[sel].SessionID == res.PreviewID {
+				if res.Err != nil {
+					txPrevLines = []string{res.Err.Error()}
+				} else if len(res.Lines) == 0 {
+					txPrevLines = []string{"No nearby messages."}
+				} else {
+					txPrevLines = res.Lines
+				}
+			}
+			return
+		}
+		if res.Gen != txGen {
+			return
+		}
+		if res.Err != nil {
+			status = clip(res.Err.Error(), 80)
+			return
+		}
+		txHits = res.Hits
+		txPrevID = ""
+		if sel >= len(txHits) {
+			sel = 0
+		}
+		status = fmt.Sprintf("%s \u00b7 %d chats", txRole, len(txHits))
+	}
 	refreshTx := func(q string) {
 		q = strings.TrimSpace(q)
 		stamp := txRole + "\x00" + q
@@ -4037,20 +4069,33 @@ func runPicker() int {
 		txStamp = stamp
 		if len([]rune(q)) < 2 {
 			txHits = nil
+			txLastQ = ""
 			status = txRole + " transcripts"
 			return
 		}
-		hits, err := searchTranscripts(q, txRole)
-		if err != nil {
-			status = clip(err.Error(), 80)
-			return
+		if txLastQ != "" && strings.HasPrefix(strings.ToLower(q), txLastQ) {
+			txHits = filterHits(txHits, q)
+			txPrevID = ""
+			if sel >= len(txHits) {
+				sel = 0
+			}
 		}
-		txHits = hits
-		txPrevID = ""
-		if sel >= len(txHits) {
-			sel = 0
+		txLastQ = strings.ToLower(q)
+		txGen++
+		job := txJob{Gen: txGen, Query: q, Role: txRole}
+		select {
+		case txJobCh <- job:
+		default:
+			select {
+			case <-txJobCh:
+			default:
+			}
+			select {
+			case txJobCh <- job:
+			default:
+			}
 		}
-		status = fmt.Sprintf("%s \u00b7 %d chats", txRole, len(hits))
+		status = txRole + " \u00b7 searching"
 	}
 
 	for {
@@ -4101,15 +4146,13 @@ func runPicker() int {
 			pointedID = rows[sel].PaneID
 		}
 		if views(st)[tab].Kind == "transcripts" && sel >= 0 && sel < len(txHits) && txHits[sel].SessionID != txPrevID {
-			lines, err := previewTranscript(txHits[sel].SessionID, txHits[sel].MsgID)
-			if err != nil {
-				txPrevLines = []string{err.Error()}
-			} else if len(lines) == 0 {
-				txPrevLines = []string{"No nearby messages."}
-			} else {
-				txPrevLines = lines
-			}
-			txPrevID = txHits[sel].SessionID
+			hit := txHits[sel]
+			txPrevID = hit.SessionID
+			txPrevLines = []string{"loading thread"}
+			go func(id string, msg int64, gen int) {
+				lines, err := previewTranscript(id, msg)
+				txResCh <- txAsync{Kind: "preview", Gen: gen, PreviewID: id, Lines: lines, Err: err}
+			}(hit.SessionID, hit.MsgID, txGen)
 		}
 		var frame string
 		switch {
@@ -4187,6 +4230,9 @@ func runPicker() int {
 			case <-time.After(150 * time.Millisecond):
 				ed.FlushJ()
 				continue
+			case res := <-txResCh:
+				applyTx(res)
+				continue
 			}
 		} else {
 			select {
@@ -4198,6 +4244,9 @@ func runPicker() int {
 			case sc := <-jevCh:
 				rows = resync(rows)
 				applyJev(sc)
+				continue
+			case res := <-txResCh:
+				applyTx(res)
 				continue
 			}
 		}

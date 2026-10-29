@@ -136,6 +136,28 @@ func ftsQuery(q string) string {
 	return strings.Join(parts, " AND ")
 }
 
+func filterHits(hits []txHit, query string) []txHit {
+	words := strings.Fields(strings.ToLower(query))
+	if len(words) == 0 {
+		return hits
+	}
+	out := make([]txHit, 0, len(hits))
+	for _, h := range hits {
+		blob := strings.ToLower(h.Snippet + " " + h.Summary)
+		ok := true
+		for _, w := range words {
+			if !strings.Contains(blob, w) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 func searchTranscripts(query, role string) ([]txHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -164,6 +186,44 @@ func previewTranscript(sessionID string, msgID int64) ([]string, error) {
 		return nil, fmt.Errorf("%s", resp.Err)
 	}
 	return resp.Lines, nil
+}
+
+type txJob struct {
+	Gen   int
+	Query string
+	Role  string
+}
+
+type txAsync struct {
+	Kind      string
+	Gen       int
+	Hits      []txHit
+	Lines     []string
+	PreviewID string
+	Err       error
+}
+
+func serveTranscriptJobs(jobs <-chan txJob, results chan<- txAsync) {
+	var pending *txJob
+	for {
+		if pending == nil {
+			job, ok := <-jobs
+			if !ok {
+				return
+			}
+			pending = &job
+		}
+		select {
+		case job := <-jobs:
+			pending = &job
+			continue
+		default:
+		}
+		job := *pending
+		pending = nil
+		hits, err := searchTranscripts(job.Query, job.Role)
+		results <- txAsync{Kind: "search", Gen: job.Gen, Hits: hits, Err: err}
+	}
 }
 
 type txReply struct {
@@ -244,6 +304,8 @@ const txWorkerScript = `
 import json, sqlite3, sys
 db = sys.argv[1]
 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+con.execute("PRAGMA query_only=ON")
+con.execute("PRAGMA temp_store=MEMORY")
 def emit(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
@@ -255,26 +317,33 @@ for raw in sys.stdin:
         req = json.loads(raw)
         op = req.get("op")
         if op == "search":
-            sql = """
-            SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
-                   substr(ifnull(m.text_content,''), 1, 160), ifnull(m.timestamp,'')
-            FROM messages_fts
-            JOIN messages m ON m.id = messages_fts.rowid
-            JOIN sessions s ON s.id = m.session_id
-            WHERE messages_fts MATCH ?
-            """
-            args = [req.get("match") or ""]
-            sender = req.get("sender") or ""
-            if sender:
-                sql += " AND m.sender = ?"
-                args.append(sender)
-            sql += " ORDER BY m.timestamp DESC LIMIT 24"
+            # Ranked FTS5 stops after the limit. Sorting every hit by time does not.
+            ids = [r[0] for r in con.execute(
+                "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT 200",
+                (req.get("match") or "",))]
             hits = []
-            for row in con.execute(sql, args):
-                hits.append({
-                    "SessionID": row[0], "MsgID": row[1], "Provider": row[2], "CWD": row[3],
-                    "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()), "When": row[6] or "",
-                })
+            if ids:
+                marks = ",".join("?" * len(ids))
+                args = list(ids)
+                sql = f"""
+                SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
+                       substr(ifnull(m.text_content,''), 1, 160), ifnull(m.timestamp,'')
+                FROM messages m
+                JOIN sessions s ON s.id = m.session_id
+                WHERE m.id IN ({marks})
+                """
+                sender = req.get("sender") or ""
+                if sender:
+                    sql += " AND m.sender = ?"
+                    args.append(sender)
+                order = {i: n for n, i in enumerate(ids)}
+                rows = con.execute(sql, args).fetchall()
+                rows.sort(key=lambda r: order.get(r[1], 999))
+                for row in rows[:24]:
+                    hits.append({
+                        "SessionID": row[0], "MsgID": row[1], "Provider": row[2], "CWD": row[3],
+                        "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()), "When": row[6] or "",
+                    })
             emit({"hits": hits})
         elif op == "preview":
             rows = con.execute("""
