@@ -256,13 +256,13 @@ func searchTranscripts(query, role string) ([]txHit, error) {
 			}
 			h.Snippet = strings.Join(strings.Fields(body), " ")
 			kept = append(kept, h)
-			if len(kept) == 24 {
+			if len(kept) == 40 {
 				break
 			}
 		}
 		hits = kept
-	} else if len(hits) > 24 {
-		hits = hits[:24]
+	} else if len(hits) > 40 {
+		hits = hits[:40]
 	}
 	return hits, nil
 }
@@ -407,29 +407,24 @@ for raw in sys.stdin:
         req = json.loads(raw)
         op = req.get("op")
         if op == "search":
-            # Ranked FTS5 stops after the limit. Sorting every hit by time does not.
-            ids = [r[0] for r in con.execute(
-                "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT 200",
-                (req.get("match") or "",))]
+            # Filter the speaker before the rank limit. A global top-200 is
+            # almost all tool text, so a user word never appears.
+            sender = req.get("sender") or ""
+            sql = """
+            SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
+                   substr(ifnull(m.text_content,''), 1, 800), ifnull(m.timestamp,'')
+            FROM messages_fts
+            JOIN messages m ON m.id = messages_fts.rowid
+            JOIN sessions s ON s.id = m.session_id
+            WHERE messages_fts MATCH ?
+            """
+            args = [req.get("match") or ""]
+            if sender:
+                sql += " AND m.sender = ?"
+                args.append(sender)
+            sql += " ORDER BY rank LIMIT 120"
             hits = []
-            if ids:
-                marks = ",".join("?" * len(ids))
-                args = list(ids)
-                sql = f"""
-                SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
-                       substr(ifnull(m.text_content,''), 1, 160), ifnull(m.timestamp,'')
-                FROM messages m
-                JOIN sessions s ON s.id = m.session_id
-                WHERE m.id IN ({marks})
-                """
-                sender = req.get("sender") or ""
-                if sender:
-                    sql += " AND m.sender = ?"
-                    args.append(sender)
-                order = {i: n for n, i in enumerate(ids)}
-                rows = con.execute(sql, args).fetchall()
-                rows.sort(key=lambda r: order.get(r[1], 999))
-                for row in rows[:80]:
+            for row in con.execute(sql, args):
                     hits.append({
                         "SessionID": row[0], "MsgID": row[1], "Provider": row[2], "CWD": row[3],
                         "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()), "When": row[6] or "",
