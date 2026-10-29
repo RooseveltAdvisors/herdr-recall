@@ -515,7 +515,7 @@ func (p *txProc) ensure() error {
 	if _, err := os.Stat(db); err != nil {
 		return fmt.Errorf("ccrider index is not ready")
 	}
-	cmd := exec.Command("python3", "-u", "-c", txWorkerScript, db)
+	cmd := exec.Command("nice", "-n", "15", "python3", "-u", "-c", txWorkerScript, db)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -535,11 +535,17 @@ func (p *txProc) ensure() error {
 }
 
 const txWorkerScript = `
-import json, sqlite3, sys
+import json, sqlite3, sys, time
 db = sys.argv[1]
 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 con.execute("PRAGMA query_only=ON")
 con.execute("PRAGMA temp_store=MEMORY")
+deadline = 0.0
+def abort():
+    if deadline and time.monotonic() > deadline:
+        return 1
+    return 0
+con.set_progress_handler(abort, 2000)
 def emit(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
@@ -551,34 +557,46 @@ for raw in sys.stdin:
         req = json.loads(raw)
         op = req.get("op")
         if op == "search":
-            # Filter the speaker before the rank limit. A global top-200 is
-            # almost all tool text, so a user word never appears.
+            # Rank the FTS table alone. A join in that step scans every match
+            # and can stall the machine. The id lookup after it is cheap.
             sender = req.get("sender") or ""
-            sql = """
-            SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
-                   substr(ifnull(m.text_content,''), 1, 1600), ifnull(m.timestamp,''), bm25(messages_fts)
-            FROM messages_fts
-            JOIN messages m ON m.id = messages_fts.rowid
-            JOIN sessions s ON s.id = m.session_id
-            WHERE messages_fts MATCH ?
-            """
-            args = [req.get("match") or ""]
-            if sender:
-                sql += " AND m.sender = ?"
-                args.append(sender)
             order = req.get("sort") or "relevance"
-            if order == "newest":
-                sql += " AND m.timestamp > datetime('now', '-365 days') ORDER BY m.timestamp DESC LIMIT 120"
-            elif order == "oldest":
-                sql += " AND m.timestamp > datetime('now', '-365 days') ORDER BY m.timestamp ASC LIMIT 120"
-            else:
-                sql += " ORDER BY rank LIMIT 200"
+            match = req.get("match") or ""
+            deadline = time.monotonic() + 0.25
+            try:
+                ids = [r[0] for r in con.execute(
+                    "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT 24",
+                    (match,))]
+            except sqlite3.OperationalError:
+                deadline = 0.0
+                emit({"err": "search too broad, add another word"})
+                continue
+            deadline = 0.0
             hits = []
-            for row in con.execute(sql, args):
+            if ids:
+                marks = ",".join("?" * len(ids))
+                rows = con.execute(
+                    f"""SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
+                              substr(ifnull(m.text_content,''), 1, 400), ifnull(m.timestamp,''), ifnull(m.sender,'')
+                       FROM messages m JOIN sessions s ON s.id = m.session_id
+                       WHERE m.id IN ({marks})""", ids).fetchall()
+                if sender:
+                    rows = [r for r in rows if r[7] == sender]
+                if sender and ids and not rows:
+                    deadline = 0.0
+                    emit({"err": "top matches were other speakers, add another word"})
+                    continue
+                pos = {i: n for n, i in enumerate(ids)}
+                rows.sort(key=lambda r: pos.get(r[1], 999))
+                if order == "newest":
+                    rows.sort(key=lambda r: r[6] or "", reverse=True)
+                elif order == "oldest":
+                    rows.sort(key=lambda r: r[6] or "")
+                for n, row in enumerate(rows[:24]):
                     hits.append({
                         "SessionID": row[0], "MsgID": row[1], "Provider": row[2], "CWD": row[3],
                         "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()), "When": row[6] or "",
-                        "Rank": row[7] if len(row) > 7 else 0,
+                        "Rank": -float(24 - pos.get(row[1], 24)),
                     })
             emit({"hits": hits})
         elif op == "preview":

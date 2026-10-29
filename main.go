@@ -4041,6 +4041,10 @@ func runPicker() int {
 
 	txJobCh := make(chan txJob, 8)
 	txResCh := make(chan txAsync, 8)
+	txTimer := time.NewTimer(time.Hour)
+	txTimer.Stop()
+	var txPend txJob
+	txPendOK := false
 	go serveTranscriptJobs(txJobCh, txResCh)
 	applyTx := func(res txAsync) {
 		if res.Kind == "preview" {
@@ -4091,19 +4095,15 @@ func runPicker() int {
 		}
 		txLastQ = strings.ToLower(q)
 		txGen++
-		job := txJob{Gen: txGen, Query: q, Role: txRole, Sort: txSort}
-		select {
-		case txJobCh <- job:
-		default:
+		txPend = txJob{Gen: txGen, Query: q, Role: txRole, Sort: txSort}
+		txPendOK = true
+		if !txTimer.Stop() {
 			select {
-			case <-txJobCh:
-			default:
-			}
-			select {
-			case txJobCh <- job:
+			case <-txTimer.C:
 			default:
 			}
 		}
+		txTimer.Reset(120 * time.Millisecond)
 		status = txRoleLabel(txRole) + " \u00b7 searching"
 	}
 	rankSelectedTx := func(up bool) {
@@ -4271,6 +4271,15 @@ func runPicker() int {
 			case res := <-txResCh:
 				applyTx(res)
 				continue
+			case <-txTimer.C:
+				if txPendOK {
+					txPendOK = false
+					select {
+					case txJobCh <- txPend:
+					default:
+					}
+				}
+				continue
 			}
 		} else {
 			select {
@@ -4285,6 +4294,15 @@ func runPicker() int {
 				continue
 			case res := <-txResCh:
 				applyTx(res)
+				continue
+			case <-txTimer.C:
+				if txPendOK {
+					txPendOK = false
+					select {
+					case txJobCh <- txPend:
+					default:
+					}
+				}
 				continue
 			}
 		}
