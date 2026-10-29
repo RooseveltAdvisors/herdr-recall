@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseCcriderSearch(t *testing.T) {
@@ -48,6 +49,23 @@ func TestTranscriptsTabFollowsCcrider(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("Transcripts tab hidden when the dependency is enabled")
+	}
+}
+
+func TestRelevancePutsRecentStrongHitFirst(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	hits := []txHit{
+		{Snippet: "old weak", When: "2026-01-01 00:00:00.000 +0000 UTC", Rank: -1},
+		{Snippet: "recent strong", When: "2026-10-28 00:00:00.000 +0000 UTC", Rank: -8},
+		{Snippet: "recent weak", When: "2026-10-28 00:00:00.000 +0000 UTC", Rank: -1},
+	}
+	got := sortTxHits(hits, "relevance", now)
+	if got[0].Snippet != "recent strong" {
+		t.Fatalf("first = %q", got[0].Snippet)
+	}
+	newest := sortTxHits(hits, "newest", now)
+	if newest[0].When < newest[1].When {
+		t.Fatal("newest did not put the later time first")
 	}
 }
 

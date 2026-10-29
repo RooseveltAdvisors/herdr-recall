@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/RooseveltAdvisors/vimline"
 )
@@ -23,6 +25,7 @@ type txHit struct {
 	Summary   string
 	Snippet   string
 	When      string
+	Rank      float64
 }
 
 // transcriptsEnabled reports whether the Transcripts tab should appear.
@@ -139,6 +142,78 @@ func txRoleLabel(role string) string {
 	}
 }
 
+func nextTxSort(sort string) string {
+	switch sort {
+	case "newest":
+		return "oldest"
+	case "oldest":
+		return "relevance"
+	default:
+		return "newest"
+	}
+}
+
+func txSortLabel(sort string) string {
+	switch sort {
+	case "newest":
+		return "Newest"
+	case "oldest":
+		return "Oldest"
+	default:
+		return "Relevance"
+	}
+}
+
+func parseTxTime(s string) (time.Time, bool) {
+	for _, layout := range []string{
+		"2006-01-02 15:04:05.000 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+		time.RFC3339,
+	} {
+		if t, err := time.Parse(layout, strings.TrimSpace(s)); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// relevanceScore mixes lexical match quality with a 14-day recency weight.
+// FTS5 bm25 is negative. A lower value is a better word match.
+func relevanceScore(bm25 float64, when string, now time.Time) float64 {
+	lexical := -bm25
+	if lexical < 0 {
+		lexical = 0
+	}
+	ageDays := 30.0
+	if t, ok := parseTxTime(when); ok {
+		ageDays = now.Sub(t).Hours() / 24
+		if ageDays < 0 {
+			ageDays = 0
+		}
+	}
+	recency := 1.0 / (1.0 + ageDays/14.0)
+	return lexical * (0.35 + 0.65*recency)
+}
+
+func sortTxHits(hits []txHit, mode string, now time.Time) []txHit {
+	out := append([]txHit(nil), hits...)
+	switch mode {
+	case "newest":
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].When > out[j].When
+		})
+	case "oldest":
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].When < out[j].When
+		})
+	default:
+		sort.SliceStable(out, func(i, j int) bool {
+			return relevanceScore(out[i].Rank, out[i].When, now) > relevanceScore(out[j].Rank, out[j].When, now)
+		})
+	}
+	return out
+}
+
 func txRoleFromKey(key string) (string, bool) {
 	switch key {
 	case "1":
@@ -230,7 +305,7 @@ func filterHits(hits []txHit, query string) []txHit {
 	return out
 }
 
-func searchTranscripts(query, role string) ([]txHit, error) {
+func searchTranscripts(query, role, order string) ([]txHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil
@@ -240,7 +315,7 @@ func searchTranscripts(query, role string) ([]txHit, error) {
 		return nil, nil
 	}
 	var resp txReply
-	if err := txAsk(map[string]any{"op": "search", "match": match, "sender": transcriptSender(role)}, &resp); err != nil {
+	if err := txAsk(map[string]any{"op": "search", "match": match, "sender": transcriptSender(role), "sort": order}, &resp); err != nil {
 		return nil, err
 	}
 	if resp.Err != "" {
@@ -264,6 +339,10 @@ func searchTranscripts(query, role string) ([]txHit, error) {
 	} else if len(hits) > 40 {
 		hits = hits[:40]
 	}
+	hits = sortTxHits(hits, order, time.Now())
+	if len(hits) > 40 {
+		hits = hits[:40]
+	}
 	return hits, nil
 }
 
@@ -282,6 +361,7 @@ type txJob struct {
 	Gen   int
 	Query string
 	Role  string
+	Sort  string
 }
 
 type txAsync struct {
@@ -311,7 +391,7 @@ func serveTranscriptJobs(jobs <-chan txJob, results chan<- txAsync) {
 		}
 		job := *pending
 		pending = nil
-		hits, err := searchTranscripts(job.Query, job.Role)
+		hits, err := searchTranscripts(job.Query, job.Role, job.Sort)
 		results <- txAsync{Kind: "search", Gen: job.Gen, Hits: hits, Err: err}
 	}
 }
@@ -412,7 +492,7 @@ for raw in sys.stdin:
             sender = req.get("sender") or ""
             sql = """
             SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
-                   substr(ifnull(m.text_content,''), 1, 800), ifnull(m.timestamp,'')
+                   substr(ifnull(m.text_content,''), 1, 800), ifnull(m.timestamp,''), bm25(messages_fts)
             FROM messages_fts
             JOIN messages m ON m.id = messages_fts.rowid
             JOIN sessions s ON s.id = m.session_id
@@ -422,12 +502,19 @@ for raw in sys.stdin:
             if sender:
                 sql += " AND m.sender = ?"
                 args.append(sender)
-            sql += " ORDER BY rank LIMIT 120"
+            order = req.get("sort") or "relevance"
+            if order == "newest":
+                sql += " AND m.timestamp > datetime('now', '-365 days') ORDER BY m.timestamp DESC LIMIT 120"
+            elif order == "oldest":
+                sql += " AND m.timestamp > datetime('now', '-365 days') ORDER BY m.timestamp ASC LIMIT 120"
+            else:
+                sql += " ORDER BY rank LIMIT 200"
             hits = []
             for row in con.execute(sql, args):
                     hits.append({
                         "SessionID": row[0], "MsgID": row[1], "Provider": row[2], "CWD": row[3],
                         "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()), "When": row[6] or "",
+                        "Rank": row[7] if len(row) > 7 else 0,
                     })
             emit({"hits": hits})
         elif op == "preview":
@@ -606,7 +693,7 @@ func livePaneForSession(s *snapshot, sessionID string) string {
 	return ""
 }
 
-func txFilterLine(role string, width int) string {
+func txFilterLine(role, order string, width int) string {
 	parts := []struct{ key, id, label string }{
 		{"1", "typed", "Typed"},
 		{"2", "any-user", "Any user"},
@@ -624,6 +711,7 @@ func txFilterLine(role string, width int) string {
 		}
 		b.WriteString(" ")
 	}
+	b.WriteString(keyOverlay + " s " + txSortLabel(order) + keyReset)
 	return clipANSI(b.String(), width)
 }
 
@@ -648,7 +736,7 @@ func txActionLine(hit txHit, live bool) string {
 
 // renderTranscriptSplit draws the hit list on the left and the nearby
 // conversation on the right. Panes without a reminder are not involved.
-func renderTranscriptSplit(width, height int, names []string, active int, fv vimline.View, status, role string, rows []row, sel, scrollOffset int, hit txHit, live bool, preview []string) string {
+func renderTranscriptSplit(width, height int, names []string, active int, fv vimline.View, status, role, order string, rows []row, sel, scrollOffset int, hit txHit, live bool, preview []string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -659,7 +747,7 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 	sc := newScreen(width, maxLines, 8)
 	sc.header(names, active)
 	sc.emit(renderField(fv, width))
-	sc.emit(txFilterLine(role, width))
+	sc.emit(txFilterLine(role, order, width))
 	sc.rule()
 	left := width * 2 / 5
 	if left < 28 {

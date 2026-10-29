@@ -41,6 +41,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `gg` / `G` | jump to the first / last row |
 | `g` then `i` / `l` / `t` / `r` / `f` / `m` / `a` | jump to Inbox, Later, Transcripts, Recent, Favorites, Most used, All |
 | Transcripts `1` `2` `3` `4` | Typed, Any user, Replies, Everything. Typed drops agent handoffs |
+| Transcripts `s` | cycle Relevance, Newest, Oldest. Relevance mixes word fit with recency |
 | `←` / `→` | switch tabs. `h` and `l` do not |
 | `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
 | `enter` | focus the selected pane directly via Herdr socket |

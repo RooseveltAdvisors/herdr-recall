@@ -3064,7 +3064,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	}
 	extra := "arrows tabs   g i/l/t/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && names[active] == "Transcripts" {
-		extra = "1 typed   2 any user   3 replies   4 everything   / type   enter open   f fork   b full"
+		extra = "1 typed  2 any user  3 replies  4 everything  s sort  / type  enter open  f fork  b full"
 	}
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
@@ -3655,6 +3655,7 @@ func runPicker() int {
 	teachEd := vimline.New("")
 	txHits := []txHit{}
 	txRole := "typed"
+	txSort := "relevance"
 	txStamp := ""
 	txLastQ := ""
 	txGen := 0
@@ -4062,7 +4063,7 @@ func runPicker() int {
 	}
 	refreshTx := func(q string) {
 		q = strings.TrimSpace(q)
-		stamp := txRole + "\x00" + q
+		stamp := txRole + "\x00" + txSort + "\x00" + q
 		if stamp == txStamp {
 			return
 		}
@@ -4082,7 +4083,7 @@ func runPicker() int {
 		}
 		txLastQ = strings.ToLower(q)
 		txGen++
-		job := txJob{Gen: txGen, Query: q, Role: txRole}
+		job := txJob{Gen: txGen, Query: q, Role: txRole, Sort: txSort}
 		select {
 		case txJobCh <- job:
 		default:
@@ -4202,7 +4203,7 @@ func runPicker() int {
 					hit = txHits[sel]
 					live = livePaneForSession(frozen, hit.SessionID) != ""
 				}
-				frame = renderTranscriptSplit(w, h, viewNames(st), tab, searchEd.View("/", searching), status, txRole, rows, sel, scrollOffset, hit, live, txPrevLines)
+				frame = renderTranscriptSplit(w, h, viewNames(st), tab, searchEd.View("/", searching), status, txRole, txSort, rows, sel, scrollOffset, hit, live, txPrevLines)
 				break
 			}
 			kind := "both"
@@ -4653,6 +4654,12 @@ func runPicker() int {
 					continue
 				}
 			}
+			if views(st)[tab].Kind == "transcripts" && key == "s" && searchEd.Mode() != vimline.ModeInsert {
+				txSort = nextTxSort(txSort)
+				txStamp = ""
+				refreshTx(searchEd.String())
+				continue
+			}
 			if views(st)[tab].Kind == "transcripts" && key == "tab" {
 				txRole = nextTxRole(txRole)
 				txStamp = ""
@@ -4990,6 +4997,11 @@ func runPicker() int {
 			sel = 0
 			scrollOffset = 0
 			rebuild()
+		case key == "s" && !searching && !showHelp && views(st)[tab].Kind == "transcripts":
+			txSort = nextTxSort(txSort)
+			txStamp = ""
+			refreshTx(searchEd.String())
+			continue
 		case key == "s" && !searching && !showHelp:
 			v := views(st)[tab]
 			if v.Kind != "all" && v.Kind != "favorites" {
