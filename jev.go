@@ -34,16 +34,19 @@ import (
 const jevDefaultProxy = "/opt/ra/infisical/bin/jev-proxy.sh"
 
 type jevState struct {
-	Proxy     string             `json:"proxy,omitempty"`
-	Scores    map[string]float64 `json:"scores,omitempty"`
-	ScoreKey  map[string]string  `json:"score_key,omitempty"`
-	Weights   map[string]float64 `json:"weights,omitempty"`
-	Rules     []jevRule          `json:"rules,omitempty"`
-	DocFreq   map[string]int     `json:"doc_freq,omitempty"`
-	DocCount  int                `json:"doc_count,omitempty"`
-	Examples  int                `json:"examples,omitempty"`
-	Teachings []jevTeaching      `json:"teachings,omitempty"`
-	TxRank    map[string]float64 `json:"tx_rank,omitempty"`
+	Proxy       string             `json:"proxy,omitempty"`
+	Scores      map[string]float64 `json:"scores,omitempty"`
+	ScoreKey    map[string]string  `json:"score_key,omitempty"`
+	Weights     map[string]float64 `json:"weights,omitempty"`
+	Rules       []jevRule          `json:"rules,omitempty"`
+	DocFreq     map[string]int     `json:"doc_freq,omitempty"`
+	DocCount    int                `json:"doc_count,omitempty"`
+	Examples    int                `json:"examples,omitempty"`
+	Teachings   []jevTeaching      `json:"teachings,omitempty"`
+	TxRank      map[string]float64 `json:"tx_rank,omitempty"`
+	Distilled   map[string]float64 `json:"distilled,omitempty"`
+	DistillBias float64            `json:"distill_bias,omitempty"`
+	DistillN    int                `json:"distill_n,omitempty"`
 }
 
 // jevRule is a conditional preference. It fires only when the row matches
@@ -343,11 +346,121 @@ func (s *store) jevPriority(r row, now int64) float64 {
 	if s.Jev == nil {
 		return 0
 	}
-	p := s.Jev.Scores[r.PaneID]
-	if s.Jev.ScoreKey[r.PaneID] != jevRowKey(r) {
-		p = 0
-	}
+	p := s.localTeacherScore(r, now)
 	return p + s.jevWeight(r, now) + s.jevRuleBonus(r, now) + jevUrgency(r, now)
+}
+
+func (s *store) localTeacherScore(r row, now int64) float64 {
+	if s == nil || s.Jev == nil {
+		return 0
+	}
+	if len(s.Jev.Distilled) > 0 {
+		sum := s.Jev.DistillBias
+		for _, f := range jevFeatures(r, now) {
+			sum += s.Jev.Distilled[f]
+		}
+		return sum
+	}
+	if s.Jev.ScoreKey[r.PaneID] != jevRowKey(r) {
+		return 0
+	}
+	return s.Jev.Scores[r.PaneID]
+}
+
+func (s *store) hasLocalTriager() bool {
+	return s != nil && s.Jev != nil && len(s.Jev.Distilled) > 0
+}
+
+// fitLocalTriager distills stored Jev scores into a local linear model.
+// Captain prefer and demote labels shift the target. The fit does not call
+// the paid proxy.
+func (s *store) fitLocalTriager(rows []row, now int64) int {
+	if s == nil || s.Jev == nil || len(s.Jev.Scores) == 0 {
+		return 0
+	}
+	type ex struct {
+		feats []string
+		y     float64
+	}
+	var set []ex
+	for _, r := range rows {
+		if s.Jev.ScoreKey[r.PaneID] != jevRowKey(r) {
+			continue
+		}
+		y, ok := s.Jev.Scores[r.PaneID]
+		if !ok {
+			continue
+		}
+		y += teachShift(s, r, now)
+		set = append(set, ex{feats: jevFeatures(r, now), y: y})
+	}
+	if len(set) < 8 {
+		return 0
+	}
+	w := map[string]float64{}
+	bias := 0.0
+	const lr = 0.08
+	for step := 0; step < 250; step++ {
+		for _, e := range set {
+			pred := bias
+			for _, f := range e.feats {
+				pred += w[f]
+			}
+			err := pred - e.y
+			bias -= lr * err * 0.2
+			if len(e.feats) == 0 {
+				continue
+			}
+			stepSize := lr * err / float64(len(e.feats))
+			for _, f := range e.feats {
+				w[f] -= stepSize
+			}
+		}
+	}
+	s.ensureJev()
+	s.Jev.Distilled = w
+	s.Jev.DistillBias = bias
+	s.Jev.DistillN = len(set)
+	return len(set)
+}
+
+func teachShift(st *store, r row, now int64) float64 {
+	if st == nil || st.Jev == nil {
+		return 0
+	}
+	have := map[string]bool{}
+	for _, f := range jevFeatures(r, now) {
+		have[f] = true
+	}
+	shift := 0.0
+	for _, t := range st.Jev.Teachings {
+		hit := t.Pane.PaneID == r.PaneID
+		if !hit {
+			over := 0
+			for _, f := range t.Selected {
+				if have[f] {
+					over++
+				}
+			}
+			hit = over >= 2
+		}
+		if !hit {
+			continue
+		}
+		switch t.Intent {
+		case "demote":
+			shift -= 0.15
+		case "prefer":
+			shift += 0.15
+		}
+	}
+	if shift > 0.3 {
+		return 0.3
+	}
+	if shift < -0.3 {
+		return -0.3
+	}
+	return shift
 }
 
 // jevUrgency is a small cold-start prior. Learned weights can override it.

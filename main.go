@@ -3992,11 +3992,14 @@ func runPicker() int {
 		}
 	}()
 
-	// Jev scores new arrivals in the background. The candidate rows are copied
-	// on this thread, so the goroutine never touches shared state.
+	// A local triager distilled from stored Jev scores and captain teaches
+	// scores new arrivals. The paid proxy runs only when that model is absent.
 	jevCh := make(chan map[string]jevScore, 1)
-	if jevEnabled() {
-		cand := collectRows(frozen, st)
+	cand := collectRows(frozen, st)
+	if n := st.fitLocalTriager(cand, time.Now().Unix()); n > 0 {
+		saveSt(0)
+	}
+	if jevEnabled() && !st.hasLocalTriager() {
 		nowJ := time.Now().Unix()
 		var fresh []row
 		for _, r := range cand {
@@ -5359,12 +5362,38 @@ func renderOnce() int {
 	return 0
 }
 
+func trainTriager() int {
+	st, err := loadStore()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	snap, err := loadSnapshot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	n := st.fitLocalTriager(collectRows(snap, st), time.Now().Unix())
+	if n < 8 {
+		fmt.Fprintf(os.Stderr, "not enough labeled rows: %d\n", n)
+		return 1
+	}
+	if err := saveStore(st); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Printf("local triager fit on %d Jev-labeled rows\n", n)
+	return 0
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: herdr-recall <hook|open-picker|picker|record|jump|stats|favorite|render> [args]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "train-triager":
+		os.Exit(trainTriager())
 	case "open-picker":
 		os.Exit(openPicker())
 	case "picker":

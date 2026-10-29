@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,6 +175,45 @@ func TestCorrIDStaysOneSignal(t *testing.T) {
 	plain := txHit{SessionID: "plain", Snippet: "the bugs list is ready"}
 	if txClassScore(st, idHit, now) >= txClassScore(st, plain, now) {
 		t.Fatal("the identifier hit should rank below a plain bugs hit")
+	}
+}
+
+func TestLocalTriagerLearnsJevAndDemote(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{Jev: &jevState{
+		Scores:   map[string]float64{},
+		ScoreKey: map[string]string{},
+		Weights:  map[string]float64{},
+	}}
+	var rows []row
+	for i := 0; i < 10; i++ {
+		r := row{PaneID: fmt.Sprintf("hot-%d", i), Label: "portal billing", Status: "blocked", Agent: "pi", CWD: "/tmp/portal"}
+		st.Jev.Scores[r.PaneID] = 0.8
+		st.Jev.ScoreKey[r.PaneID] = jevRowKey(r)
+		rows = append(rows, r)
+	}
+	for i := 0; i < 10; i++ {
+		r := row{PaneID: fmt.Sprintf("cold-%d", i), Label: "notes", Status: "idle", Agent: "claude", CWD: "/tmp/notes"}
+		st.Jev.Scores[r.PaneID] = 0.1
+		st.Jev.ScoreKey[r.PaneID] = jevRowKey(r)
+		rows = append(rows, r)
+	}
+	if st.fitLocalTriager(rows, now) < 8 {
+		t.Fatal("fit did not use the Jev labels")
+	}
+	hot := st.localTeacherScore(rows[0], now)
+	cold := st.localTeacherScore(rows[10], now)
+	if hot <= cold {
+		t.Fatalf("hot %v should outrank cold %v", hot, cold)
+	}
+	st.Jev.Teachings = []jevTeaching{{
+		Intent:   "demote",
+		Pane:     jevPaneContext{PaneID: rows[0].PaneID},
+		Selected: []string{"tok:billing", "tok:portal"},
+	}}
+	before := teachShift(st, rows[0], now)
+	if before >= 0 {
+		t.Fatal("a demote teach did not lower the target")
 	}
 }
 
