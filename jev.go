@@ -47,6 +47,7 @@ type jevState struct {
 	Distilled   map[string]float64 `json:"distilled,omitempty"`
 	DistillBias float64            `json:"distill_bias,omitempty"`
 	DistillN    int                `json:"distill_n,omitempty"`
+	Ranker      string             `json:"ranker,omitempty"`
 }
 
 // jevRule is a conditional preference. It fires only when the row matches
@@ -353,6 +354,11 @@ func (s *store) jevPriority(r row, now int64) float64 {
 func (s *store) localTeacherScore(r row, now int64) float64 {
 	if s == nil || s.Jev == nil {
 		return 0
+	}
+	if s.Jev.Ranker == "gbdt" {
+		if m := loadGBDT(); m != nil {
+			return m.scoreRow(r, now)
+		}
 	}
 	if len(s.Jev.Distilled) > 0 {
 		sum := s.Jev.DistillBias

@@ -5382,6 +5382,10 @@ func trainTriager() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	if _, err := writeTriagerExamples(st, collectRows(snap, st), time.Now().Unix()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	fmt.Printf("local triager fit on %d Jev-labeled rows\n", n)
 	return 0
 }
