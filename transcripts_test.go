@@ -31,6 +31,21 @@ ID: 01a0d647-8e54-71ee-8c53-b1c71d49083a
 	}
 }
 
+func TestTranscriptRoleSender(t *testing.T) {
+	if transcriptSender("user") != "human" {
+		t.Fatal("user search must use human messages")
+	}
+	if transcriptSender("agent") != "assistant" {
+		t.Fatal("agent search must use assistant messages")
+	}
+	if transcriptSender("all") != "" {
+		t.Fatal("all search must not filter the speaker")
+	}
+	if nextTxRole("user") != "agent" || nextTxRole("agent") != "all" || nextTxRole("all") != "user" {
+		t.Fatal("role cycle is user, agent, all")
+	}
+}
+
 func TestSessionMatchesPanePath(t *testing.T) {
 	path := "/home/jon/.pi/agent/sessions/x/2026_01a0d647-8e54-71ee-8c53-b1c71d49083a.jsonl"
 	if !sessionMatchesPane("01a0d647-8e54-71ee-8c53-b1c71d49083a", path) {

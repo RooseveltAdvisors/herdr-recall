@@ -82,16 +82,77 @@ func parseCcriderSearch(text string) []txHit {
 	return out
 }
 
-func searchTranscripts(query string) ([]txHit, error) {
+func transcriptSender(role string) string {
+	switch role {
+	case "agent":
+		return "assistant"
+	case "all":
+		return ""
+	default:
+		return "human"
+	}
+}
+
+func nextTxRole(role string) string {
+	switch role {
+	case "user":
+		return "agent"
+	case "agent":
+		return "all"
+	default:
+		return "user"
+	}
+}
+
+func ftsQuery(q string) string {
+	var parts []string
+	for _, w := range strings.Fields(q) {
+		w = strings.ReplaceAll(w, "\"", "")
+		if w == "" {
+			continue
+		}
+		parts = append(parts, "\""+w+"\"")
+	}
+	return strings.Join(parts, " AND ")
+}
+
+func searchTranscripts(query, role string) ([]txHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil
 	}
-	if _, err := exec.LookPath("ccrider"); err != nil {
-		return nil, fmt.Errorf("ccrider is not installed")
+	db := ccriderDB()
+	if db == "" {
+		return nil, fmt.Errorf("ccrider index is missing")
 	}
-	cmd := exec.Command("ccrider", "search", "--limit", "30", query)
-	cmd.Env = os.Environ()
+	if _, err := os.Stat(db); err != nil {
+		return nil, fmt.Errorf("ccrider index is not ready")
+	}
+	match := ftsQuery(query)
+	if match == "" {
+		return nil, nil
+	}
+	script := `
+import json, sqlite3, sys
+db, match, sender = sys.argv[1], sys.argv[2], sys.argv[3]
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+sql = """
+SELECT s.session_id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
+       substr(ifnull(m.text_content,''), 1, 180), ifnull(m.timestamp,'')
+FROM messages_fts
+JOIN messages m ON m.id = messages_fts.rowid
+JOIN sessions s ON s.id = m.session_id
+WHERE messages_fts MATCH ?
+"""
+args = [match]
+if sender:
+    sql += " AND m.sender = ?"
+    args.append(sender)
+sql += " ORDER BY m.timestamp DESC LIMIT 30"
+rows = con.execute(sql, args).fetchall()
+print(json.dumps(rows))
+`
+	cmd := exec.Command("python3", "-c", script, db, match, transcriptSender(role))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -100,8 +161,24 @@ func searchTranscripts(query string) ([]txHit, error) {
 		}
 		return nil, fmt.Errorf("%s", msg)
 	}
-	hits := parseCcriderSearch(string(out))
-	fillProviders(hits)
+	var rows [][]string
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, err
+	}
+	hits := make([]txHit, 0, len(rows))
+	for _, row := range rows {
+		if len(row) < 6 {
+			continue
+		}
+		hits = append(hits, txHit{
+			SessionID: row[0],
+			Provider:  row[1],
+			CWD:       row[2],
+			Summary:   row[3],
+			Snippet:   strings.Join(strings.Fields(row[4]), " "),
+			When:      row[5],
+		})
+	}
 	return hits, nil
 }
 
