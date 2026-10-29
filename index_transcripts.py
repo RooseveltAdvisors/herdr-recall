@@ -30,6 +30,8 @@ HANDOFF = (
     "<task-notification>",
     "<!-- backpass",
     "You are a crewmate",
+    "[fm-from-firstmate]",
+    "SENTIMENT:",
 )
 
 
