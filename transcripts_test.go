@@ -63,17 +63,34 @@ func TestFilterHitsNarrowsWithoutAQuery(t *testing.T) {
 }
 
 func TestTranscriptRoleSender(t *testing.T) {
-	if transcriptSender("user") != "human" {
-		t.Fatal("user search must use human messages")
+	if transcriptSender("typed") != "human" || transcriptSender("any-user") != "human" {
+		t.Fatal("typed and any-user search human messages")
 	}
-	if transcriptSender("agent") != "assistant" {
-		t.Fatal("agent search must use assistant messages")
+	if transcriptSender("replies") != "assistant" {
+		t.Fatal("replies search assistant messages")
 	}
-	if transcriptSender("all") != "" {
-		t.Fatal("all search must not filter the speaker")
+	if transcriptSender("everything") != "" {
+		t.Fatal("everything must not filter the speaker")
 	}
-	if nextTxRole("user") != "agent" || nextTxRole("agent") != "all" || nextTxRole("all") != "user" {
-		t.Fatal("role cycle is user, agent, all")
+	if nextTxRole("typed") != "any-user" || nextTxRole("any-user") != "replies" || nextTxRole("replies") != "everything" || nextTxRole("everything") != "typed" {
+		t.Fatal("role cycle")
+	}
+}
+
+func TestTypedOnlyDropsAgentHandoff(t *testing.T) {
+	if _, ok := typedOnly("\u2063FIRSTMATE_OP: v1 watcher: wake"); ok {
+		t.Fatal("firstmate handoff counted as typed")
+	}
+	if _, ok := typedOnly("BEADS NOTIFY (comment). close the bead"); ok {
+		t.Fatal("beads notify counted as typed")
+	}
+	got, ok := typedOnly("PREVIOUS AI RESPONSE (what the user is reacting to):\nagent plan\n\nCURRENT USER MESSAGE:\nyes. go build it")
+	if !ok || got != "yes. go build it" {
+		t.Fatalf("extracted = %q ok=%v", got, ok)
+	}
+	got, ok = typedOnly("what's the difference between owner and assignee?")
+	if !ok || !strings.Contains(got, "owner") {
+		t.Fatal("plain typed message was dropped")
 	}
 }
 

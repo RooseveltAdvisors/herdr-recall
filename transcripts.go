@@ -104,9 +104,9 @@ func parseCcriderSearch(text string) []txHit {
 
 func transcriptSender(role string) string {
 	switch role {
-	case "agent":
+	case "replies":
 		return "assistant"
-	case "all":
+	case "everything":
 		return ""
 	default:
 		return "human"
@@ -115,13 +115,85 @@ func transcriptSender(role string) string {
 
 func nextTxRole(role string) string {
 	switch role {
-	case "user":
-		return "agent"
-	case "agent":
-		return "all"
+	case "typed":
+		return "any-user"
+	case "any-user":
+		return "replies"
+	case "replies":
+		return "everything"
 	default:
-		return "user"
+		return "typed"
 	}
+}
+
+func txRoleLabel(role string) string {
+	switch role {
+	case "any-user":
+		return "Any user"
+	case "replies":
+		return "Replies"
+	case "everything":
+		return "Everything"
+	default:
+		return "Typed"
+	}
+}
+
+func txRoleFromKey(key string) (string, bool) {
+	switch key {
+	case "1":
+		return "typed", true
+	case "2":
+		return "any-user", true
+	case "3":
+		return "replies", true
+	case "4":
+		return "everything", true
+	default:
+		return "", false
+	}
+}
+
+func typedOnly(text string) (string, bool) {
+	s := strings.TrimLeft(text, "\u2063\t\r\n ")
+	if i := strings.LastIndex(s, "CURRENT USER MESSAGE:"); i >= 0 {
+		s = strings.TrimSpace(s[i+len("CURRENT USER MESSAGE:"):])
+		s = strings.TrimLeft(s, ":\n ")
+	}
+	if s == "" || injectedUserText(s) {
+		return "", false
+	}
+	return s, true
+}
+
+func injectedUserText(s string) bool {
+	s = strings.TrimLeft(s, "\u2063\t\r\n ")
+	prefixes := []string{
+		"FIRSTMATE_OP:",
+		"Beads enforcement",
+		"Workspace boundary",
+		"PREVIOUS AI RESPONSE",
+		"BEADS NOTIFY",
+		"Firstmate instruction",
+		": Firstmate instruction",
+		"Analyze this Claude Code",
+		"reply with exactly:",
+		"Reply to me at:",
+		"<recommended_plugins>",
+		"<task-notification>",
+		"<!-- backpass",
+		"30-minute signage",
+		"Supervisor escalate",
+		"You are a crewmate",
+		"You are an autonomous",
+		"# Current worker role",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func ftsQuery(q string) string {
@@ -174,7 +246,25 @@ func searchTranscripts(query, role string) ([]txHit, error) {
 	if resp.Err != "" {
 		return nil, fmt.Errorf("%s", resp.Err)
 	}
-	return resp.Hits, nil
+	hits := resp.Hits
+	if role == "typed" || role == "" || role == "user" {
+		kept := make([]txHit, 0, len(hits))
+		for _, h := range hits {
+			body, ok := typedOnly(h.Snippet)
+			if !ok {
+				continue
+			}
+			h.Snippet = strings.Join(strings.Fields(body), " ")
+			kept = append(kept, h)
+			if len(kept) == 24 {
+				break
+			}
+		}
+		hits = kept
+	} else if len(hits) > 24 {
+		hits = hits[:24]
+	}
+	return hits, nil
 }
 
 func previewTranscript(sessionID string, msgID int64) ([]string, error) {
@@ -339,7 +429,7 @@ for raw in sys.stdin:
                 order = {i: n for n, i in enumerate(ids)}
                 rows = con.execute(sql, args).fetchall()
                 rows.sort(key=lambda r: order.get(r[1], 999))
-                for row in rows[:24]:
+                for row in rows[:80]:
                     hits.append({
                         "SessionID": row[0], "MsgID": row[1], "Provider": row[2], "CWD": row[3],
                         "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()), "When": row[6] or "",
@@ -521,6 +611,34 @@ func livePaneForSession(s *snapshot, sessionID string) string {
 	return ""
 }
 
+func txFilterLine(role string, width int) string {
+	parts := []struct{ key, id, label string }{
+		{"1", "typed", "Typed"},
+		{"2", "any-user", "Any user"},
+		{"3", "replies", "Replies"},
+		{"4", "everything", "Everything"},
+	}
+	var b strings.Builder
+	b.WriteString(" ")
+	for _, p := range parts {
+		chip := " " + p.key + " " + p.label + " "
+		if p.id == role || (role == "" && p.id == "typed") || (role == "user" && p.id == "typed") {
+			b.WriteString(keySelectBg + keySelectFg + keyBold + chip + keyReset)
+		} else {
+			b.WriteString(keyOverlay + chip + keyReset)
+		}
+		b.WriteString(" ")
+	}
+	return clipANSI(b.String(), width)
+}
+
+func clipANSI(s string, n int) string {
+	if n < 1 {
+		return ""
+	}
+	return fitLine(s, n)
+}
+
 func txActionLine(hit txHit, live bool) string {
 	open := "enter browse"
 	if live {
@@ -546,7 +664,7 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 	sc := newScreen(width, maxLines, 8)
 	sc.header(names, active)
 	sc.emit(renderField(fv, width))
-	sc.emit(keyOverlay + "  " + role + " transcripts" + keyReset)
+	sc.emit(txFilterLine(role, width))
 	sc.rule()
 	left := width * 2 / 5
 	if left < 28 {

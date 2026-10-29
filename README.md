@@ -40,7 +40,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `j` / `k` / `↑` / `↓` | move one row, or N rows with a count such as `3j` |
 | `gg` / `G` | jump to the first / last row |
 | `g` then `i` / `l` / `t` / `r` / `f` / `m` / `a` | jump to Inbox, Later, Transcripts, Recent, Favorites, Most used, All |
-| Transcripts `/` | search as you type. Default is your words. `tab` or `r` switches to agent, then all |
+| Transcripts `1` `2` `3` `4` | Typed, Any user, Replies, Everything. Typed drops agent handoffs |
 | `←` / `→` | switch tabs. `h` and `l` do not |
 | `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
 | `enter` | focus the selected pane directly via Herdr socket |
