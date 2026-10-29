@@ -6,9 +6,9 @@
 # Transcript search is optional. It needs ccrider. Without ccrider, the
 # Transcripts tab is hidden.
 #
-#   ./install_plugin.sh                  # asks if a terminal is attached
-#   ./install_plugin.sh --with-transcripts
-#   ./install_plugin.sh --no-transcripts
+# Agents pass a flag. There is no y/N prompt.
+#   ./install_plugin.sh main
+#   ./install_plugin.sh main --with-transcripts
 #   HERDR_RECALL_WITH_TRANSCRIPTS=1 ./install_plugin.sh main
 set -euo pipefail
 
@@ -33,14 +33,8 @@ done
 want_transcripts() {
   case "$CHOICE" in
     1|y|Y|yes|true) return 0 ;;
-    0|n|N|no|false) return 1 ;;
+    *) return 1 ;;
   esac
-  if [[ ! -t 0 ]]; then
-    return 1
-  fi
-  local ans
-  read -r -p "Install optional transcript search (ccrider)? [y/N] " ans
-  [[ "$ans" == "y" || "$ans" == "Y" || "$ans" == "yes" ]]
 }
 
 install_ccrider() {
@@ -65,5 +59,5 @@ echo "installed RooseveltAdvisors/herdr-recall@$REF into Herdr's plugin folder"
 if want_transcripts; then
   install_ccrider
 else
-  echo "Skipped ccrider. The Transcripts tab stays hidden until ccrider is on PATH."
+  echo "ccrider not requested. Pass --with-transcripts to install it. The Transcripts tab stays hidden until ccrider is on PATH."
 fi

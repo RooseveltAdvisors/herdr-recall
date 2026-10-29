@@ -3659,6 +3659,8 @@ func runPicker() int {
 	txBrowse := false
 	txLines := []string{}
 	txLine := 0
+	txPrevID := ""
+	txPrevLines := []string{}
 	teachRow := row{}
 	teachRank := 0
 	teachTotal := 0
@@ -4044,6 +4046,7 @@ func runPicker() int {
 			return
 		}
 		txHits = hits
+		txPrevID = ""
 		if sel >= len(txHits) {
 			sel = 0
 		}
@@ -4097,6 +4100,17 @@ func runPicker() int {
 		if sel < len(rows) {
 			pointedID = rows[sel].PaneID
 		}
+		if views(st)[tab].Kind == "transcripts" && sel >= 0 && sel < len(txHits) && txHits[sel].SessionID != txPrevID {
+			lines, err := previewTranscript(txHits[sel].SessionID, txHits[sel].MsgID)
+			if err != nil {
+				txPrevLines = []string{err.Error()}
+			} else if len(lines) == 0 {
+				txPrevLines = []string{"No nearby messages."}
+			} else {
+				txPrevLines = lines
+			}
+			txPrevID = txHits[sel].SessionID
+		}
 		var frame string
 		switch {
 		case txBrowse:
@@ -4138,6 +4152,16 @@ func runPicker() int {
 			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.View("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
 		default:
 			v := views(st)[tab]
+			if v.Kind == "transcripts" {
+				live := false
+				var hit txHit
+				if sel >= 0 && sel < len(txHits) {
+					hit = txHits[sel]
+					live = livePaneForSession(frozen, hit.SessionID) != ""
+				}
+				frame = renderTranscriptSplit(w, h, viewNames(st), tab, searchEd.View("/", searching), status, txRole, rows, sel, scrollOffset, hit, live, txPrevLines)
+				break
+			}
 			kind := "both"
 			if v.Kind == "custom" {
 				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)

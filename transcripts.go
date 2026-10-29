@@ -1,17 +1,23 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+
+	"github.com/RooseveltAdvisors/vimline"
 )
 
 // txHit is one ccrider search match the Transcripts tab can open or fork.
 type txHit struct {
 	SessionID string
+	MsgID     int64
 	Provider  string
 	CWD       string
 	Summary   string
@@ -135,66 +141,164 @@ func searchTranscripts(query, role string) ([]txHit, error) {
 	if query == "" {
 		return nil, nil
 	}
-	db := ccriderDB()
-	if db == "" {
-		return nil, fmt.Errorf("ccrider index is missing")
-	}
-	if _, err := os.Stat(db); err != nil {
-		return nil, fmt.Errorf("ccrider index is not ready")
-	}
 	match := ftsQuery(query)
 	if match == "" {
 		return nil, nil
 	}
-	script := `
-import json, sqlite3, sys
-db, match, sender = sys.argv[1], sys.argv[2], sys.argv[3]
-con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-sql = """
-SELECT s.session_id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
-       substr(ifnull(m.text_content,''), 1, 180), ifnull(m.timestamp,'')
-FROM messages_fts
-JOIN messages m ON m.id = messages_fts.rowid
-JOIN sessions s ON s.id = m.session_id
-WHERE messages_fts MATCH ?
-"""
-args = [match]
-if sender:
-    sql += " AND m.sender = ?"
-    args.append(sender)
-sql += " ORDER BY m.timestamp DESC LIMIT 30"
-rows = con.execute(sql, args).fetchall()
-print(json.dumps(rows))
-`
-	cmd := exec.Command("python3", "-c", script, db, match, transcriptSender(role))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
-		}
-		return nil, fmt.Errorf("%s", msg)
-	}
-	var rows [][]string
-	if err := json.Unmarshal(out, &rows); err != nil {
+	var resp txReply
+	if err := txAsk(map[string]any{"op": "search", "match": match, "sender": transcriptSender(role)}, &resp); err != nil {
 		return nil, err
 	}
-	hits := make([]txHit, 0, len(rows))
-	for _, row := range rows {
-		if len(row) < 6 {
-			continue
-		}
-		hits = append(hits, txHit{
-			SessionID: row[0],
-			Provider:  row[1],
-			CWD:       row[2],
-			Summary:   row[3],
-			Snippet:   strings.Join(strings.Fields(row[4]), " "),
-			When:      row[5],
-		})
+	if resp.Err != "" {
+		return nil, fmt.Errorf("%s", resp.Err)
 	}
-	return hits, nil
+	return resp.Hits, nil
 }
+
+func previewTranscript(sessionID string, msgID int64) ([]string, error) {
+	var resp txReply
+	if err := txAsk(map[string]any{"op": "preview", "session_id": sessionID, "msg_id": msgID}, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Err != "" {
+		return nil, fmt.Errorf("%s", resp.Err)
+	}
+	return resp.Lines, nil
+}
+
+type txReply struct {
+	Hits  []txHit  `json:"hits"`
+	Lines []string `json:"lines"`
+	Err   string   `json:"err"`
+}
+
+type txProc struct {
+	mu  sync.Mutex
+	cmd *exec.Cmd
+	in  io.WriteCloser
+	out *bufio.Reader
+}
+
+var txSearch txProc
+
+func txAsk(req map[string]any, resp *txReply) error {
+	txSearch.mu.Lock()
+	defer txSearch.mu.Unlock()
+	if err := txSearch.ensure(); err != nil {
+		return err
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	if _, err := txSearch.in.Write(append(b, '\n')); err != nil {
+		txSearch.stop()
+		return err
+	}
+	line, err := txSearch.out.ReadString('\n')
+	if err != nil {
+		txSearch.stop()
+		return err
+	}
+	return json.Unmarshal([]byte(line), resp)
+}
+
+func (p *txProc) stop() {
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
+	p.cmd, p.in, p.out = nil, nil, nil
+}
+
+func (p *txProc) ensure() error {
+	if p.cmd != nil {
+		return nil
+	}
+	db := ccriderDB()
+	if db == "" {
+		return fmt.Errorf("ccrider index is missing")
+	}
+	if _, err := os.Stat(db); err != nil {
+		return fmt.Errorf("ccrider index is not ready")
+	}
+	cmd := exec.Command("python3", "-u", "-c", txWorkerScript, db)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	p.cmd = cmd
+	p.in = stdin
+	p.out = bufio.NewReader(stdout)
+	return nil
+}
+
+const txWorkerScript = `
+import json, sqlite3, sys
+db = sys.argv[1]
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        req = json.loads(raw)
+        op = req.get("op")
+        if op == "search":
+            sql = """
+            SELECT s.session_id, m.id, ifnull(s.provider,''), ifnull(s.cwd,''), ifnull(s.summary,''),
+                   substr(ifnull(m.text_content,''), 1, 160), ifnull(m.timestamp,'')
+            FROM messages_fts
+            JOIN messages m ON m.id = messages_fts.rowid
+            JOIN sessions s ON s.id = m.session_id
+            WHERE messages_fts MATCH ?
+            """
+            args = [req.get("match") or ""]
+            sender = req.get("sender") or ""
+            if sender:
+                sql += " AND m.sender = ?"
+                args.append(sender)
+            sql += " ORDER BY m.timestamp DESC LIMIT 24"
+            hits = []
+            for row in con.execute(sql, args):
+                hits.append({
+                    "SessionID": row[0], "MsgID": row[1], "Provider": row[2], "CWD": row[3],
+                    "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()), "When": row[6] or "",
+                })
+            emit({"hits": hits})
+        elif op == "preview":
+            rows = con.execute("""
+                SELECT ifnull(m.sender,''), ifnull(m.text_content,''), m.id
+                FROM messages m
+                JOIN sessions s ON s.id = m.session_id
+                WHERE s.session_id = ? AND m.sender IN ('human','assistant')
+                  AND m.id BETWEEN ? - 6 AND ? + 6
+                ORDER BY m.sequence
+            """, (req.get("session_id"), int(req.get("msg_id") or 0), int(req.get("msg_id") or 0))).fetchall()
+            lines = []
+            for sender, text, mid in rows:
+                who = "you" if sender == "human" else "agent"
+                body = " ".join((text or "").split())
+                if len(body) > 280:
+                    body = body[:279] + "…"
+                mark = ">" if mid == int(req.get("msg_id") or 0) else " "
+                lines.append(mark + " " + who + ": " + body)
+            emit({"lines": lines})
+        else:
+            emit({"err": "unknown op"})
+    except Exception as exc:
+        emit({"err": str(exc)})
+`
 
 func fillProviders(hits []txHit) {
 	db := ccriderDB()
@@ -346,4 +450,97 @@ func livePaneForSession(s *snapshot, sessionID string) string {
 		}
 	}
 	return ""
+}
+
+func txActionLine(hit txHit, live bool) string {
+	open := "enter browse"
+	if live {
+		open = "enter open pane"
+	}
+	fork := "f fork Pi"
+	if hit.Provider != "" && hit.Provider != "pi" {
+		fork = "f Pi only"
+	}
+	return open + "    " + fork + "    b full thread"
+}
+
+// renderTranscriptSplit draws the hit list on the left and the nearby
+// conversation on the right. Panes without a reminder are not involved.
+func renderTranscriptSplit(width, height int, names []string, active int, fv vimline.View, status, role string, rows []row, sel, scrollOffset int, hit txHit, live bool, preview []string) string {
+	if height < 8 {
+		height = 8
+	}
+	maxLines := height
+	if height > 6 {
+		maxLines = height - 1
+	}
+	sc := newScreen(width, maxLines, 8)
+	sc.header(names, active)
+	sc.emit(renderField(fv, width))
+	sc.emit(keyOverlay + "  " + role + " transcripts" + keyReset)
+	sc.rule()
+	left := width * 2 / 5
+	if left < 28 {
+		left = 28
+	}
+	if left > width-24 {
+		left = width / 2
+	}
+	right := width - left - 1
+	if right < 16 {
+		right = 16
+	}
+	body := maxLines - len(sc.lines) - 3
+	if body < 3 {
+		body = 3
+	}
+	start := scrollOffset
+	if sel < start {
+		start = sel
+	}
+	if sel >= start+body {
+		start = sel - body + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	for i := 0; i < body; i++ {
+		idx := start + i
+		leftText := ""
+		if idx < len(rows) {
+			label := rows[idx].Label
+			if rows[idx].Note != "" {
+				label = rows[idx].Note + "  " + label
+			}
+			leftText = clip(label, left-2)
+			if idx == sel {
+				leftText = keySelectBg + keySelectFg + pad(" "+leftText, left) + keyReset
+			} else {
+				leftText = pad(" "+leftText, left)
+			}
+		} else {
+			leftText = strings.Repeat(" ", left)
+		}
+		rightText := ""
+		if i == 0 && hit.SessionID != "" {
+			who := hit.Provider
+			if who == "" {
+				who = "session"
+			}
+			rightText = keyAccentFg + clip(who+"  "+txActionLine(hit, live), right) + keyReset
+		} else if i-1 >= 0 && i-1 < len(preview) {
+			line := preview[i-1]
+			color := keyText
+			if strings.HasPrefix(strings.TrimSpace(line), ">") {
+				color = keyAccentFg
+			}
+			rightText = color + clip(line, right) + keyReset
+		}
+		sc.emit(leftText + keyOverlay + "\u2502" + keyReset + rightText)
+	}
+	sc.rule()
+	if status != "" {
+		sc.emit(keySub + clip(status, width-1) + keyReset)
+	}
+	return sc.done()
 }

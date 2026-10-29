@@ -192,8 +192,8 @@ Without `ccrider` on `PATH`, the Transcripts tab is not shown.
 ./install_plugin.sh
 ```
 
-The script asks before it installs ccrider. A non-interactive run skips it.
-Pass `--with-transcripts` to install it, or `--no-transcripts` to skip the question.
+The script does not ask a question. Agents pass `--with-transcripts` to install ccrider.
+Without that flag, ccrider is skipped and the Transcripts tab stays hidden.
 
 You can still install the picker alone:
 
