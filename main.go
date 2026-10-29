@@ -96,11 +96,14 @@ type rect struct {
 }
 
 type paneRec struct {
-	PaneID             string `json:"pane_id"`
-	TabID              string `json:"tab_id"`
-	WorkspaceID        string `json:"workspace_id"`
-	AgentStatus        string `json:"agent_status"`
-	Agent              string `json:"agent,omitempty"`
+	PaneID       string `json:"pane_id"`
+	TabID        string `json:"tab_id"`
+	WorkspaceID  string `json:"workspace_id"`
+	AgentStatus  string `json:"agent_status"`
+	Agent        string `json:"agent,omitempty"`
+	AgentSession struct {
+		Value string `json:"value,omitempty"`
+	} `json:"agent_session,omitempty"`
 	TerminalTitle      string `json:"terminal_title"`
 	TerminalTitleStrip string `json:"terminal_title_stripped"`
 	CWD                string `json:"cwd"`
@@ -859,7 +862,7 @@ func views(st *store) []view {
 	for i := range st.Tabs {
 		out = append(out, view{Kind: "custom", Idx: i})
 	}
-	out = append(out, view{Kind: "all"})
+	out = append(out, view{Kind: "all"}, view{Kind: "transcripts"})
 	return out
 }
 
@@ -869,6 +872,8 @@ func viewName(st *store, v view) string {
 		return "Inbox"
 	case "later":
 		return "Later"
+	case "transcripts":
+		return "Transcripts"
 	case "all":
 		return "All"
 	case "favorites":
@@ -913,6 +918,8 @@ func tabJumpLetters(st *store) map[string]int {
 			claim("i", i)
 		case "later":
 			claim("l", i)
+		case "transcripts":
+			claim("t", i)
 		case "favorites":
 			claim("f", i)
 		case "all":
@@ -956,7 +963,7 @@ func registerGoChords(d *keys.Dispatcher, st *store) {
 		chords[letter] = fmt.Sprintf("goto:%d", idx)
 		hint = append(hint, letter+" "+viewName(st, views(st)[idx]))
 	}
-	for _, letter := range []string{"i", "l", "r", "f", "m", "a"} {
+	for _, letter := range []string{"i", "l", "t", "r", "f", "m", "a"} {
 		add(letter)
 	}
 	var extra []string
@@ -2064,7 +2071,7 @@ func allHelpEntries() []helpEntry {
 		{"enter", "focus / switch to selected pane directly"},
 		{"j / k / arrows", "move one row, or N rows with a count (e.g. 3j)"},
 		{"gg / G", "jump to first / last row"},
-		{"g i / g l / g r / g f / g m / g a", "jump to Inbox, Later, Recent, Favorites, Most used, All"},
+		{"g i / g l / g t / g r", "jump to Inbox, Later, Transcripts, Recent"},
 		{"left / right", "switch tabs"},
 		{"ctrl-d / ctrl-u", "scroll half-page down / up"},
 		{"e", "mark done. Leaves current list. z undoes"},
@@ -2112,6 +2119,43 @@ func filterHelpEntries(all []helpEntry, query string) []helpEntry {
 
 // renderHelp draws the ? overlay with windowed scrolling so the highlighted
 // selection is always visible and never cut off past the screen height.
+func renderTranscript(width, height int, lines []string, sel int) string {
+	sc := newScreen(width, height, 8)
+	sc.emit(keyText + keyBold + "  Transcript" + keyReset + keyOverlay + "  j/k move   f fork   esc back" + keyReset)
+	sc.rule()
+	if len(lines) == 0 {
+		sc.emit(keyOverlay + "  Empty transcript." + keyReset)
+		return sc.done()
+	}
+	if sel < 0 {
+		sel = 0
+	}
+	if sel >= len(lines) {
+		sel = len(lines) - 1
+	}
+	visible := height - 4
+	if visible < 1 {
+		visible = 1
+	}
+	start := sel - visible/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + visible
+	if end > len(lines) {
+		end = len(lines)
+	}
+	for i := start; i < end; i++ {
+		line := lines[i]
+		if i == sel {
+			sc.emit(keySelectBg + keySelectFg + " " + line + keyReset)
+		} else {
+			sc.emit(" " + line)
+		}
+	}
+	return sc.done()
+}
+
 func renderHelp(width, height int, fv vimline.View, sel, scrollOffset int) string {
 	maxLines := height
 	if height > 6 {
@@ -3003,6 +3047,8 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			emit(keyOverlay + "  Nothing pinned. Press m on a pane to mark it." + keyReset)
 		case len(names) > 0 && names[active] == "Later":
 			emit(keyOverlay + "  No reminders. Press h on a pane to set one." + keyReset)
+		case len(names) > 0 && names[active] == "Transcripts":
+			emit(keyOverlay + "  Press / and type your words. Enter searches past chats." + keyReset)
 		default:
 			emit(keyOverlay + "  No panes in this tab." + keyReset)
 		}
@@ -3013,7 +3059,10 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	} else {
 		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "J", "jev", "h", "remind", "n", "note", "!", "block", "/", "search"))
 	}
-	extra := "arrows tabs   g i/l/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
+	extra := "arrows tabs   g i/l/t/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
+	if len(names) > 0 && names[active] == "Transcripts" {
+		extra = "/ search   enter open   f fork Pi   b browse   esc back"
+	}
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
 	}
@@ -3601,6 +3650,10 @@ func runPicker() int {
 	teachFeats := []teachFeat{}
 	teachFeatSel := 0
 	teachEd := vimline.New("")
+	txHits := []txHit{}
+	txBrowse := false
+	txLines := []string{}
+	txLine := 0
 	teachRow := row{}
 	teachRank := 0
 	teachTotal := 0
@@ -3970,6 +4023,9 @@ func runPicker() int {
 
 	for {
 		rows = resync(rows)
+		if views(st)[tab].Kind == "transcripts" {
+			rows = transcriptRows(txHits)
+		}
 		if sel >= len(rows) {
 			sel = len(rows) - 1
 		}
@@ -4014,6 +4070,8 @@ func runPicker() int {
 		}
 		var frame string
 		switch {
+		case txBrowse:
+			frame = renderTranscript(w, h, txLines, txLine)
 		case showHelp:
 			frame = renderHelp(w, h, helpEd.View("/", helpSearching), helpSel, helpScrollOffset)
 		case showJev:
@@ -4105,6 +4163,35 @@ func runPicker() int {
 			return 0
 		}
 		half := max(1, (h-3)/2)
+		if txBrowse {
+			switch key {
+			case "j", "down":
+				if txLine < len(txLines)-1 {
+					txLine++
+				}
+			case "k", "up":
+				if txLine > 0 {
+					txLine--
+				}
+			case "g":
+				txLine = 0
+			case "G":
+				txLine = max(0, len(txLines)-1)
+			case "f":
+				if sel >= 0 && sel < len(txHits) {
+					pane, err := forkPiSession(txHits[sel])
+					if err != nil {
+						status = err.Error()
+					} else {
+						status = "forked in " + pane
+					}
+				}
+			case "esc", "q":
+				txBrowse = false
+				status = ""
+			}
+			continue
+		}
 		if showHelp {
 			entries := filterHelpEntries(allHelpEntries(), helpEd.Text())
 			total := len(entries)
@@ -4458,6 +4545,19 @@ func runPicker() int {
 		if searching && !showHelp {
 			switch searchEd.Feed(key) {
 			case vimline.ActAccept:
+				if views(st)[tab].Kind == "transcripts" {
+					searching = false
+					status = "searching transcripts"
+					hits, err := searchTranscripts(searchEd.String())
+					if err != nil {
+						status = clip(err.Error(), 80)
+					} else {
+						txHits = hits
+						sel = 0
+						status = fmt.Sprintf("%d chats", len(hits))
+					}
+					continue
+				}
 				if !pointed() {
 					break
 				}
@@ -4709,6 +4809,31 @@ func runPicker() int {
 					f.Close()
 				}
 			}
+			if views(st)[tab].Kind == "transcripts" {
+				if len(txHits) == 0 || sel >= len(txHits) {
+					status = "search first with /"
+					break
+				}
+				hit := txHits[sel]
+				if pane := livePaneForSession(frozen, hit.SessionID); pane != "" {
+					tty.WriteString("\x1b[2J\x1b[H")
+					if err := jumpTo(pane); err != nil {
+						status = err.Error()
+						break
+					}
+					return 0
+				}
+				lines, err := transcriptLines(hit.SessionID)
+				if err != nil {
+					status = "session is not open. press f to fork a Pi chat"
+					break
+				}
+				txBrowse = true
+				txLines = lines
+				txLine = 0
+				status = "not open in a pane. f forks Pi. esc back"
+				break
+			}
 			if len(rows) == 0 {
 				return 0
 			}
@@ -4922,7 +5047,7 @@ func runPicker() int {
 			if sel > 0 {
 				sel--
 			}
-		case !searching && !showHelp && (key == "b" || key == "w" || key == "i" || key == "d"):
+		case !searching && !showHelp && views(st)[tab].Kind != "transcripts" && (key == "b" || key == "w" || key == "i" || key == "d"):
 			stateFilter = map[string]string{"b": "blocked", "w": "working", "i": "idle", "d": "done"}[key]
 			searchEd = vimline.New("")
 			searching = false
@@ -4930,6 +5055,26 @@ func runPicker() int {
 		case key == "a" && !searching && !showHelp:
 			stateFilter = ""
 			searchEd = vimline.New("")
+		case key == "f" && !searching && !showHelp && views(st)[tab].Kind == "transcripts":
+			if sel >= 0 && sel < len(txHits) {
+				pane, err := forkPiSession(txHits[sel])
+				if err != nil {
+					status = clip(err.Error(), 80)
+				} else {
+					status = "forked in " + pane
+				}
+			}
+		case key == "b" && !searching && !showHelp && views(st)[tab].Kind == "transcripts":
+			if sel >= 0 && sel < len(txHits) {
+				lines, err := transcriptLines(txHits[sel].SessionID)
+				if err != nil {
+					status = clip(err.Error(), 80)
+				} else {
+					txBrowse = true
+					txLines = lines
+					txLine = 0
+				}
+			}
 		case key == "m" && !searching:
 			if !pointed() {
 				break

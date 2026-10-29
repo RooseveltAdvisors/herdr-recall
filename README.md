@@ -8,7 +8,7 @@ When you switch across 20 to 30 live agent threads to give quick feedback and un
 See [VISION.md](VISION.md) for the project vision and acceptance policy.
 
 Press `prefix+k` and the picker opens as a 95% by 95% popup.
-Tabs from left to right are `Favorites`, `Inbox`, `Later`, `Recent`, `Most used`, and `All`.
+Tabs from left to right are `Favorites`, `Inbox`, `Later`, `Recent`, `Most used`, `All`, and `Transcripts`.
 `Recent` and `Most used` start as custom tabs. `t c` creates one, `t r` revises it, and `t x` deletes it after a confirmation.
 
 In `Inbox`, press `e` to mark a thread Done for the current cycle.
@@ -38,7 +38,7 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `prefix+k` | open the recall and triage popup |
 | `j` / `k` / `↑` / `↓` | move one row, or N rows with a count such as `3j` |
 | `gg` / `G` | jump to the first / last row |
-| `g` then `i` / `l` / `r` / `f` / `m` / `a` | jump to Inbox, Later, Recent, Favorites, Most used, All |
+| `g` then `i` / `l` / `t` / `r` / `f` / `m` / `a` | jump to Inbox, Later, Transcripts, Recent, Favorites, Most used, All |
 | `←` / `→` | switch tabs. `h` and `l` do not |
 | `ctrl+u` / `ctrl+d` | half-page up / down (in search or note: `ctrl+u` clears text) |
 | `enter` | focus the selected pane directly via Herdr socket |

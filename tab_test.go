@@ -83,7 +83,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 		},
 	}
 	gotOrder := strings.Join(viewNames(st), ",")
-	wantOrder := "Favorites,Inbox,Later,Recent,Most used,All"
+	wantOrder := "Favorites,Inbox,Later,Recent,Most used,All,Transcripts"
 	if gotOrder != wantOrder {
 		t.Fatalf("tab order = %q, want %q", gotOrder, wantOrder)
 	}
