@@ -9,6 +9,7 @@ ranked query can filter them without scanning every match.
 import sqlite3
 import sys
 import time
+import unicodedata
 
 SRC = "/home/jon/.config/ccrider/sessions.db"
 BATCH = 800
@@ -32,8 +33,15 @@ HANDOFF = (
 )
 
 
+def visible(text):
+    s = text.lstrip()
+    while s and unicodedata.category(s[0]) in ("Cf", "Cc"):
+        s = s[1:].lstrip()
+    return s
+
+
 def kind_of(sender, text):
-    s = text.lstrip("\u2063 \t\r\n")
+    s = visible(text)
     if sender == "assistant":
         return "assistant", s[:BODY]
     key = "CURRENT USER MESSAGE:"
