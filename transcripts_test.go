@@ -31,6 +31,26 @@ ID: 01a0d647-8e54-71ee-8c53-b1c71d49083a
 	}
 }
 
+func TestTranscriptsTabFollowsCcrider(t *testing.T) {
+	st := &store{Version: 2, TabsInit: true, Tabs: defaultTabs()}
+	t.Setenv("HERDR_RECALL_TRANSCRIPTS", "0")
+	for _, name := range viewNames(st) {
+		if name == "Transcripts" {
+			t.Fatal("Transcripts tab shown without ccrider")
+		}
+	}
+	t.Setenv("HERDR_RECALL_TRANSCRIPTS", "1")
+	found := false
+	for _, name := range viewNames(st) {
+		if name == "Transcripts" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("Transcripts tab hidden when the dependency is enabled")
+	}
+}
+
 func TestTranscriptRoleSender(t *testing.T) {
 	if transcriptSender("user") != "human" {
 		t.Fatal("user search must use human messages")

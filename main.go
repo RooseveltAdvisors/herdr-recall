@@ -862,7 +862,10 @@ func views(st *store) []view {
 	for i := range st.Tabs {
 		out = append(out, view{Kind: "custom", Idx: i})
 	}
-	out = append(out, view{Kind: "all"}, view{Kind: "transcripts"})
+	out = append(out, view{Kind: "all"})
+	if transcriptsEnabled() {
+		out = append(out, view{Kind: "transcripts"})
+	}
 	return out
 }
 

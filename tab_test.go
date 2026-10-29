@@ -68,6 +68,7 @@ func TestStatusDotSitsLeftOfTheName(t *testing.T) {
 }
 
 func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
+	t.Setenv("HERDR_RECALL_TRANSCRIPTS", "0")
 	now := time.Now().Unix()
 	st := &store{
 		Version:  1,
@@ -83,7 +84,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 		},
 	}
 	gotOrder := strings.Join(viewNames(st), ",")
-	wantOrder := "Favorites,Inbox,Later,Recent,Most used,All,Transcripts"
+	wantOrder := "Favorites,Inbox,Later,Recent,Most used,All"
 	if gotOrder != wantOrder {
 		t.Fatalf("tab order = %q, want %q", gotOrder, wantOrder)
 	}

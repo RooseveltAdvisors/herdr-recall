@@ -19,6 +19,20 @@ type txHit struct {
 	When      string
 }
 
+// transcriptsEnabled reports whether the Transcripts tab should appear.
+// The tab stays hidden unless the optional ccrider dependency is installed.
+// HERDR_RECALL_TRANSCRIPTS=0 hides it. HERDR_RECALL_TRANSCRIPTS=1 shows it.
+func transcriptsEnabled() bool {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv("HERDR_RECALL_TRANSCRIPTS"))) {
+	case "0", "off", "no", "false":
+		return false
+	case "1", "on", "yes", "true":
+		return true
+	}
+	_, err := exec.LookPath("ccrider")
+	return err == nil
+}
+
 func ccriderDB() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

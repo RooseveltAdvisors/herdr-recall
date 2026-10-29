@@ -2,7 +2,7 @@ id = "RooseveltAdvisors.herdr-recall"
 name = "Herdr Recall"
 version = "0.1.0"
 min_herdr_version = "0.8.0"
-description = "Pane picker on prefix+shift+l: jump to panes by recency, most used, or favorites"
+description = "Pane picker on prefix+k. Transcripts tab appears only if ccrider is installed."
 credit = "RooseveltAdvisors/herdr-recall"
 platforms = ["linux", "macos"]
 

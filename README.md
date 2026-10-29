@@ -8,7 +8,8 @@ When you switch across 20 to 30 live agent threads to give quick feedback and un
 See [VISION.md](VISION.md) for the project vision and acceptance policy.
 
 Press `prefix+k` and the picker opens as a 95% by 95% popup.
-Tabs from left to right are `Favorites`, `Inbox`, `Later`, `Recent`, `Most used`, `All`, and `Transcripts`.
+Tabs from left to right are `Favorites`, `Inbox`, `Later`, `Recent`, `Most used`, and `All`.
+`Transcripts` is added only when `ccrider` is installed.
 `Recent` and `Most used` start as custom tabs. `t c` creates one, `t r` revises it, and `t x` deletes it after a confirmation.
 
 In `Inbox`, press `e` to mark a thread Done for the current cycle.
@@ -184,6 +185,17 @@ tty, so a row never wraps even in a narrow overlay.
 ## Install
 
 Needs Go 1.26+ and Herdr 0.8.0 or newer.
+Transcript search is optional. It needs [ccrider](https://github.com/neilberkman/ccrider).
+Without `ccrider` on `PATH`, the Transcripts tab is not shown.
+
+```sh
+./install_plugin.sh
+```
+
+The script asks before it installs ccrider. A non-interactive run skips it.
+Pass `--with-transcripts` to install it, or `--no-transcripts` to skip the question.
+
+You can still install the picker alone:
 
 ```sh
 herdr plugin install RooseveltAdvisors/herdr-recall --ref main --yes
