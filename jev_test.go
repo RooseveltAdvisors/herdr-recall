@@ -154,6 +154,29 @@ func TestJevLearnWithNilWeightsDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestCorrIDStaysOneSignal(t *testing.T) {
+	text := "this is obviously a agent message. see this corr=portal-bugs? that's a big tell"
+	ids := jevIdentifiers(text)
+	if len(ids) != 1 || ids[0] != "id:corr=portal-bugs" {
+		t.Fatalf("ids = %v", ids)
+	}
+	st := &store{}
+	selected := withoutIDParts([]string{"tok:bugs", "tok:portal", "tok:corr", "agent:pi"}, ids)
+	st.jevPreferSelected(append(selected, ids...), false)
+	if st.Jev.Weights["tok:bugs"] != 0 || st.Jev.Weights["tok:portal"] != 0 || st.Jev.Weights["tok:corr"] != 0 {
+		t.Fatalf("split words were demoted: %+v", st.Jev.Weights)
+	}
+	if st.Jev.Weights["id:corr=portal-bugs"] >= 0 {
+		t.Fatal("the identifier was not demoted")
+	}
+	now := time.Now()
+	idHit := txHit{SessionID: "id", Snippet: "see corr=portal-bugs in the handoff"}
+	plain := txHit{SessionID: "plain", Snippet: "the bugs list is ready"}
+	if txClassScore(st, idHit, now) >= txClassScore(st, plain, now) {
+		t.Fatal("the identifier hit should rank below a plain bugs hit")
+	}
+}
+
 func TestJevPreferBumpsFeaturesWithoutProxy(t *testing.T) {
 	// No HERDR_RECALL_JEV set: preference is local, must still work.
 	os.Unsetenv("HERDR_RECALL_JEV")

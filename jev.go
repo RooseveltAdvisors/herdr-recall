@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -270,6 +271,7 @@ func jevFeatures(r row, now int64) []string {
 		f = append(f, "attention:hot")
 	}
 	f = append(f, jevContentFeatures(r.Label, r.Note, r.Workspace)...)
+	f = append(f, jevIDFeatures(r.Label, r.Note, r.Workspace)...)
 	if lab := jevLabelFeature(r.Label); lab != "" {
 		f = append(f, lab)
 	}
@@ -409,7 +411,11 @@ func (s *store) jevPreferSelected(features []string, up bool) {
 		sign = 1
 	}
 	for _, f := range features {
-		s.Jev.Weights[f] = clampWeight(s.Jev.Weights[f] + sign*0.1)
+		delta := 0.1
+		if strings.HasPrefix(f, "id:") {
+			delta = 0.5
+		}
+		s.Jev.Weights[f] = clampWeight(s.Jev.Weights[f] + sign*delta)
 	}
 	s.Jev.Examples++
 }
@@ -589,6 +595,52 @@ func jevContentFeatures(parts ...string) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+var jevIDPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]{1,32}=[A-Za-z0-9][A-Za-z0-9_.:-]{1,64}`)
+
+func jevIdentifiers(text string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range jevIDPattern.FindAllString(text, 8) {
+		id := "id:" + strings.ToLower(m)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func jevIDFeatures(parts ...string) []string {
+	return jevIdentifiers(strings.Join(parts, " "))
+}
+
+func idPartTokens(feature string) map[string]bool {
+	out := map[string]bool{}
+	raw := strings.TrimPrefix(feature, "id:")
+	for _, w := range jevSplitWords(raw) {
+		out["tok:"+w] = true
+	}
+	return out
+}
+
+func withoutIDParts(selected, ids []string) []string {
+	drop := map[string]bool{}
+	for _, id := range ids {
+		for tok := range idPartTokens(id) {
+			drop[tok] = true
+		}
+	}
+	var out []string
+	for _, f := range selected {
+		if drop[f] {
+			continue
+		}
+		out = append(out, f)
+	}
 	return out
 }
 

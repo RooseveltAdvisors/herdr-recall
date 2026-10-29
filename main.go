@@ -3785,6 +3785,11 @@ func runPicker() int {
 		nowUnix := now.Unix()
 
 		selected := enabledTeachFeatures(teachFeats)
+		named := jevIdentifiers(text)
+		if len(named) > 0 {
+			selected = withoutIDParts(selected, named)
+			selected = append(selected, named...)
+		}
 		intent := "neutral"
 		switch teachPref {
 		case 0:
