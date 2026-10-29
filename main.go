@@ -5387,7 +5387,47 @@ func trainTriager() int {
 		return 1
 	}
 	fmt.Printf("local triager fit on %d Jev-labeled rows\n", n)
+	if err := refreshGBDT(st); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	return 0
+}
+
+func refreshGBDT(st *store) error {
+	script := trainScriptPath()
+	py, err := trainPython()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(py, script, triagerTrainPath(), triagerModelPath())
+	out, err := cmd.CombinedOutput()
+	fmt.Print(string(out))
+	if err != nil {
+		return fmt.Errorf("lightgbm train failed: %w", err)
+	}
+	st.ensureJev()
+	st.Jev.Ranker = "gbdt"
+	return saveStore(st)
+}
+
+func trainScriptPath() string {
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "..", "train_triager.py")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return "train_triager.py"
+}
+
+func trainPython() (string, error) {
+	home, _ := os.UserHomeDir()
+	py := filepath.Join(home, ".cache", "herdr-recall-train-venv", "bin", "python")
+	if _, err := os.Stat(py); err == nil {
+		return py, nil
+	}
+	return "", fmt.Errorf("lightgbm venv missing at %s", py)
 }
 
 func main() {
