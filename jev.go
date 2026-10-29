@@ -42,6 +42,7 @@ type jevState struct {
 	DocCount  int                `json:"doc_count,omitempty"`
 	Examples  int                `json:"examples,omitempty"`
 	Teachings []jevTeaching      `json:"teachings,omitempty"`
+	TxRank    map[string]float64 `json:"tx_rank,omitempty"`
 }
 
 // jevRule is a conditional preference. It fires only when the row matches
@@ -71,6 +72,9 @@ func (s *store) ensureJev() {
 	}
 	if s.Jev.ScoreKey == nil {
 		s.Jev.ScoreKey = map[string]string{}
+	}
+	if s.Jev.TxRank == nil {
+		s.Jev.TxRank = map[string]float64{}
 	}
 }
 

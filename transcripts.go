@@ -196,23 +196,100 @@ func relevanceScore(bm25 float64, when string, now time.Time) float64 {
 	return lexical * (0.35 + 0.65*recency)
 }
 
-func sortTxHits(hits []txHit, mode string, now time.Time) []txHit {
+func sortTxHits(hits []txHit, mode string, now time.Time, st *store) []txHit {
 	out := append([]txHit(nil), hits...)
-	switch mode {
-	case "newest":
-		sort.SliceStable(out, func(i, j int) bool {
+	sort.SliceStable(out, func(i, j int) bool {
+		bi, bj := txBias(st, out[i].SessionID), txBias(st, out[j].SessionID)
+		if bi != bj {
+			return bi > bj
+		}
+		switch mode {
+		case "newest":
 			return out[i].When > out[j].When
-		})
-	case "oldest":
-		sort.SliceStable(out, func(i, j int) bool {
+		case "oldest":
 			return out[i].When < out[j].When
-		})
-	default:
-		sort.SliceStable(out, func(i, j int) bool {
-			return relevanceScore(out[i].Rank, out[i].When, now) > relevanceScore(out[j].Rank, out[j].When, now)
-		})
+		default:
+			return txRankScore(st, out[i], now) > txRankScore(st, out[j], now)
+		}
+	})
+	return out
+}
+
+func hitAsRow(h txHit) row {
+	return row{
+		PaneID: h.SessionID,
+		Agent:  h.Provider,
+		CWD:    h.CWD,
+		Label:  projectName(h.CWD),
+		Note:   h.Snippet + " " + h.Summary,
+	}
+}
+
+func txBias(st *store, sessionID string) float64 {
+	if st == nil || st.Jev == nil || st.Jev.TxRank == nil {
+		return 0
+	}
+	return st.Jev.TxRank[sessionID]
+}
+
+func txClassScore(st *store, h txHit, now time.Time) float64 {
+	score := 0.4
+	if _, ok := typedOnly(h.Snippet + "\n" + h.Summary); !ok {
+		score = -0.5
+	}
+	score += txBias(st, h.SessionID)
+	if st == nil {
+		return score
+	}
+	r := hitAsRow(h)
+	return score + st.jevWeight(r, now.Unix()) + st.jevRuleBonus(r, now.Unix())
+}
+
+func txRankScore(st *store, h txHit, now time.Time) float64 {
+	score := relevanceScore(h.Rank, h.When, now)
+	if st == nil {
+		return score
+	}
+	r := hitAsRow(h)
+	return score + st.jevWeight(r, now.Unix()) + st.jevRuleBonus(r, now.Unix())
+}
+
+func keepTyped(st *store, hits []txHit, now time.Time) []txHit {
+	out := make([]txHit, 0, len(hits))
+	for _, h := range hits {
+		if txClassScore(st, h, now) >= 0 {
+			out = append(out, h)
+		}
 	}
 	return out
+}
+
+func finishTxHits(st *store, hits []txHit, role, order string, now time.Time) []txHit {
+	if role == "typed" || role == "" || role == "user" {
+		hits = keepTyped(st, hits, now)
+	}
+	hits = sortTxHits(hits, order, now, st)
+	if len(hits) > 40 {
+		hits = hits[:40]
+	}
+	return hits
+}
+
+func (s *store) rankTranscript(h txHit, up bool) {
+	s.ensureJev()
+	delta := -1.0
+	if up {
+		delta = 1
+	}
+	next := s.Jev.TxRank[h.SessionID] + delta
+	if next > 5 {
+		next = 5
+	}
+	if next < -5 {
+		next = -5
+	}
+	s.Jev.TxRank[h.SessionID] = next
+	s.jevPrefer(hitAsRow(h), up)
 }
 
 func txRoleFromKey(key string) (string, bool) {
@@ -323,27 +400,10 @@ func searchTranscripts(query, role, order string) ([]txHit, error) {
 		return nil, fmt.Errorf("%s", resp.Err)
 	}
 	hits := resp.Hits
-	if role == "typed" || role == "" || role == "user" {
-		kept := make([]txHit, 0, len(hits))
-		for _, h := range hits {
-			body, ok := typedOnly(h.Snippet)
-			if !ok {
-				continue
-			}
-			h.Snippet = matchWindow(body, query, 180)
-			kept = append(kept, h)
-			if len(kept) == 40 {
-				break
-			}
-		}
-		hits = kept
-	} else if len(hits) > 40 {
-		hits = hits[:40]
-	}
 	for i := range hits {
 		hits[i].Snippet = matchWindow(hits[i].Snippet, query, 180)
 	}
-	hits = sortTxHits(hits, order, time.Now())
+	hits = sortTxHits(hits, order, time.Now(), nil)
 	if len(hits) > 40 {
 		hits = hits[:40]
 	}
@@ -925,7 +985,7 @@ func txActionLine(hit txHit, live bool) string {
 
 // renderTranscriptSplit draws the hit list on the left and the nearby
 // conversation on the right. Panes without a reminder are not involved.
-func renderTranscriptSplit(width, height int, names []string, active int, fv vimline.View, status, role, order, query string, hits []txHit, snap *snapshot, sel, scrollOffset int, hit txHit, live bool, preview []string) string {
+func renderTranscriptSplit(width, height int, names []string, active int, fv vimline.View, status, role, order, query string, hits []txHit, snap *snapshot, st *store, sel, scrollOffset int, hit txHit, live bool, preview []string) string {
 	if height < 8 {
 		height = 8
 	}
@@ -974,6 +1034,11 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 		if idx >= 0 && idx < len(hits) {
 			meta := txLiveMeta(snap, hits[idx].SessionID)
 			title, _ := txHitLines(hits[idx], query, meta, left-2, now)
+			if b := txBias(st, hits[idx].SessionID); b > 0 {
+				title = "\u2191 " + title
+			} else if b < 0 {
+				title = "\u2193 " + title
+			}
 			text := title
 			color := keyText
 			if i%2 == 1 {

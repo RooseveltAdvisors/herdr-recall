@@ -59,11 +59,11 @@ func TestRelevancePutsRecentStrongHitFirst(t *testing.T) {
 		{Snippet: "recent strong", When: "2026-10-28 00:00:00.000 +0000 UTC", Rank: -8},
 		{Snippet: "recent weak", When: "2026-10-28 00:00:00.000 +0000 UTC", Rank: -1},
 	}
-	got := sortTxHits(hits, "relevance", now)
+	got := sortTxHits(hits, "relevance", now, nil)
 	if got[0].Snippet != "recent strong" {
 		t.Fatalf("first = %q", got[0].Snippet)
 	}
-	newest := sortTxHits(hits, "newest", now)
+	newest := sortTxHits(hits, "newest", now, nil)
 	if newest[0].When < newest[1].When {
 		t.Fatal("newest did not put the later time first")
 	}
@@ -90,6 +90,29 @@ func TestTxTitleShowsTabPaneAndAgent(t *testing.T) {
 	win := matchWindow(strings.Repeat("x", 400)+" portal billing", "portal", 40)
 	if !strings.Contains(win, "portal") {
 		t.Fatalf("window = %q", win)
+	}
+}
+
+func TestRankUpKeepsAHandoffInTyped(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	handoff := txHit{SessionID: "handoff", Snippet: "FIRSTMATE_OP: v1 watcher portal", Provider: "pi", CWD: "/tmp/portal"}
+	typed := txHit{SessionID: "typed", Snippet: "what path is the portal on", Provider: "pi", CWD: "/tmp/portal", Rank: -2, When: "2026-10-28 00:00:00.000 +0000 UTC"}
+	st := &store{}
+	if txClassScore(st, handoff, now) >= 0 {
+		t.Fatal("a handoff starts inside Typed")
+	}
+	st.rankTranscript(handoff, true)
+	if txClassScore(st, handoff, now) < 0 {
+		t.Fatal("one rank-up did not bring the handoff into Typed")
+	}
+	st.rankTranscript(typed, false)
+	kept := keepTyped(st, []txHit{handoff, typed}, now)
+	if len(kept) != 1 || kept[0].SessionID != "handoff" {
+		t.Fatalf("kept = %+v", kept)
+	}
+	ordered := sortTxHits([]txHit{typed, handoff}, "relevance", now, st)
+	if ordered[0].SessionID != "handoff" {
+		t.Fatal("rank-up did not move the hit to the top")
 	}
 }
 

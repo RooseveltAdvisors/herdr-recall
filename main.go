@@ -3064,7 +3064,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	}
 	extra := "arrows tabs   g i/l/t/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && names[active] == "Transcripts" {
-		extra = "1 typed  2 any user  3 replies  4 everything  s sort  / type  enter open  f fork  b full"
+		extra = "1 typed  2 any user  3 replies  4 all  + up  - down  i teach  s sort  / type"
 	}
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
@@ -4054,7 +4054,7 @@ func runPicker() int {
 			status = clip(res.Err.Error(), 80)
 			return
 		}
-		txHits = res.Hits
+		txHits = finishTxHits(st, res.Hits, txRole, txSort, time.Now())
 		txPrevID = ""
 		if sel >= len(txHits) {
 			sel = 0
@@ -4097,6 +4097,35 @@ func runPicker() int {
 			}
 		}
 		status = txRoleLabel(txRole) + " \u00b7 searching"
+	}
+	rankSelectedTx := func(up bool) {
+		if sel < 0 || sel >= len(txHits) {
+			return
+		}
+		h := txHits[sel]
+		st.rankTranscript(h, up)
+		word := "down"
+		if up {
+			word = "up"
+		}
+		now := time.Now()
+		recordJevTeaching(st, jevTeaching{
+			Timestamp:   now.Unix(),
+			TimeRFC3339: now.Format(time.RFC3339),
+			Feedback:    "ranked " + word,
+			Intent:      map[bool]string{true: "prefer", false: "demote"}[up],
+			Pane:        jevPaneContext{PaneID: h.SessionID, Label: txTitle(h, txLive{}), CWD: h.CWD, Note: h.Snippet},
+			Features:    jevFeatures(hitAsRow(h), now.Unix()),
+			Session:     jevSessionContext{ActiveTab: "Transcripts", ActiveFilter: txRole, ActiveQuery: searchEd.String()},
+		})
+		if saveSt(0) {
+			_ = logJevTeaching(st.Jev.Teachings[len(st.Jev.Teachings)-1])
+		}
+		txHits = finishTxHits(st, txHits, txRole, txSort, now)
+		if sel >= len(txHits) {
+			sel = max(0, len(txHits)-1)
+		}
+		status = "ranked " + word + ": " + txTitle(h, txLiveMeta(frozen, h.SessionID))
 	}
 
 	for {
@@ -4203,7 +4232,7 @@ func runPicker() int {
 					hit = txHits[sel]
 					live = livePaneForSession(frozen, hit.SessionID) != ""
 				}
-				frame = renderTranscriptSplit(w, h, viewNames(st), tab, searchEd.View("/", searching), status, txRole, txSort, searchEd.String(), txHits, frozen, sel, scrollOffset, hit, live, txPrevLines)
+				frame = renderTranscriptSplit(w, h, viewNames(st), tab, searchEd.View("/", searching), status, txRole, txSort, searchEd.String(), txHits, frozen, st, sel, scrollOffset, hit, live, txPrevLines)
 				break
 			}
 			kind := "both"
@@ -4654,6 +4683,10 @@ func runPicker() int {
 					continue
 				}
 			}
+			if views(st)[tab].Kind == "transcripts" && (key == "+" || key == "=" || key == "-") && searchEd.Mode() != vimline.ModeInsert {
+				rankSelectedTx(key != "-")
+				continue
+			}
 			if views(st)[tab].Kind == "transcripts" && key == "s" && searchEd.Mode() != vimline.ModeInsert {
 				txSort = nextTxSort(txSort)
 				txStamp = ""
@@ -4997,6 +5030,23 @@ func runPicker() int {
 			sel = 0
 			scrollOffset = 0
 			rebuild()
+		case (key == "+" || key == "=" || key == "-") && !searching && !showHelp && views(st)[tab].Kind == "transcripts":
+			rankSelectedTx(key != "-")
+			continue
+		case key == "i" && !searching && !showHelp && !showJev && views(st)[tab].Kind == "transcripts":
+			if sel < 0 || sel >= len(txHits) {
+				break
+			}
+			teaching = true
+			teachField = 0
+			teachPref = 0
+			teachRow = hitAsRow(txHits[sel])
+			teachFeats = teachFeatureChoices(teachRow, st, time.Now().Unix())
+			teachFeatSel = 0
+			teachRank = sel
+			teachTotal = len(txHits)
+			teachEd = vimline.New("")
+			continue
 		case key == "s" && !searching && !showHelp && views(st)[tab].Kind == "transcripts":
 			txSort = nextTxSort(txSort)
 			txStamp = ""
