@@ -178,6 +178,20 @@ func TestCorrIDStaysOneSignal(t *testing.T) {
 	}
 }
 
+func TestJevCallIsStoredForTraining(t *testing.T) {
+	dir := t.TempDir()
+	jevCallLogOverride = filepath.Join(dir, "jev-calls.jsonl")
+	t.Cleanup(func() { jevCallLogOverride = "" })
+	recordJevCall(row{PaneID: "w1:p1", Label: "portal"}, "jev-latest", map[string]any{"model": "jev-latest"}, `{"answers":{"triage":{"noul":0.42}}}`, 0.42, true)
+	got := examplesFromJevLog()
+	if len(got) != 1 || got[0].Y != 0.42 {
+		t.Fatalf("examples = %+v", got)
+	}
+	if got[0].Feats["label:portal"] != 1 && got[0].Feats["tok:portal"] != 1 {
+		t.Fatalf("features = %+v", got[0].Feats)
+	}
+}
+
 func TestLocalTriagerLearnsJevAndDemote(t *testing.T) {
 	now := time.Now().Unix()
 	st := &store{Jev: &jevState{

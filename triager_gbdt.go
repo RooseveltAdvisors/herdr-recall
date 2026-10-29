@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -36,15 +37,40 @@ func triagerTrainPath() string {
 	return filepath.Join(configDir(), "triager-train.json")
 }
 
+type triagerExample struct {
+	Y     float64            `json:"y"`
+	Feats map[string]float64 `json:"feats"`
+}
+
+func examplesFromJevLog() []triagerExample {
+	b, err := os.ReadFile(jevCallLogPath())
+	if err != nil {
+		return nil
+	}
+	var out []triagerExample
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec jevCallRecord
+		if json.Unmarshal([]byte(line), &rec) != nil || !rec.OK || len(rec.Features) == 0 {
+			continue
+		}
+		feats := map[string]float64{}
+		for _, f := range rec.Features {
+			feats[f] = 1
+		}
+		out = append(out, triagerExample{Y: rec.Noul, Feats: feats})
+	}
+	return out
+}
+
 func writeTriagerExamples(st *store, rows []row, now int64) (int, error) {
 	if st == nil || st.Jev == nil {
 		return 0, nil
 	}
-	type ex struct {
-		Y     float64            `json:"y"`
-		Feats map[string]float64 `json:"feats"`
-	}
-	var out []ex
+	var out []triagerExample
 	for _, r := range rows {
 		if st.Jev.ScoreKey[r.PaneID] != jevRowKey(r) {
 			continue
@@ -57,8 +83,9 @@ func writeTriagerExamples(st *store, rows []row, now int64) (int, error) {
 		for _, f := range jevFeatures(r, now) {
 			feats[f] = 1
 		}
-		out = append(out, ex{Y: y + teachShift(st, r, now), Feats: feats})
+		out = append(out, triagerExample{Y: y + teachShift(st, r, now), Feats: feats})
 	}
+	out = append(out, examplesFromJevLog()...)
 	if len(out) < 8 {
 		return len(out), nil
 	}

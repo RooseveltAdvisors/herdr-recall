@@ -185,6 +185,7 @@ func jevAsk(proxy, base, model string, r row) float64 {
 	cmd.Stdin = bytes.NewReader(b)
 	out, err := cmd.Output()
 	if err != nil {
+		recordJevCall(r, model, payload, err.Error(), 0, false)
 		return 0
 	}
 	var resp struct {
@@ -195,9 +196,67 @@ func jevAsk(proxy, base, model string, r row) float64 {
 		} `json:"answers"`
 	}
 	if json.Unmarshal(out, &resp) != nil {
+		recordJevCall(r, model, payload, string(jevClipBytes(out, 2000)), 0, false)
 		return 0
 	}
-	return resp.Answers.Triage.Noul
+	noul := resp.Answers.Triage.Noul
+	recordJevCall(r, model, payload, string(jevClipBytes(out, 2000)), noul, true)
+	return noul
+}
+
+type jevCallRecord struct {
+	Time     string         `json:"time"`
+	PaneID   string         `json:"pane_id"`
+	Model    string         `json:"model"`
+	Request  map[string]any `json:"request"`
+	Response string         `json:"response,omitempty"`
+	Noul     float64        `json:"noul"`
+	OK       bool           `json:"ok"`
+	Features []string       `json:"features,omitempty"`
+}
+
+var (
+	jevCallLogOverride string
+	jevLogMu           sync.Mutex
+)
+
+func jevCallLogPath() string {
+	if jevCallLogOverride != "" {
+		return jevCallLogOverride
+	}
+	return filepath.Join(configDir(), "jev-calls.jsonl")
+}
+
+func recordJevCall(r row, model string, payload map[string]any, response string, noul float64, ok bool) {
+	rec := jevCallRecord{
+		Time:     time.Now().Format(time.RFC3339),
+		PaneID:   r.PaneID,
+		Model:    model,
+		Request:  payload,
+		Response: response,
+		Noul:     noul,
+		OK:       ok,
+		Features: jevFeatures(r, time.Now().Unix()),
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	jevLogMu.Lock()
+	defer jevLogMu.Unlock()
+	f, err := os.OpenFile(jevCallLogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(b, '\n'))
+}
+
+func jevClipBytes(b []byte, n int) []byte {
+	if len(b) <= n {
+		return b
+	}
+	return b[:n]
 }
 
 func jevClip(s string, n int) string {
