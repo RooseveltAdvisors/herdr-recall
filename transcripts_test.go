@@ -116,6 +116,18 @@ func TestRankUpKeepsAHandoffInTyped(t *testing.T) {
 	}
 }
 
+func TestTranscriptFooterShowsRankKeys(t *testing.T) {
+	move, rank := txKeyLines()
+	if !strings.Contains(move, "enter") || !strings.Contains(move, "fork") {
+		t.Fatalf("move = %q", move)
+	}
+	for _, key := range []string{"1", "+", "-", "i", "s"} {
+		if !strings.Contains(rank, key) {
+			t.Fatalf("rank footer missing %s: %q", key, rank)
+		}
+	}
+}
+
 func TestFilterHitsNarrowsWithoutAQuery(t *testing.T) {
 	hits := []txHit{
 		{Snippet: "waiting on stripe keys"},

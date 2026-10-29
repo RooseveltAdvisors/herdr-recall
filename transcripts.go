@@ -971,16 +971,10 @@ func clipANSI(s string, n int) string {
 	return fitLine(s, n)
 }
 
-func txActionLine(hit txHit, live bool) string {
-	open := "enter browse"
-	if live {
-		open = "enter open pane"
-	}
-	fork := "f fork Pi"
-	if hit.Provider != "" && hit.Provider != "pi" {
-		fork = "f Pi only"
-	}
-	return open + "    " + fork + "    b full thread"
+func txKeyLines() (string, string) {
+	move := hintFooter("j/k", "move", "enter", "open", "f", "fork", "b", "full", "/", "type")
+	rank := hintFooter("1", "typed", "2", "any user", "3", "replies", "4", "all", "+", "up", "-", "down", "i", "teach", "s", "sort")
+	return move, rank
 }
 
 // renderTranscriptSplit draws the hit list on the left and the nearby
@@ -1009,7 +1003,8 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 	if right < 16 {
 		right = 16
 	}
-	body := maxLines - len(sc.lines) - 3
+	footerLines := 4
+	body := maxLines - len(sc.lines) - footerLines
 	if body < 3 {
 		body = 3
 	}
@@ -1054,7 +1049,10 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 		rightText := ""
 		if i == 0 && hit.SessionID != "" {
 			who := txTitle(hit, txLiveMeta(snap, hit.SessionID))
-			rightText = keyAccentFg + clip(who+"  "+txActionLine(hit, live), right) + keyReset
+			if live {
+				who += " \u00b7 open"
+			}
+			rightText = keyAccentFg + clip(who, right) + keyReset
 		} else if i-1 >= 0 && i-1 < len(preview) {
 			line := preview[i-1]
 			color := keyText
@@ -1066,6 +1064,9 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 		sc.emit(leftText + keyOverlay + "\u2502" + keyReset + rightText)
 	}
 	sc.rule()
+	move, rank := txKeyLines()
+	sc.emit(move)
+	sc.emit(rank)
 	if status != "" {
 		sc.emit(keySub + clip(status, width-1) + keyReset)
 	}
