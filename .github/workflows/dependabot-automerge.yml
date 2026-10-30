@@ -1,0 +1,51 @@
+name: Dependabot automerge
+
+on:
+  workflow_run:
+    workflows: ["Go CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge-vimline:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Squash the tested Dependabot vimline update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          pr_number="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/pull_requests" --jq '.[0].number // empty')"
+          test -n "$pr_number"
+
+          pr_json="$(gh api "repos/$REPOSITORY/pulls/$pr_number")"
+          test "$(jq -r '.user.login' <<<"$pr_json")" = 'dependabot[bot]'
+          base_sha="$(jq -r '.base.sha' <<<"$pr_json")"
+          head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
+
+          unexpected_commit="$(gh api --paginate "repos/$REPOSITORY/pulls/$pr_number/commits" --jq '.[] | select(.author.login != "dependabot[bot]") | .sha')"
+          test -z "$unexpected_commit"
+
+          unexpected_file="$(gh api --paginate "repos/$REPOSITORY/pulls/$pr_number/files" --jq '.[] | select(.filename != "go.mod" and .filename != "go.sum") | .filename')"
+          test -z "$unexpected_file"
+
+          module_version() {
+            gh api "repos/$REPOSITORY/contents/go.mod?ref=$1" --jq '.content' |
+              base64 --decode |
+              awk '$1 == "github.com/RooseveltAdvisors/vimline" { print $2 }'
+          }
+          base_version="$(module_version "$base_sha")"
+          head_version="$(module_version "$head_sha")"
+          printf '%s\n' "$base_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          printf '%s\n' "$head_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          test "$base_version" != "$head_version"
+
+          gh pr merge "$pr_number" --repo "$REPOSITORY" --squash --match-head-commit "$head_sha"
