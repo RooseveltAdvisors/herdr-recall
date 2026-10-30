@@ -43,6 +43,50 @@ func transcriptsEnabled() bool {
 	return err == nil
 }
 
+func searchEventPath() string {
+	if p := strings.TrimSpace(os.Getenv("HERDR_RECALL_SEARCH_LOG")); p != "" {
+		return p
+	}
+	return filepath.Join(configDir(), "search-events.jsonl")
+}
+
+func logSearchEvent(role string, hits int, indexed bool, ms int64, outcome string) {
+	rec := map[string]any{
+		"time":    time.Now().Format(time.RFC3339),
+		"op":      "search",
+		"role":    role,
+		"hits":    hits,
+		"indexed": indexed,
+		"ms":      ms,
+		"outcome": outcome,
+		"version": "recall",
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	path := searchEventPath()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(append(b, '\n'))
+	_ = f.Close()
+	trimSearchLog(path, 200)
+}
+
+func trimSearchLog(path string, keep int) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) <= keep {
+		return
+	}
+	_ = os.WriteFile(path, []byte(strings.Join(lines[len(lines)-keep:], "\n")+"\n"), 0o600)
+}
+
 func transcriptIndexPath() string {
 	if p := strings.TrimSpace(os.Getenv("HERDR_RECALL_INDEX")); p != "" {
 		return p
@@ -400,12 +444,16 @@ func searchTranscripts(query, role, order string) ([]txHit, bool, error) {
 		return nil, false, nil
 	}
 	var resp txReply
+	started := time.Now()
 	if err := txAsk(map[string]any{"op": "search", "match": match, "sender": transcriptSender(role), "role": role, "sort": order}, &resp); err != nil {
+		logSearchEvent(role, 0, false, time.Since(started).Milliseconds(), "error")
 		return nil, false, err
 	}
 	if resp.Err != "" {
+		logSearchEvent(role, 0, resp.Indexed, time.Since(started).Milliseconds(), "error")
 		return nil, resp.Indexed, fmt.Errorf("%s", resp.Err)
 	}
+	logSearchEvent(role, len(resp.Hits), resp.Indexed, time.Since(started).Milliseconds(), "ok")
 	hits := resp.Hits
 	for i := range hits {
 		hits[i].Snippet = matchWindow(hits[i].Snippet, query, 180)

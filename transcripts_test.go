@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +127,23 @@ func TestTranscriptFooterShowsRankKeys(t *testing.T) {
 		if !strings.Contains(rank, key) {
 			t.Fatalf("rank footer missing %s: %q", key, rank)
 		}
+	}
+}
+
+func TestSearchEventOmitsTheQuery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "search-events.jsonl")
+	t.Setenv("HERDR_RECALL_SEARCH_LOG", path)
+	logSearchEvent("typed", 3868, true, 59, "ok")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "portal") {
+		t.Fatal("search log stored the query")
+	}
+	if !strings.Contains(string(b), "\"hits\":3868") && !strings.Contains(string(b), "\"hits\": 3868") {
+		t.Fatalf("log = %s", b)
 	}
 }
 
