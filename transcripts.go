@@ -44,6 +44,9 @@ func transcriptsEnabled() bool {
 }
 
 func transcriptIndexPath() string {
+	if p := strings.TrimSpace(os.Getenv("HERDR_RECALL_INDEX")); p != "" {
+		return p
+	}
 	return filepath.Join(configDir(), "transcripts.db")
 }
 
@@ -545,7 +548,9 @@ con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 ix = None
 if index:
     try:
-        ix = sqlite3.connect(f"file:{index}?mode=ro", uri=True)
+        # A plain path. A file: URI would treat % in the directory name as an escape.
+        ix = sqlite3.connect(index)
+        ix.execute("PRAGMA query_only=ON")
         ix.execute("SELECT 1 FROM tx LIMIT 1")
     except Exception:
         ix = None

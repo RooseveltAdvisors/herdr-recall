@@ -4071,7 +4071,7 @@ func runPicker() int {
 		if sel >= len(txHits) {
 			sel = 0
 		}
-		status = fmt.Sprintf("%s \u00b7 %d chats", txRoleLabel(txRole), len(txHits))
+		status = fmt.Sprintf("%s \u00b7 %d matches \u00b7 row %d of %d", txRoleLabel(txRole), len(txHits), min(sel+1, len(txHits)), len(txHits))
 	}
 	refreshTx := func(q string) {
 		q = strings.TrimSpace(q)

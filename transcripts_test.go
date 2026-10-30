@@ -128,6 +128,16 @@ func TestTranscriptFooterShowsRankKeys(t *testing.T) {
 	}
 }
 
+func TestIndexOpenIsNotAFileURI(t *testing.T) {
+	if strings.Contains(txWorkerScript, "file:{index}?mode=ro") {
+		t.Fatal("a percent in the directory name must not be treated as a URI escape")
+	}
+	t.Setenv("HERDR_RECALL_INDEX", "/tmp/fixture.db")
+	if transcriptIndexPath() != "/tmp/fixture.db" {
+		t.Fatal(transcriptIndexPath())
+	}
+}
+
 func TestIndexedSearchKeepsEveryHit(t *testing.T) {
 	hits := make([]txHit, 50)
 	for i := range hits {
