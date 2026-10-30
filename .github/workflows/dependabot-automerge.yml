@@ -1,0 +1,81 @@
+name: Dependabot automerge
+
+on:
+  workflow_run:
+    workflows: ["Go CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge-vimline:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Squash the tested Dependabot vimline update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr_number="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/pull_requests" --jq '.[0].number // empty')"
+          if test -z "$pr_number"; then
+            echo '::notice::No pull request is associated with the successful workflow run.'
+            exit 0
+          fi
+
+          pr_json="$(gh api "repos/$REPOSITORY/pulls/$pr_number")"
+          if test "$(jq -r '.user.login' <<<"$pr_json")" != 'dependabot[bot]'; then
+            echo '::notice::The associated pull request is not owned by Dependabot.'
+            exit 0
+          fi
+          base_sha="$(jq -r '.base.sha' <<<"$pr_json")"
+          head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
+          test "$head_sha" = "$TESTED_SHA"
+
+          base_mod="$(gh api "repos/$REPOSITORY/contents/go.mod?ref=$base_sha" --jq '.content' | base64 --decode)"
+          head_mod="$(gh api "repos/$REPOSITORY/contents/go.mod?ref=$head_sha" --jq '.content' | base64 --decode)"
+          base_sum="$(gh api "repos/$REPOSITORY/contents/go.sum?ref=$base_sha" --jq '.content' | base64 --decode)"
+          head_sum="$(gh api "repos/$REPOSITORY/contents/go.sum?ref=$head_sha" --jq '.content' | base64 --decode)"
+          module_version() {
+            awk '
+              $1 == "github.com/RooseveltAdvisors/vimline" { print $2 }
+              $1 == "require" && $2 == "github.com/RooseveltAdvisors/vimline" { print $3 }
+            ' <<<"$1"
+          }
+          base_version="$(module_version "$base_mod")"
+          head_version="$(module_version "$head_mod")"
+          if test "$base_version" = "$head_version"; then
+            echo '::notice::The Dependabot pull request does not update vimline.'
+            exit 0
+          fi
+          printf '%s\n' "$base_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          printf '%s\n' "$head_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+          unexpected_commit="$(gh api --paginate "repos/$REPOSITORY/pulls/$pr_number/commits" --jq '.[] | select(.author.login != "dependabot[bot]") | .sha')"
+          test -z "$unexpected_commit"
+
+          unexpected_file="$(gh api --paginate "repos/$REPOSITORY/pulls/$pr_number/files" --jq '.[] | select(.filename != "go.mod" and .filename != "go.sum") | .filename')"
+          test -z "$unexpected_file"
+
+          without_vimline_requirement() {
+            awk '
+              !($1 == "github.com/RooseveltAdvisors/vimline" && $2 ~ /^v[0-9]/) &&
+              !($1 == "require" && $2 == "github.com/RooseveltAdvisors/vimline" && $3 ~ /^v[0-9]/)
+            '
+          }
+          diff -u \
+            <(without_vimline_requirement <<<"$base_mod") \
+            <(without_vimline_requirement <<<"$head_mod")
+          diff -u \
+            <(awk '$1 != "github.com/RooseveltAdvisors/vimline"' <<<"$base_sum") \
+            <(awk '$1 != "github.com/RooseveltAdvisors/vimline"' <<<"$head_sum")
+
+          gh pr merge "$pr_number" --repo "$REPOSITORY" --squash --match-head-commit "$TESTED_SHA"
