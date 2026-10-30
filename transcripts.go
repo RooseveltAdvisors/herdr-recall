@@ -268,12 +268,12 @@ func keepTyped(st *store, hits []txHit, now time.Time) []txHit {
 	return out
 }
 
-func finishTxHits(st *store, hits []txHit, role, order string, now time.Time) []txHit {
-	if role == "typed" || role == "" || role == "user" {
+func finishTxHits(st *store, hits []txHit, role, order string, now time.Time, indexed bool) []txHit {
+	if !indexed && (role == "typed" || role == "" || role == "user") {
 		hits = keepTyped(st, hits, now)
 	}
 	hits = sortTxHits(hits, order, now, st)
-	if len(hits) > 40 {
+	if !indexed && len(hits) > 40 {
 		hits = hits[:40]
 	}
 	return hits
@@ -387,31 +387,28 @@ func filterHits(hits []txHit, query string) []txHit {
 	return out
 }
 
-func searchTranscripts(query, role, order string) ([]txHit, error) {
+func searchTranscripts(query, role, order string) ([]txHit, bool, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	match := ftsQuery(query)
 	if match == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	var resp txReply
 	if err := txAsk(map[string]any{"op": "search", "match": match, "sender": transcriptSender(role), "role": role, "sort": order}, &resp); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if resp.Err != "" {
-		return nil, fmt.Errorf("%s", resp.Err)
+		return nil, resp.Indexed, fmt.Errorf("%s", resp.Err)
 	}
 	hits := resp.Hits
 	for i := range hits {
 		hits[i].Snippet = matchWindow(hits[i].Snippet, query, 180)
 	}
 	hits = sortTxHits(hits, order, time.Now(), nil)
-	if len(hits) > 40 {
-		hits = hits[:40]
-	}
-	return hits, nil
+	return hits, resp.Indexed, nil
 }
 
 func previewTranscript(sessionID string, msgID int64) ([]string, error) {
@@ -436,6 +433,7 @@ type txAsync struct {
 	Kind      string
 	Gen       int
 	Hits      []txHit
+	Indexed   bool
 	Lines     []string
 	PreviewID string
 	Err       error
@@ -459,15 +457,16 @@ func serveTranscriptJobs(jobs <-chan txJob, results chan<- txAsync) {
 		}
 		job := *pending
 		pending = nil
-		hits, err := searchTranscripts(job.Query, job.Role, job.Sort)
-		results <- txAsync{Kind: "search", Gen: job.Gen, Hits: hits, Err: err}
+		hits, indexed, err := searchTranscripts(job.Query, job.Role, job.Sort)
+		results <- txAsync{Kind: "search", Gen: job.Gen, Hits: hits, Indexed: indexed, Err: err}
 	}
 }
 
 type txReply struct {
-	Hits  []txHit  `json:"hits"`
-	Lines []string `json:"lines"`
-	Err   string   `json:"err"`
+	Hits    []txHit  `json:"hits"`
+	Lines   []string `json:"lines"`
+	Err     string   `json:"err"`
+	Indexed bool     `json:"indexed"`
 }
 
 type txProc struct {
@@ -580,7 +579,7 @@ for raw in sys.stdin:
             q = (req.get("match") or "") + extra
             try:
                 rows = ix.execute(
-                    "SELECT session_id, msg_id, provider, cwd, summary, body, ts, rank FROM tx WHERE tx MATCH ? ORDER BY rank LIMIT 24",
+                    "SELECT session_id, msg_id, provider, cwd, summary, substr(body,1,240), ts, rank FROM tx WHERE tx MATCH ? ORDER BY rank",
                     (q,)).fetchall()
             except sqlite3.OperationalError as exc:
                 emit({"err": str(exc)})
@@ -592,7 +591,7 @@ for raw in sys.stdin:
                     "CWD": row[3] or "", "Summary": row[4] or "", "Snippet": " ".join((row[5] or "").split()),
                     "When": row[6] or "", "Rank": row[7] or 0,
                 })
-            emit({"hits": hits})
+            emit({"hits": hits, "indexed": True})
             continue
         if op == "search":
             # Rank the FTS table alone. A join in that step scans every match

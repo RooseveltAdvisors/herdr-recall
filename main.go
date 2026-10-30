@@ -4066,7 +4066,7 @@ func runPicker() int {
 			status = clip(res.Err.Error(), 80)
 			return
 		}
-		txHits = finishTxHits(st, res.Hits, txRole, txSort, time.Now())
+		txHits = finishTxHits(st, res.Hits, txRole, txSort, time.Now(), res.Indexed)
 		txPrevID = ""
 		if sel >= len(txHits) {
 			sel = 0
@@ -4129,7 +4129,7 @@ func runPicker() int {
 		if saveSt(0) {
 			_ = logJevTeaching(st.Jev.Teachings[len(st.Jev.Teachings)-1])
 		}
-		txHits = finishTxHits(st, txHits, txRole, txSort, now)
+		txHits = finishTxHits(st, txHits, txRole, txSort, now, true)
 		if sel >= len(txHits) {
 			sel = max(0, len(txHits)-1)
 		}

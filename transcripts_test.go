@@ -128,6 +128,17 @@ func TestTranscriptFooterShowsRankKeys(t *testing.T) {
 	}
 }
 
+func TestIndexedSearchKeepsEveryHit(t *testing.T) {
+	hits := make([]txHit, 50)
+	for i := range hits {
+		hits[i] = txHit{SessionID: "s", Snippet: "portal note"}
+	}
+	got := finishTxHits(nil, hits, "typed", "relevance", time.Now(), true)
+	if len(got) != 50 {
+		t.Fatalf("kept %d, want every indexed hit", len(got))
+	}
+}
+
 func TestFilterHitsNarrowsWithoutAQuery(t *testing.T) {
 	hits := []txHit{
 		{Snippet: "waiting on stripe keys"},
