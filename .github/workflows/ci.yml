@@ -28,4 +28,5 @@ jobs:
         run: |
           vimline_version="$(go list -m -f '{{.Version}}' github.com/RooseveltAdvisors/vimline)"
           printf '%s\n' "$vimline_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          test -z "$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{end}}' github.com/RooseveltAdvisors/vimline)"
           go test -count=1 github.com/RooseveltAdvisors/vimline github.com/RooseveltAdvisors/vimline/duration github.com/RooseveltAdvisors/vimline/keys
