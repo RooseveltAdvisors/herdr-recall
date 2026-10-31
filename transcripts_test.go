@@ -211,6 +211,29 @@ func TestTypedOnlyDropsAgentHandoff(t *testing.T) {
 	}
 }
 
+func TestSearchTranscriptsWritesLog(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "search-events.jsonl")
+	t.Setenv("HERDR_RECALL_SEARCH_LOG", logPath)
+	hits, indexed, err := searchTranscripts("portal", "typed", "relevance")
+	if err != nil {
+		t.Skip("ccrider/index not available:", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("expected hits")
+	}
+	if !indexed {
+		t.Fatal("expected indexed")
+	}
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "portal") {
+		t.Fatal("log leaked query")
+	}
+}
+
 func TestSessionMatchesPanePath(t *testing.T) {
 	path := "/home/jon/.pi/agent/sessions/x/2026_01a0d647-8e54-71ee-8c53-b1c71d49083a.jsonl"
 	if !sessionMatchesPane("01a0d647-8e54-71ee-8c53-b1c71d49083a", path) {
