@@ -52,7 +52,8 @@ Press `!` to toggle a manual `blocked` override when a thread is waiting on some
 | `n` | set or edit a sticky note on the selected thread |
 | `!` | toggle manual `blocked` override on the selected thread |
 | `m` | mark or unmark the selected thread as a favorite (`*`) |
-| `i` | teach Jev: prefer or demote, check feature chips, or type a rule |
+| `i` | teach Jev: prefer, **great-job review**, demote, set P0-P4, check feature chips, or type a rule |
+| `p` | set beads-style priority P0-P4 (or clear) on the selected thread |
 | `J` | inspect and correct Jev learned feature weights |
 | `b` / `w` / `i` / `d` / `a` | filter by status: blocked, working, idle, done, or all |
 | `/` | search tab names and sticky notes, with vim editing |
@@ -109,11 +110,21 @@ Preference is learned locally and does not need the decision proxy.
 Only the `i` teach dialog writes weights. Opening a row does not.
 Pressing `e` does not. `e` only archives the selected row.
 
-`i` is the only teach path. Prefer, Neutral, and Demote apply only to the
+`i` is the only teach path. Prefer, Great job (★), Neutral, and Demote apply only to the
 checked feature chips. Uncheck a chip when that signal should not get the
 credit. Free text can name a comparison (`billing over docs`) or a
 conditional rule (`demote idle until afternoon`). The raw text is also
 stored for later review.
+
+**Great job (★)** is a ranking-quality review, not a plain prefer. Use it when
+the inbox correctly surfaced something you needed (for example a forgotten
+monitor that rose because of real errors). It logs intent `review`, accepts a
+review comment, and bumps checked features more strongly than Prefer. These
+records are reinforcement labels for Jev and future rankers.
+
+**Priority pins** use the beads-tui `P0`..`P4` scale (`P0` highest). Press `p`
+on a row, or set Priority inside the `i` dialog. A set pin shows a coloured
+badge on the row and boosts Jev ranking. Clear removes the pin.
 
 Topic words are not a fixed list. Jev takes them from the tab name, the
 sticky note, the workspace name, and the words you type. A new project name
@@ -135,9 +146,9 @@ for this cycle. A sticky note from `n` sits beside the name.
 
 ![triage inbox](assets/showcase-inbox.png)
 
-`i` opens teach mode on the selected thread. Prefer, Neutral, and Demote are
-chips. Feature chips sit under them. An optional instruction is saved with
-the choice.
+`i` opens teach mode on the selected thread. Prefer, Great job (★), Neutral, and Demote are
+chips, then a P0-P4 priority chooser, then feature chips. An optional instruction
+(or review comment under Great job) is saved with the choice.
 
 ![teach Jev](assets/showcase-teach.png)
 

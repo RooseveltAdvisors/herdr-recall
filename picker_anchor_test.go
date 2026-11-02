@@ -778,7 +778,8 @@ func TestRetryTokenStaysOnRefusedMutation(t *testing.T) {
 		disk   func(t *testing.T) bool
 		repeat func(t *testing.T) bool
 	}{
-		{"teach then a different teach", "i", "\r", nil, []string{"l", "\r"}, composed,
+		// Preference order is Prefer, Great job, Neutral, Demote. Two rights reach Neutral.
+		{"teach then a different teach", "i", "\r", nil, []string{"l", "l", "\r"}, composed,
 			taught("neutral"), taught("neutral", "prefer")},
 		{"teach retried after the view save", "i", "\r", nil, []string{"l", "h", "\r"}, "saved",
 			taught("prefer"), nil},

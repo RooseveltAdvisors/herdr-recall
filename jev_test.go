@@ -339,8 +339,9 @@ func TestRenderTeachVisualPreferences(t *testing.T) {
 	fv := vimline.View{Label: "reason", Text: "high priority"}
 	feats := teachFeatureChoices(r, st, now)
 
-	// When pref is 0 (Prefer (+)), "Prefer (+)" chip should be highlighted
-	framePrefer := renderTeach(100, 24, []string{"Inbox"}, 0, r, 0, 0, feats, 0, fv, st, now)
+	// When pref is 0 (Prefer (+)), "Prefer (+)" chip should be highlighted.
+	// Signature: field, pref, priChoice, feats, featSel.
+	framePrefer := renderTeach(100, 28, []string{"Inbox"}, 0, r, 0, 0, 0, feats, 0, fv, st, now)
 	plainPrefer := stripANSI(framePrefer)
 
 	if !strings.Contains(plainPrefer, "Teach Jev: portal-billing (w1:p1)") {
@@ -349,8 +350,11 @@ func TestRenderTeachVisualPreferences(t *testing.T) {
 	if !strings.Contains(plainPrefer, "waiting on stripe keys") {
 		t.Fatalf("sticky note missing in frame:\n%s", plainPrefer)
 	}
-	if !strings.Contains(plainPrefer, "Prefer (+)") || !strings.Contains(plainPrefer, "Neutral") || !strings.Contains(plainPrefer, "Demote (-)") {
+	if !strings.Contains(plainPrefer, "Prefer (+)") || !strings.Contains(plainPrefer, "Great job") || !strings.Contains(plainPrefer, "Neutral") || !strings.Contains(plainPrefer, "Demote (-)") {
 		t.Fatalf("preference choices missing in frame:\n%s", plainPrefer)
+	}
+	if !strings.Contains(plainPrefer, "Priority (P0 highest)") || !strings.Contains(plainPrefer, "P0") {
+		t.Fatalf("priority chooser missing in frame:\n%s", plainPrefer)
 	}
 	if !strings.Contains(plainPrefer, "h/l choose") || !strings.Contains(plainPrefer, "enter save") {
 		t.Fatalf("footer missing in frame:\n%s", plainPrefer)
@@ -530,6 +534,130 @@ func TestArchiveDoesNotReorderInbox(t *testing.T) {
 	got := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
 	if strings.Join(paneIDs(got), ",") != "a,c" {
 		t.Fatalf("order = %v, want a,c", paneIDs(got))
+	}
+}
+
+func TestHumanPriorityPinOrdersNewInboxArrivalWithoutJev(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{
+		Version: 1, TabsInit: true, Tabs: defaultTabs(),
+		Panes: map[string]*paneStat{
+			"low":  {Visits: 1, Last: now - 5, Label: "noise", InInbox: true},
+			"high": {Visits: 1, Last: now - 1, Label: "portal-mediorbis", InInbox: true, PrioritySet: true, Priority: 0},
+		},
+		// Empty InboxOrder so both count as new arrivals.
+	}
+	snap := &snapshot{Panes: []paneRec{
+		{PaneID: "low", AgentStatus: "idle"},
+		{PaneID: "high", AgentStatus: "blocked"},
+	}}
+	got := rowsFor(snap, st, view{Kind: "inbox"}, sortDefault)
+	if len(got) < 2 || got[0].PaneID != "high" {
+		t.Fatalf("P0 pin must lead new arrivals without Jev: %v", paneIDs(got))
+	}
+}
+
+func TestHumanPriorityBoostRanksP0AboveUnset(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	cold := row{PaneID: "w1:p1", Label: "cold", Status: "idle", Last: now}
+	hot := row{PaneID: "w1:p2", Label: "hot", Status: "idle", Last: now, PrioritySet: true, Priority: 0}
+	if st.jevPriority(hot, now) <= st.jevPriority(cold, now) {
+		t.Fatalf("P0 pin must outrank unset: hot=%+.3f cold=%+.3f", st.jevPriority(hot, now), st.jevPriority(cold, now))
+	}
+	feats := map[string]bool{}
+	for _, f := range jevFeatures(hot, now) {
+		feats[f] = true
+	}
+	if !feats["priority:P0"] {
+		t.Fatalf("priority feature missing: %v", feats)
+	}
+}
+
+func TestReviewIntentShiftsStrongerThanPrefer(t *testing.T) {
+	now := time.Now().Unix()
+	r := row{PaneID: "w1:p9", Label: "portal-mediorbis", Status: "blocked", Last: now}
+	stPrefer := &store{Version: 1, Panes: map[string]*paneStat{}, Jev: &jevState{Teachings: []jevTeaching{{
+		Intent: "prefer", Pane: jevPaneContext{PaneID: r.PaneID}, Selected: jevFeatures(r, now),
+	}}}}
+	stReview := &store{Version: 1, Panes: map[string]*paneStat{}, Jev: &jevState{Teachings: []jevTeaching{{
+		Intent: "review", Pane: jevPaneContext{PaneID: r.PaneID}, Selected: jevFeatures(r, now),
+	}}}}
+	prefer := teachShift(stPrefer, r, now)
+	review := teachShift(stReview, r, now)
+	if review <= prefer {
+		t.Fatalf("review shift must beat prefer: review=%+.3f prefer=%+.3f", review, prefer)
+	}
+}
+
+func TestJevReviewSelectedBumpsHarderThanPrefer(t *testing.T) {
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	feats := []string{"label:portal-mediorbis", "status:blocked"}
+	st.jevPreferSelected(feats, true)
+	preferW := st.Jev.Weights["label:portal-mediorbis"]
+	st.jevReviewSelected(feats)
+	reviewW := st.Jev.Weights["label:portal-mediorbis"]
+	if reviewW-preferW < 0.15 {
+		t.Fatalf("review bump too weak: prefer=%+.3f after-review=%+.3f", preferW, reviewW)
+	}
+}
+
+func TestPriorityBadgeRendersOnRow(t *testing.T) {
+	rows := []row{{
+		PaneID: "w1:p1", Label: "portal-mediorbis", Status: "blocked",
+		PrioritySet: true, Priority: 0, Last: time.Now().Unix(),
+	}}
+	frame := stripANSI(renderFrame(rows, 0, 0, vimline.View{Label: "/"}, "", 100, 14, []string{"Inbox"}, 0, "both", ""))
+	if !strings.Contains(frame, "P0") {
+		t.Fatalf("P0 badge missing:\n%s", frame)
+	}
+	if !strings.Contains(frame, "portal-mediorbis") {
+		t.Fatalf("label missing:\n%s", frame)
+	}
+}
+
+func TestRenderPriorityChooser(t *testing.T) {
+	r := row{PaneID: "w1:p1", Label: "portal-mediorbis", PrioritySet: true, Priority: 1}
+	frame := stripANSI(renderPriority(80, 16, []string{"Inbox"}, 0, r, 2))
+	if !strings.Contains(frame, "Priority: portal-mediorbis") {
+		t.Fatalf("header missing:\n%s", frame)
+	}
+	for _, want := range []string{"P0", "P1", "P2", "P3", "P4", "current:"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("missing %q in:\n%s", want, frame)
+		}
+	}
+}
+
+func TestRenderTeachGreatJobReviewLabel(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	r := row{PaneID: "w1:p1", Label: "portal-mediorbis", Status: "blocked"}
+	fv := vimline.View{Label: "review", Text: "monitoring caught outliers I had forgotten"}
+	feats := teachFeatureChoices(r, st, now)
+	// pref=1 Great job, field=3 review comment focused
+	frame := stripANSI(renderTeach(100, 28, []string{"Inbox"}, 0, r, 3, 1, 0, feats, 0, fv, st, now))
+	if !strings.Contains(frame, "Review comment") {
+		t.Fatalf("review comment field missing:\n%s", frame)
+	}
+	if !strings.Contains(frame, "Great job") {
+		t.Fatalf("great job pref missing:\n%s", frame)
+	}
+}
+
+func TestApplyPriorityChoice(t *testing.T) {
+	ps := &paneStat{}
+	applyPriorityChoice(ps, 1) // P0
+	if !ps.PrioritySet || ps.Priority != 0 {
+		t.Fatalf("P0 set failed: %+v", ps)
+	}
+	applyPriorityChoice(ps, 0) // clear
+	if ps.PrioritySet || ps.Priority != 0 {
+		t.Fatalf("clear failed: %+v", ps)
+	}
+	applyPriorityChoice(ps, 5) // P4
+	if !ps.PrioritySet || ps.Priority != 4 {
+		t.Fatalf("P4 set failed: %+v", ps)
 	}
 }
 

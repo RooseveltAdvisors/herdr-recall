@@ -70,6 +70,12 @@ const (
 	keyStBusy   = "\x1b[38;5;221m" // working: yellow
 	keyStGood   = "\x1b[38;5;44m"  // done: teal
 	keyStFree   = "\x1b[38;5;114m" // idle: green
+	// beads-tui P0..P4 ramp: red -> orange -> yellow -> blue -> gray
+	keyPri0     = "\x1b[38;5;196m"
+	keyPri1     = "\x1b[38;5;208m"
+	keyPri2     = "\x1b[38;5;220m"
+	keyPri3     = "\x1b[38;5;39m"
+	keyPri4     = "\x1b[38;5;245m"
 )
 
 // ---------------------------------------------------------------------------
@@ -192,6 +198,10 @@ type paneStat struct {
 	SnoozeMode    string `json:"snooze_mode,omitempty"`
 	SnoozeState   string `json:"snooze_state,omitempty"`
 	InInbox       bool   `json:"in_inbox,omitempty"`
+	// Priority is beads-tui style P0..P4 when PrioritySet is true.
+	// P0 is highest urgency. Unset panes carry no badge and no rank boost.
+	Priority      int  `json:"priority,omitempty"`
+	PrioritySet   bool `json:"priority_set,omitempty"`
 }
 
 type customTab struct {
@@ -1251,6 +1261,8 @@ type row struct {
 	DoneState     string
 	SnoozeMode    string
 	SnoozeState   string
+	Priority      int
+	PrioritySet   bool
 }
 
 // displayLabel is the Herdr tab name only, the same label prefix k uses
@@ -1321,7 +1333,8 @@ func collectRows(s *snapshot, st *store) []row {
 		label = displayLabel(s, id, label)
 		var visits, last, remindAt, doneAt int64
 		var note, doneState, snoozeMode, snoozeState string
-		var manualBlocked, done bool
+		var manualBlocked, done, prioritySet bool
+		var priority int
 		if ps != nil {
 			visits, last = ps.Visits, ps.Last
 			note = ps.Note
@@ -1332,6 +1345,8 @@ func collectRows(s *snapshot, st *store) []row {
 			doneState = ps.DoneState
 			snoozeMode = ps.SnoozeMode
 			snoozeState = ps.SnoozeState
+			priority = ps.Priority
+			prioritySet = ps.PrioritySet
 		}
 		status := statusOf[id]
 		if manualBlocked {
@@ -1362,6 +1377,7 @@ func collectRows(s *snapshot, st *store) []row {
 			Fav: st.isFavorite(id), ManualBlocked: manualBlocked,
 			RemindAt: remindAt, Done: done, DoneAt: doneAt, DoneState: doneState,
 			SnoozeMode: snoozeMode, SnoozeState: snoozeState,
+			Priority: priority, PrioritySet: prioritySet,
 		})
 	}
 	return out
@@ -1516,9 +1532,18 @@ func syncInboxRows(all []row, st *store, now int64) []row {
 			added = append(added, r)
 		}
 	}
-	if st.jevOn() {
-		// Only new arrivals may land at the front. Rows already in the queue
-		// keep their order, so e archives one row and does not shuffle the rest.
+	// Rank new arrivals by Jev score and/or human P0-P4 pins. Rows already in
+	// the queue keep their order, so e archives one row and does not shuffle the rest.
+	useScore := st.jevOn()
+	if !useScore {
+		for _, r := range added {
+			if r.PrioritySet {
+				useScore = true
+				break
+			}
+		}
+	}
+	if useScore {
 		st.jevSortDesc(added, now)
 		front := make([]string, 0, len(added)+len(orderedIDs))
 		for _, r := range added {
@@ -1742,6 +1767,95 @@ func metricText(r row, width int, kind string) string {
 		}
 		return times + " · " + when
 	}
+}
+
+// priorityColor returns the beads-tui P0..P4 color ramp.
+func priorityColor(p int) string {
+	switch p {
+	case 0:
+		return keyPri0
+	case 1:
+		return keyPri1
+	case 2:
+		return keyPri2
+	case 3:
+		return keyPri3
+	default:
+		return keyPri4
+	}
+}
+
+// formatPriorityBadge renders "P0".."P4" or empty when unset.
+func formatPriorityBadge(r row) string {
+	if !r.PrioritySet {
+		return ""
+	}
+	p := r.Priority
+	if p < 0 {
+		p = 0
+	}
+	if p > 4 {
+		p = 4
+	}
+	return priorityColor(p) + keyBold + fmt.Sprintf("P%d", p) + keyReset
+}
+
+func priorityLabel(set bool, p int) string {
+	if !set {
+		return "-"
+	}
+	if p < 0 {
+		p = 0
+	}
+	if p > 4 {
+		p = 4
+	}
+	return fmt.Sprintf("P%d", p)
+}
+
+func priorityChoiceLabels() []string {
+	return []string{"-" /* unset */, "P0", "P1", "P2", "P3", "P4"}
+}
+
+// priorityChoiceIndex maps PrioritySet+Priority to the chooser index 0..5.
+func priorityChoiceIndex(set bool, p int) int {
+	if !set {
+		return 0
+	}
+	if p < 0 {
+		p = 0
+	}
+	if p > 4 {
+		p = 4
+	}
+	return p + 1
+}
+
+// applyPriorityChoice writes chooser index 0..5 onto a paneStat.
+func applyPriorityChoice(ps *paneStat, idx int) {
+	if ps == nil {
+		return
+	}
+	if idx <= 0 {
+		ps.PrioritySet = false
+		ps.Priority = 0
+		return
+	}
+	if idx > 5 {
+		idx = 5
+	}
+	ps.PrioritySet = true
+	ps.Priority = idx - 1
+}
+
+func clampPriority(p int) int {
+	if p < 0 {
+		return 0
+	}
+	if p > 4 {
+		return 4
+	}
+	return p
 }
 
 func ago(ts int64) string {
@@ -2079,8 +2193,9 @@ func allHelpEntries() []helpEntry {
 		{"ctrl-d / ctrl-u", "scroll half-page down / up"},
 		{"e", "mark done. Leaves current list. z undoes"},
 		{"z / u", "undo the last e, returning thread to queue"},
-		{"i", "teach Jev: prefer, demote, pick features, or type a rule"},
+		{"i", "teach Jev: prefer, great-job review, demote, features, or type a rule"},
 		{"space", "in teach: toggle the highlighted feature chip"},
+		{"p", "set beads-style priority P0-P4 (or clear) on the selected thread"},
 		{"J", "Jev dashboard: inspect and delete learned weights, see preview"},
 		{"h", "set, change, or cancel a reminder"},
 		{"n", "sticky note on selected thread, edited with vim keys"},
@@ -2488,6 +2603,8 @@ func featureDescription(f string) string {
 		return val + " triage"
 	case "favorite":
 		return "starred favorite threads"
+	case "priority":
+		return "human priority " + val + " (P0 highest)"
 	case "remind":
 		if val == "due" {
 			return "overdue reminders"
@@ -2963,13 +3080,15 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
-	starW, dotW, statusW, metaW := 2, 2, 10, 22
+	starW, dotW, priW, statusW, metaW := 2, 2, 3, 10, 22
 	if narrow {
 		// The name is the point of the picker. A narrow pane keeps the coloured
 		// dot and a short "2m ago", and gives every remaining column to the label.
+		// Priority still shows (P0 is 2 cells) so a set urgency is never lost.
 		statusW, metaW = 0, 8
+		priW = 3
 	}
-	labelW := width - starW - dotW - statusW - metaW
+	labelW := width - starW - dotW - priW - statusW - metaW
 	if labelW < 4 {
 		labelW = 4
 	}
@@ -3009,6 +3128,14 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		} else {
 			dotCell += keyReset + " "
 		}
+		priCell := strings.Repeat(" ", priW)
+		if badge := formatPriorityBadge(r); badge != "" {
+			if i == sel {
+				priCell = pad(badge+keySelectFg, priW)
+			} else {
+				priCell = pad(badge+keyReset, priW)
+			}
+		}
 		var statusCell string
 		switch {
 		case r.Done && !r.ManualBlocked:
@@ -3035,10 +3162,10 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			} else {
 				line += "  "
 			}
-			line += dotCell + labelCell + statusCell + metaCol
+			line += dotCell + labelCell + priCell + statusCell + metaCol
 			emit(pad(line, width) + keyReset)
 		} else {
-			emit(starCell + dotCell + keyText + labelCell + statusCell + keyText + metaCol + keyReset)
+			emit(starCell + dotCell + keyText + labelCell + priCell + statusCell + keyText + metaCol + keyReset)
 		}
 		shown++
 	}
@@ -3060,7 +3187,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	if fv.Focused {
 		emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "esc", "browse", "ctrl+c", "close"))
 	} else {
-		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "J", "jev", "h", "remind", "n", "note", "!", "block", "/", "search"))
+		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "p", "pri", "J", "jev", "h", "remind", "n", "note", "!", "block", "/", "search"))
 	}
 	extra := "arrows tabs   g i/l/t/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && names[active] == "Transcripts" {
@@ -3367,7 +3494,12 @@ func renderNote(width, height int, names []string, active int, fv vimline.View) 
 	}, "enter save,ctrl+u clear,esc cancel")
 }
 
-func teachPrefLabels() []string { return []string{"Prefer (+)", "Neutral", "Demote (-)"} }
+func teachPrefLabels() []string {
+	// Great job is the ranking-review signal: the captain confirms the algo
+	// ranked this thread well (e.g. a forgotten monitor that correctly rose).
+	// It is a stronger positive RL label than Prefer and logs as intent=review.
+	return []string{"Prefer (+)", "Great job (★)", "Neutral", "Demote (-)"}
+}
 
 type teachFeat struct {
 	key string
@@ -3431,6 +3563,8 @@ func featureChipLabel(f string) string {
 		return "reminder"
 	case "favorite":
 		return "favorite"
+	case "priority":
+		return val
 	}
 	return val
 }
@@ -3468,13 +3602,14 @@ func enabledTeachFeatures(feats []teachFeat) []string {
 	return out
 }
 
-// renderTeach draws the 'i' teach dialog: preference, feature chips, and free text.
-func renderTeach(width, height int, names []string, active int, r row, field, pref int, feats []teachFeat, featSel int, fv vimline.View, st *store, now int64) string {
+// renderTeach draws the 'i' teach dialog: preference, human priority, feature chips, and free text.
+// field: 0=preference 1=priority 2=features 3=instruction/review comment
+func renderTeach(width, height int, names []string, active int, r row, field, pref, priChoice int, feats []teachFeat, featSel int, fv vimline.View, st *store, now int64) string {
 	weights := map[string]float64{}
 	if st != nil && st.Jev != nil {
 		weights = st.Jev.Weights
 	}
-	return dialog(width, height, 22, names, active, func(sc *screen) {
+	return dialog(width, height, 26, names, active, func(sc *screen) {
 		sc.emit("")
 		sc.emit(keyText + keyBold + "  Teach Jev: " + keyReset + keyAccentFg + keyBold + r.Label + keyReset + keyOverlay + " (" + r.PaneID + ")" + keyReset)
 
@@ -3484,26 +3619,59 @@ func renderTeach(width, height int, names []string, active int, r row, field, pr
 		if r.Note != "" {
 			meta += keyOverlay + "  note: " + keyReset + keyText + r.Note + keyReset
 		}
-		priority := st.jevPriority(r, now)
+		if r.PrioritySet {
+			meta += keyOverlay + "  pri: " + keyReset + formatPriorityBadge(r)
+		}
+		score := st.jevPriority(r, now)
 		scoreColor := keyStGood
-		if priority < 0 {
+		if score < 0 {
 			scoreColor = keyStBad
 		}
-		meta += keyOverlay + "  priority: " + keyReset + scoreColor + fmt.Sprintf("%+.2f", priority) + keyReset
+		meta += keyOverlay + "  score: " + keyReset + scoreColor + fmt.Sprintf("%+.2f", score) + keyReset
 		sc.emit(meta)
-		sc.emit(keyOverlay + "  Checked chips get the plus or minus. Text can name a finer rule." + keyReset)
+		sc.emit(keyOverlay + "  Prefer/Demote move features. Great job reviews a good ranking. P0-P4 pin urgency." + keyReset)
 		sc.emit("")
 		sc.emit(fieldTitle("Preference", field == 0))
 		for _, line := range choiceLines(teachPrefLabels(), pref, sc.width) {
 			sc.emit(line)
 		}
-		sc.emit(fieldTitle("Features to guide", field == 1))
-		for _, line := range teachChipLines(feats, featSel, field == 1, sc.width, weights) {
+		sc.emit(fieldTitle("Priority (P0 highest)", field == 1))
+		priLabels := priorityChoiceLabels()
+		highlight := priChoice
+		if field != 1 {
+			highlight = -1
+		}
+		for _, line := range choiceLines(priLabels, highlight, sc.width) {
 			sc.emit(line)
 		}
-		sc.emit(fieldTitle("Instruction (optional)", field == 2))
+		sc.emit(fieldTitle("Features to guide", field == 2))
+		for _, line := range teachChipLines(feats, featSel, field == 2, sc.width, weights) {
+			sc.emit(line)
+		}
+		instrTitle := "Instruction (optional)"
+		if pref == 1 {
+			instrTitle = "Review comment (why this ranking was right)"
+		}
+		sc.emit(fieldTitle(instrTitle, field == 3))
 		sc.emit(renderField(fv, sc.width))
 	}, "h/l choose,j/k field,space toggle,enter save,esc back")
+}
+
+// renderPriority draws the standalone 'p' priority chooser.
+func renderPriority(width, height int, names []string, active int, r row, choice int) string {
+	return dialog(width, height, 10, names, active, func(sc *screen) {
+		sc.emit("")
+		sc.emit(keyText + keyBold + "  Priority: " + keyReset + keyAccentFg + keyBold + r.Label + keyReset + keyOverlay + " (" + r.PaneID + ")" + keyReset)
+		sc.emit(keyOverlay + "  beads-style P0 (highest) through P4. Clear removes the pin." + keyReset)
+		sc.emit("")
+		for _, line := range choiceLines(priorityChoiceLabels(), choice, sc.width) {
+			sc.emit(line)
+		}
+		if r.PrioritySet {
+			sc.emit("")
+			sc.emit(keyOverlay + "  current: " + keyReset + formatPriorityBadge(r))
+		}
+	}, "h/l choose,enter save,esc cancel")
 }
 
 func clipTail(s string, n int) string {
@@ -3650,9 +3818,13 @@ func runPicker() int {
 	teaching := false
 	teachField := 0
 	teachPref := 0
+	teachPriChoice := 0 // 0=unset, 1..5 = P0..P4
 	teachFeats := []teachFeat{}
 	teachFeatSel := 0
 	teachEd := vimline.New("")
+	prioritizing := false
+	priChoice := 0
+	priRow := row{}
 	txHits := []txHit{}
 	txRole := "typed"
 	txSort := "relevance"
@@ -3790,12 +3962,22 @@ func runPicker() int {
 			selected = withoutIDParts(selected, named)
 			selected = append(selected, named...)
 		}
+		// Apply human P0-P4 pin from the teach dialog before scoring/logging.
+		psTeach := st.ensurePane(teachRow.PaneID)
+		applyPriorityChoice(psTeach, teachPriChoice)
+		teachRow.PrioritySet = psTeach.PrioritySet
+		teachRow.Priority = psTeach.Priority
+
 		intent := "neutral"
 		switch teachPref {
 		case 0:
 			intent = "prefer"
 			st.jevPreferSelected(selected, true)
-		case 2:
+		case 1:
+			// Great job: ranking-quality review. Stronger positive RL than prefer.
+			intent = "review"
+			st.jevReviewSelected(selected)
+		case 3:
 			intent = "demote"
 			st.jevPreferSelected(selected, false)
 		default:
@@ -3860,6 +4042,8 @@ func runPicker() int {
 				DoneState:     teachRow.DoneState,
 				Visits:        teachRow.Visits,
 				Last:          teachRow.Last,
+				Priority:      teachRow.Priority,
+				PrioritySet:   teachRow.PrioritySet,
 				JevScore:      st.JevScore(teachRow.PaneID),
 				JevPriority:   st.jevPriority(teachRow, nowUnix),
 			},
@@ -3885,18 +4069,36 @@ func runPicker() int {
 		taughtID := teachRow.PaneID
 		if saved {
 			teaching = false
-			if teachPref == 0 {
+			switch {
+			case teachPref == 0:
 				status = "taught Jev: prefer " + teachRow.Label
-			} else if teachPref == 2 {
+			case teachPref == 1:
+				status = "review: great ranking for " + teachRow.Label
+			case teachPref == 3:
 				status = "taught Jev: demote " + teachRow.Label
-			} else if text != "" {
+			case text != "":
 				status = "taught Jev: " + clip(text, 28)
-			} else {
+			default:
 				status = "saved teaching for " + teachRow.Label
 			}
 		}
 		rebuild()
 		sel = pinSel(visible(), sel, taughtID)
+	}
+
+	commitPriority := func() {
+		ps := st.ensurePane(priRow.PaneID)
+		applyPriorityChoice(ps, priChoice)
+		if saveSt(0) {
+			if ps.PrioritySet {
+				status = "priority " + priorityLabel(true, ps.Priority) + ": " + priRow.Label
+			} else {
+				status = "priority cleared: " + priRow.Label
+			}
+		}
+		prioritizing = false
+		rebuild()
+		sel = pinSel(visible(), sel, priRow.PaneID)
 	}
 
 	// commitRemind parses the typed time and applies the snooze contract.
@@ -3950,7 +4152,7 @@ func runPicker() int {
 
 	// activeEd reports which vim editor owns the next key, if any.
 	activeEd := func() *vimline.Editor {
-		if teaching && teachField == 2 {
+		if teaching && teachField == 3 {
 			return teachEd
 		}
 		if showHelp && helpSearching {
@@ -4147,7 +4349,7 @@ func runPicker() int {
 		if sel < 0 {
 			sel = 0
 		}
-		if !showJev && !reminding && !teaching {
+		if !showJev && !reminding && !teaching && !prioritizing {
 			note.stale()
 			clear(retry)
 		}
@@ -4227,8 +4429,14 @@ func runPicker() int {
 			frame = renderRemind(w, h, viewNames(st), tab, remindField, remindMode, remindAction, remindSel, picks, remindEd.View("at", remindField == remindTimeField(remindHas)), remindLabel, remindHas, remindExisting, time.Now())
 		case noting:
 			frame = renderNote(w, h, viewNames(st), tab, noteEd.View("note", true))
+		case prioritizing:
+			frame = renderPriority(w, h, viewNames(st), tab, priRow, priChoice)
 		case teaching:
-			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachField, teachPref, teachFeats, teachFeatSel, teachEd.View("reason", teachField == 2), st, time.Now().Unix())
+			reasonLabel := "reason"
+			if teachPref == 1 {
+				reasonLabel = "review"
+			}
+			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachField, teachPref, teachPriChoice, teachFeats, teachFeatSel, teachEd.View(reasonLabel, teachField == 3), st, time.Now().Unix())
 		case creating:
 			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.View("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
 		default:
@@ -4599,10 +4807,28 @@ func runPicker() int {
 			}
 			continue
 		}
+		if prioritizing && !showHelp {
+			switch key {
+			case "h", "left":
+				priChoice = cycle(6, priChoice, -1)
+			case "l", "right":
+				priChoice = cycle(6, priChoice, 1)
+			case "0", "1", "2", "3", "4":
+				priChoice = int(key[0]-'0') + 1
+			case "-", "x", "c":
+				priChoice = 0
+			case "enter":
+				commitPriority()
+			case "esc", "q":
+				prioritizing = false
+				status = ""
+			}
+			continue
+		}
 		if teaching && !showHelp {
 			switch key {
 			case "esc":
-				if teachField == 2 && teachEd.Mode() == vimline.ModeInsert {
+				if teachField == 3 && teachEd.Mode() == vimline.ModeInsert {
 					teachEd.Feed(key)
 					continue
 				}
@@ -4614,7 +4840,7 @@ func runPicker() int {
 				status = ""
 				continue
 			case "enter":
-				if teachField == 2 {
+				if teachField == 3 {
 					if teachEd.Feed(key) == vimline.ActAccept {
 						commitTeach()
 					}
@@ -4623,16 +4849,16 @@ func runPicker() int {
 				commitTeach()
 				continue
 			case "j", "down", "tab":
-				if teachField == 2 && teachEd.Mode() == vimline.ModeInsert {
+				if teachField == 3 && teachEd.Mode() == vimline.ModeInsert {
 					teachEd.Feed(key)
 					continue
 				}
-				if teachField < 2 {
+				if teachField < 3 {
 					teachField++
 				}
 				continue
 			case "k", "up":
-				if teachField == 2 && teachEd.Mode() == vimline.ModeInsert {
+				if teachField == 3 && teachEd.Mode() == vimline.ModeInsert {
 					teachEd.Feed(key)
 					continue
 				}
@@ -4644,13 +4870,26 @@ func runPicker() int {
 			if teachField == 0 {
 				switch key {
 				case "h", "left":
-					teachPref = cycle(3, teachPref, -1)
+					teachPref = cycle(4, teachPref, -1)
 				case "l", "right":
-					teachPref = cycle(3, teachPref, 1)
+					teachPref = cycle(4, teachPref, 1)
 				}
 				continue
 			}
 			if teachField == 1 {
+				switch key {
+				case "h", "left":
+					teachPriChoice = cycle(6, teachPriChoice, -1)
+				case "l", "right":
+					teachPriChoice = cycle(6, teachPriChoice, 1)
+				case "0", "1", "2", "3", "4":
+					teachPriChoice = int(key[0]-'0') + 1
+				case "-", "x", "c":
+					teachPriChoice = 0
+				}
+				continue
+			}
+			if teachField == 2 {
 				n := len(teachFeats)
 				switch key {
 				case "h", "left":
@@ -4683,7 +4922,7 @@ func runPicker() int {
 			case vimline.ActAccept:
 				commitTeach()
 			case vimline.ActCancel, vimline.ActUp:
-				teachField = 1
+				teachField = 2
 			}
 			continue
 		}
@@ -5067,6 +5306,7 @@ func runPicker() int {
 			teachField = 0
 			teachPref = 0
 			teachRow = hitAsRow(txHits[sel])
+			teachPriChoice = priorityChoiceIndex(teachRow.PrioritySet, teachRow.Priority)
 			teachFeats = teachFeatureChoices(teachRow, st, time.Now().Unix())
 			teachFeatSel = 0
 			teachRank = sel
@@ -5103,11 +5343,24 @@ func runPicker() int {
 				teachField = 0
 				teachPref = 0
 				teachRow = rows[sel]
+				teachPriChoice = priorityChoiceIndex(teachRow.PrioritySet, teachRow.Priority)
 				teachFeats = teachFeatureChoices(teachRow, st, time.Now().Unix())
 				teachFeatSel = 0
 				teachRank = sel
 				teachTotal = len(rows)
 				teachEd = vimline.New("")
+			}
+		case key == "p" && !searching && !showHelp && !showJev && !teaching && !prioritizing && !reminding && !noting:
+			if !pointed() {
+				break
+			}
+			if views(st)[tab].Kind == "transcripts" {
+				break
+			}
+			if len(rows) > 0 && sel < len(rows) {
+				prioritizing = true
+				priRow = rows[sel]
+				priChoice = priorityChoiceIndex(priRow.PrioritySet, priRow.Priority)
 			}
 		case key == "e" && !searching && !showHelp:
 			if !pointed() {

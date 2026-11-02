@@ -25,6 +25,23 @@ The sticky note renders inline in a dim column beside the Herdr tab name and is 
 When Herdr's runtime detector reports `idle` or `working` on a thread the captain knows is stuck on an external dependency or human decision, pressing `!` toggles a manual `blocked` override on that pane.
 A manual override takes precedence in status filtering and Inbox triage until the captain clears it or marks the pane done with `e`.
 
+## Human Priority Pins (P0-P4)
+
+Any pane can carry a beads-tui style human priority pin set with `p` or inside the `i` teach dialog: `P0` (highest) through `P4`, or clear.
+A set pin renders as a coloured `P0`..`P4` badge on the row (red to gray ramp, same vocabulary as beads-tui) and contributes a fixed boost to Jev ranking so urgency the captain already knows is never lost under learned scores.
+Priority pins are explicit operator judgment, not invented sort scores. Custom tab sorts still refuse opaque priority heuristics and stay on directional names (`Most recent`, `Oldest`, `Most used`, `Least used`).
+These pins are durable features for Jev and downstream ranking models.
+
+## Ranking Review as Reinforcement Learning Signal
+
+The product value of herdr-recall is proven when the inbox surfaces a thread the captain had forgotten but still needs to see.
+Example: `portal-mediorbis` rises to the top because its monitoring caught errors and outlier events, not because the captain visited it recently.
+That is a human-sensible ranking check no amount of feature engineering easily learns on its own.
+
+The `i` teach dialog therefore carries a **Great job (★)** preference beside Prefer, Neutral, and Demote.
+Great job records intent `review` with an optional free-text review comment explaining why the ranking was right, bumps the checked features more strongly than Prefer, and appends the full queue context to `jev-teachings.jsonl`.
+These review records are first-class reinforcement learning labels for Jev and future rankers: positive confirmation of a good surface, not only pairwise prefer/demote on features.
+
 ## Native Herdr Visual Fidelity and Direct Focus
 
 The picker opens as a 95% by 95% Herdr popup modal and reuses Herdr's exact colour vocabulary, status dots, and clean tab-only row titles.
@@ -37,7 +54,7 @@ Closed panes are filtered out against the live snapshot on every open, and press
 Browse mode never types into the search box; `/` enters search and `n` opens a sticky note, and both drive one shared vim line editor with normal and insert modes, motions, operators, counts, and undo.
 `esc` walks one level at a time, from insert to normal to browse with the filter kept, and a further `esc` closes the popup.
 Navigation uses `j` and `k` (or arrows) for rows, `g` and `G` for ends, `ctrl-u` and `ctrl-d` for half-pages, `b/w/i/d/a` for status filters, and `h` and `l` to switch between `Favorites`, `Inbox`, `Recent`, `Most used`, custom tabs, and `All`.
-Triage actions stay on single keys in browse mode: `e` marks done, `z` sets a reminder, `n` edits the sticky note, `!` toggles manual blocked, `m` marks a favorite, and `i` teaches Jev on the selected thread while capturing complete queue and pane context for long-term learning.
+Triage actions stay on single keys in browse mode: `e` marks done, `z` undoes done, `h` sets a reminder, `n` edits the sticky note, `!` toggles manual blocked, `m` marks a favorite, `p` sets a beads-style human priority (`P0` highest through `P4`, or clear), and `i` teaches Jev on the selected thread while capturing complete queue and pane context for long-term learning.
 Actions that mutate the tab set are never a bare key, so nothing structural happens by accident.
 Custom tab management sits behind the `t` prefix, the way vim gates structure behind `:` and tmux gates create behind `prefix`: `t c` creates a custom tab via a visible multi-field form, `t r` revises its criteria, and `t x` deletes it after a confirmation dialog that defaults to Cancel.
 Custom sorts use self-contained directional names (`Most recent`, `Oldest`, `Most used`, `Least used`), display the active sort order as a pill in the header on sortable tabs (`All`, `Favorites`, and custom tabs), and refuse invented priority scores or separate ascending/descending rows.
