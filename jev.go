@@ -384,7 +384,9 @@ func (s *store) jevWeight(r row, now int64) float64 {
 	if s.Jev == nil || len(s.Jev.Weights) == 0 {
 		return 0
 	}
-	feats := jevFeatures(r, now)
+	// Only the rank diet. Legacy tok: and agent:pi weights stay on disk
+	// but must not move inbox order.
+	feats := jevRankFeatures(jevFeatures(r, now))
 	have := map[string]bool{}
 	sum := 0.0
 	for _, f := range feats {
@@ -393,7 +395,7 @@ func (s *store) jevWeight(r row, now int64) float64 {
 	}
 	values := jevValueSet(r, feats)
 	for f, w := range s.Jev.Weights {
-		if w == 0 || have[f] {
+		if w == 0 || have[f] || !jevRankFeature(f) {
 			continue
 		}
 		if jevAliasHit(f, values) {

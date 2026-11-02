@@ -428,6 +428,20 @@ func TestFilterRareLabels(t *testing.T) {
 	}
 }
 
+func TestLegacyTokWeightsDoNotMovePriority(t *testing.T) {
+	now := time.Now().Unix()
+	r := row{PaneID: "w1:p1", Label: "portal billing", Status: "idle", Agent: "pi", CWD: "/tmp/portal", Note: "x", Last: now}
+	st := &store{Jev: &jevState{Weights: map[string]float64{
+		"tok:portal":  0.8,
+		"agent:pi":    0.5,
+		"status:idle": 0.1,
+	}}}
+	w := st.jevWeight(r, now)
+	if w > 0.15 || w < 0.05 {
+		t.Fatalf("jevWeight = %v, want only status:idle (~0.1)", w)
+	}
+}
+
 func TestSentenceLabelIsNotAFeature(t *testing.T) {
 	if jevLabelFeature("this is just agent routine 30 minutes check") != "" {
 		t.Fatal("sentence label became a feature")
