@@ -1014,28 +1014,6 @@ func jevLabelFeature(label string) string {
 	return "label:" + tok
 }
 
-// jevContentFeatures is retained for teach free-text parsing helpers that
-// still split words. Ranking no longer injects bag-of-words tok features.
-func jevContentFeatures(parts ...string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, part := range parts {
-		for _, w := range jevSplitWords(part) {
-			if len(w) < 2 || jevGrammarWord(w) || seen[w] {
-				continue
-			}
-			seen[w] = true
-			out = append(out, "tok:"+w)
-			if len(out) >= 24 {
-				sort.Strings(out)
-				return out
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // jevRankFeature reports whether f belongs in the ranking model.
 // Structured state, short tab labels, repos, and named ids pass.
 // Bag-of-words tokens and sentence labels do not.
