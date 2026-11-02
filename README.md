@@ -125,8 +125,7 @@ records are reinforcement labels for Jev and future rankers.
 **Priority pins** use the beads-tui `P0`..`P4` scale (`P0` highest). Press `p`
 on a row, or set Priority inside the `i` dialog. A set pin shows a coloured
 `P0`..`P4` pill **immediately after the status dot** (redshift: red P0 → blue
-P4), and the pane name takes the same color as the scan signal. Clear removes
-the pin.
+P4). The pane name stays normal body text. Clear removes the pin.
 
 **History** at the bottom of `i` is the pane audit trail: past teaches, chip
 selections, priority pins, and Jev/ML score traces, newest first. Focus History

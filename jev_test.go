@@ -690,9 +690,6 @@ func TestPriorityBadgeMatchesBeadsTuiGrammar(t *testing.T) {
 	if stripANSI(b4) != "P4" || !strings.Contains(b4, keyPri4) {
 		t.Fatalf("P4 must be blue: plain=%q raw=%q", stripANSI(b4), b4)
 	}
-	if nameColor(r0) != keyPri0 || nameColor(row{}) != keyText {
-		t.Fatalf("nameColor P0=%q unset=%q", nameColor(r0), nameColor(row{}))
-	}
 	labels := priorityChoiceLabels()
 	if labels[1] != "P0" || labels[5] != "P4" {
 		t.Fatalf("choice labels = %v", labels)
@@ -724,7 +721,7 @@ func TestPriorityPillSitsNextToStatusDot(t *testing.T) {
 	if p0 < 0 || name < p0 {
 		t.Fatalf("want status…P0…name order, got %q", line)
 	}
-	// Colored frame must paint the name with P0 red.
+	// Colored frame must paint the P0 pill red; the pane name stays uncolored.
 	if !strings.Contains(frame, keyPri0) {
 		t.Fatalf("P0 red missing from colored frame")
 	}
