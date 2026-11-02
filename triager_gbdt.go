@@ -92,6 +92,20 @@ func writeTriagerExamples(st *store, rows []row, now int64) (int, error) {
 	if len(out) < 8 {
 		return len(out), nil
 	}
+	lists := make([][]string, len(out))
+	for i := range out {
+		for f := range out[i].Feats {
+			lists[i] = append(lists[i], f)
+		}
+	}
+	lists = filterRareLabels(lists, 3)
+	for i := range out {
+		next := map[string]float64{}
+		for _, f := range lists[i] {
+			next[f] = 1
+		}
+		out[i].Feats = next
+	}
 	b, err := json.Marshal(map[string]any{"rows": out})
 	if err != nil {
 		return 0, err

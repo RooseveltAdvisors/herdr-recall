@@ -408,6 +408,22 @@ func TestJevFeaturesCarryAgentRepoAndDomain(t *testing.T) {
 	}
 }
 
+func TestFilterRareLabels(t *testing.T) {
+	got := filterRareLabels([][]string{
+		{"status:idle", "label:rare1"},
+		{"status:idle", "label:common"},
+		{"status:done", "label:common"},
+		{"status:done", "label:common"},
+	}, 3)
+	join := func(fs []string) string { return strings.Join(fs, ",") }
+	if strings.Contains(join(got[0]), "label:rare1") {
+		t.Fatal("rare label kept")
+	}
+	if !strings.Contains(join(got[1]), "label:common") {
+		t.Fatal("common label dropped")
+	}
+}
+
 func TestSentenceLabelIsNotAFeature(t *testing.T) {
 	if jevLabelFeature("this is just agent routine 30 minutes check") != "" {
 		t.Fatal("sentence label became a feature")

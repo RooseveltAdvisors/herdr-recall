@@ -461,6 +461,14 @@ func (s *store) fitLocalTriager(rows []row, now int64) int {
 	if len(set) < 8 {
 		return 0
 	}
+	featLists := make([][]string, len(set))
+	for i := range set {
+		featLists[i] = set[i].feats
+	}
+	featLists = filterRareLabels(featLists, 3)
+	for i := range set {
+		set[i].feats = featLists[i]
+	}
 	w := map[string]float64{}
 	bias := 0.0
 	const lr = 0.08
@@ -811,6 +819,34 @@ func jevRankFeatures(feats []string) []string {
 		if jevRankFeature(f) {
 			out = append(out, f)
 		}
+	}
+	return out
+}
+
+// filterRareLabels drops label:* keys seen in fewer than minN examples.
+// Rare pane names memorize noise at small n.
+func filterRareLabels(examples [][]string, minN int) [][]string {
+	if minN < 2 {
+		minN = 2
+	}
+	count := map[string]int{}
+	for _, feats := range examples {
+		for _, f := range feats {
+			if strings.HasPrefix(f, "label:") {
+				count[f]++
+			}
+		}
+	}
+	out := make([][]string, len(examples))
+	for i, feats := range examples {
+		kept := make([]string, 0, len(feats))
+		for _, f := range feats {
+			if strings.HasPrefix(f, "label:") && count[f] < minN {
+				continue
+			}
+			kept = append(kept, f)
+		}
+		out[i] = kept
 	}
 	return out
 }
