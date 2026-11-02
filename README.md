@@ -123,8 +123,13 @@ review comment, and bumps checked features more strongly than Prefer. These
 records are reinforcement labels for Jev and future rankers.
 
 **Priority pins** use the beads-tui `P0`..`P4` scale (`P0` highest). Press `p`
-on a row, or set Priority inside the `i` dialog. A set pin shows a coloured
-badge on the row and boosts Jev ranking. Clear removes the pin.
+on a row, or set Priority inside the `i` dialog. A set pin shows a status-style
+`◆P0`..`◆P4` icon badge on the row (diamond, like status uses a dot) and boosts
+Jev ranking. Clear removes the pin.
+
+**History** at the bottom of `i` is the pane audit trail: past teaches, chip
+selections, priority pins, and Jev/ML score traces, newest first. Focus History
+and use `j`/`k` to scroll.
 
 Topic words are not a fixed list. Jev takes them from the tab name, the
 sticky note, the workspace name, and the words you type. A new project name
@@ -147,8 +152,9 @@ for this cycle. A sticky note from `n` sits beside the name.
 ![triage inbox](assets/showcase-inbox.png)
 
 `i` opens teach mode on the selected thread. Prefer, Great job (★), Neutral, and Demote are
-chips, then a P0-P4 priority chooser, then feature chips. An optional instruction
-(or review comment under Great job) is saved with the choice.
+chips, then a P0-P4 priority chooser with diamond icons, then feature chips, then
+an optional instruction (or review comment under Great job), then the pane History
+audit trail.
 
 ![teach Jev](assets/showcase-teach.png)
 

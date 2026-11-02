@@ -28,9 +28,15 @@ A manual override takes precedence in status filtering and Inbox triage until th
 ## Human Priority Pins (P0-P4)
 
 Any pane can carry a beads-tui style human priority pin set with `p` or inside the `i` teach dialog: `P0` (highest) through `P4`, or clear.
-A set pin renders as a coloured `P0`..`P4` badge on the row (red to gray ramp, same vocabulary as beads-tui) and contributes a fixed boost to Jev ranking so urgency the captain already knows is never lost under learned scores.
+A set pin renders with a status-style icon (filled diamond `◆`) plus coloured `P0`..`P4` (red to gray ramp, same vocabulary as beads-tui), matching how status uses `●`/`○` plus a word.
+It contributes a fixed boost to Jev ranking so urgency the captain already knows is never lost under learned scores.
 Priority pins are explicit operator judgment, not invented sort scores. Custom tab sorts still refuse opaque priority heuristics and stay on directional names (`Most recent`, `Oldest`, `Most used`, `Least used`).
-These pins are durable features for Jev and downstream ranking models.
+These pins are durable features for Jev and downstream ranking models. Pin changes append to the pane audit trail.
+
+## Pane Audit Trail in Teach
+
+The `i` teach dialog ends with a **History** time feed for the selected pane: manual feedback (prefer, demote, great-job review, free-text), chip selections, human priority pin changes, and ML/Jev score traces from `jev-calls.jsonl`.
+Newest first. This is the human-readable audit trail for why a thread ranked where it did - not a second ranking engine.
 
 ## Ranking Review as Reinforcement Learning Signal
 
