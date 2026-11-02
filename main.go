@@ -1802,16 +1802,6 @@ func formatPriorityBadge(r row) string {
 	return color + label + keyReset
 }
 
-// nameColor is the scan color for the pane label. When a human pin is set,
-// the name takes the same redshift color as the P0..P4 pill (beads-tui style
-// urgency scan). Unset names stay the default body text color.
-func nameColor(r row) string {
-	if r.PrioritySet {
-		return priorityColor(r.Priority)
-	}
-	return keyText
-}
-
 func priorityLabel(set bool, p int) string {
 	if !set {
 		return "-"
@@ -2202,7 +2192,7 @@ func allHelpEntries() []helpEntry {
 		{"z / u", "undo the last e, returning thread to queue"},
 		{"i", "teach Jev: prefer, great-job review, demote, priority, features, and pane history audit trail"},
 		{"space", "in teach: toggle the highlighted feature chip"},
-		{"p", "set beads-style priority P0-P4 next to the status dot; colors the pane name (or clear)"},
+		{"p", "set beads-style priority P0-P4 next to the status dot (or clear)"},
 		{"J", "Jev dashboard: inspect and delete learned weights, see preview"},
 		{"h", "set, change, or cancel a reminder"},
 		{"n", "sticky note on selected thread, edited with vim keys"},
@@ -2837,16 +2827,9 @@ func anchorSel(cur, next []row, sel int, fallback string) int {
 	return pinSel(next, sel, id)
 }
 
-func formatLabelWithNote(label, note, remind string, labelW int, selected, due bool, nameFg string) string {
-	if nameFg == "" {
-		nameFg = keyText
-	}
+func formatLabelWithNote(label, note, remind string, labelW int, selected, due bool) string {
 	if note == "" && remind == "" {
-		name := clipTail(label, max(1, labelW-1))
-		if selected {
-			return pad(name, labelW)
-		}
-		return pad(nameFg+name+keyReset, labelW)
+		return pad(clipTail(label, max(1, labelW-1)), labelW)
 	}
 	suffixPlain := ""
 	if remind != "" {
@@ -2862,30 +2845,26 @@ func formatLabelWithNote(label, note, remind string, labelW int, selected, due b
 	clippedName := clipTail(label, maxName)
 	rem := labelW - len([]rune(clippedName)) - 3
 	if rem < 4 {
-		name := clipTail(label, max(1, labelW-1))
-		if selected {
-			return pad(name, labelW)
-		}
-		return pad(nameFg+name+keyReset, labelW)
+		return pad(clipTail(label, max(1, labelW-1)), labelW)
 	}
 	if selected {
-		// Selected row paints its own fg over the whole span; keep plain text.
 		return pad(clippedName+suffixPlain, labelW)
 	}
 	var b strings.Builder
-	b.WriteString(nameFg + clippedName + keyReset)
+	b.WriteString(clippedName)
 	if remind != "" {
 		color := keyAccentFg
 		if due {
 			color = keyStBad
 		}
 		shown := clip(remind, rem)
-		b.WriteString(keySub + " · " + color + shown + keyReset)
+		b.WriteString(keySub + " · " + color + shown)
 		rem -= len([]rune(shown)) + 3
 	}
 	if note != "" && rem >= 4 {
-		b.WriteString(keySub + " · " + clip(note, rem-3) + keyReset)
+		b.WriteString(keySub + " · " + clip(note, rem-3))
 	}
+	b.WriteString(keyText)
 	return pad(b.String(), labelW)
 }
 
@@ -3141,8 +3120,8 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			remind, _ = remindWhen(r.RemindAt, time.Unix(now, 0))
 		}
 		// Order matches beads-tui: status glyph, P0 pill, then the name.
-		// The name takes the priority redshift color when a pin is set.
-		labelCell := formatLabelWithNote(r.Label, r.Note, remind, labelW, i == sel, r.RemindAt > 0 && r.RemindAt <= now, nameColor(r))
+		// Only the pill is priority-colored; the pane name stays body text.
+		labelCell := formatLabelWithNote(r.Label, r.Note, remind, labelW, i == sel, r.RemindAt > 0 && r.RemindAt <= now)
 		dotCell := scol + glyph + keyReset
 		priCell := strings.Repeat(" ", priW)
 		if badge := formatPriorityBadge(r); badge != "" {

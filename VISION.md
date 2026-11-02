@@ -29,7 +29,7 @@ A manual override takes precedence in status filtering and Inbox triage until th
 
 Any pane can carry a beads-tui style human priority pin set with `p` or inside the `i` teach dialog: `P0` (highest) through `P4`, or clear.
 A set pin renders as a coloured `P0`..`P4` pill **immediately after the status dot**, the same order beads-tui uses (status glyph, then priority, then title).
-The ramp is redshift: red `P0` (hot) through blue `P4` (cool). The pane name takes the same color so urgency scans without reading the pill.
+The ramp is redshift: red `P0` (hot) through blue `P4` (cool). The pane name stays normal body text; only the pill carries priority color.
 It contributes a fixed boost to Jev ranking so urgency the captain already knows is never lost under learned scores.
 Priority pins are explicit operator judgment, not invented sort scores. Custom tab sorts still refuse opaque priority heuristics and stay on directional names (`Most recent`, `Oldest`, `Most used`, `Least used`).
 These pins are durable features for Jev and downstream ranking models. Pin changes append to the pane audit trail.
