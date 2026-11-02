@@ -1785,36 +1785,42 @@ func priorityColor(p int) string {
 	}
 }
 
-// formatPriorityBadge renders "P0".."P4" or empty when unset.
+// priorityMark is the status-style icon for a human P0..P4 pin.
+// Status uses ●/○. Priority uses a filled diamond so the two never collide.
+func priorityMark(set bool, p int) (glyph, color string) {
+	if !set {
+		return "◇", keyOverlay
+	}
+	return "◆", priorityColor(clampPriority(p))
+}
+
+// formatPriorityBadge renders icon+P0..P4 like status renders icon+word.
+// Unset returns empty so the row column stays blank.
 func formatPriorityBadge(r row) string {
 	if !r.PrioritySet {
 		return ""
 	}
-	p := r.Priority
-	if p < 0 {
-		p = 0
-	}
-	if p > 4 {
-		p = 4
-	}
-	return priorityColor(p) + keyBold + fmt.Sprintf("P%d", p) + keyReset
+	glyph, color := priorityMark(true, r.Priority)
+	return color + keyBold + glyph + fmt.Sprintf("P%d", clampPriority(r.Priority)) + keyReset
 }
 
 func priorityLabel(set bool, p int) string {
 	if !set {
 		return "-"
 	}
-	if p < 0 {
-		p = 0
-	}
-	if p > 4 {
-		p = 4
-	}
-	return fmt.Sprintf("P%d", p)
+	return fmt.Sprintf("P%d", clampPriority(p))
 }
 
 func priorityChoiceLabels() []string {
-	return []string{"-" /* unset */, "P0", "P1", "P2", "P3", "P4"}
+	// Icon + label, same grammar as status chips (glyph then word).
+	return []string{
+		"◇ -",
+		"◆ P0",
+		"◆ P1",
+		"◆ P2",
+		"◆ P3",
+		"◆ P4",
+	}
 }
 
 // priorityChoiceIndex maps PrioritySet+Priority to the chooser index 0..5.
@@ -2193,9 +2199,9 @@ func allHelpEntries() []helpEntry {
 		{"ctrl-d / ctrl-u", "scroll half-page down / up"},
 		{"e", "mark done. Leaves current list. z undoes"},
 		{"z / u", "undo the last e, returning thread to queue"},
-		{"i", "teach Jev: prefer, great-job review, demote, features, or type a rule"},
+		{"i", "teach Jev: prefer, great-job review, demote, priority, features, and pane history audit trail"},
 		{"space", "in teach: toggle the highlighted feature chip"},
-		{"p", "set beads-style priority P0-P4 (or clear) on the selected thread"},
+		{"p", "set beads-style priority P0-P4 with status-style diamond icon (or clear)"},
 		{"J", "Jev dashboard: inspect and delete learned weights, see preview"},
 		{"h", "set, change, or cancel a reminder"},
 		{"n", "sticky note on selected thread, edited with vim keys"},
@@ -3603,14 +3609,15 @@ func enabledTeachFeatures(feats []teachFeat) []string {
 	return out
 }
 
-// renderTeach draws the 'i' teach dialog: preference, human priority, feature chips, and free text.
-// field: 0=preference 1=priority 2=features 3=instruction/review comment
-func renderTeach(width, height int, names []string, active int, r row, field, pref, priChoice int, feats []teachFeat, featSel int, fv vimline.View, st *store, now int64) string {
+// renderTeach draws the 'i' teach dialog: preference, human priority, feature chips,
+// free text, and a pane audit-trail history feed.
+// field: 0=preference 1=priority 2=features 3=instruction/review 4=history
+func renderTeach(width, height int, names []string, active int, r row, field, pref, priChoice int, feats []teachFeat, featSel int, fv vimline.View, st *store, now int64, history []paneHistoryItem, histScroll int) string {
 	weights := map[string]float64{}
 	if st != nil && st.Jev != nil {
 		weights = st.Jev.Weights
 	}
-	return dialog(width, height, 26, names, active, func(sc *screen) {
+	return dialog(width, height, 32, names, active, func(sc *screen) {
 		sc.emit("")
 		sc.emit(keyText + keyBold + "  Teach Jev: " + keyReset + keyAccentFg + keyBold + r.Label + keyReset + keyOverlay + " (" + r.PaneID + ")" + keyReset)
 
@@ -3620,8 +3627,11 @@ func renderTeach(width, height int, names []string, active int, r row, field, pr
 		if r.Note != "" {
 			meta += keyOverlay + "  note: " + keyReset + keyText + r.Note + keyReset
 		}
+		pglyph, pcol := priorityMark(r.PrioritySet, r.Priority)
 		if r.PrioritySet {
-			meta += keyOverlay + "  pri: " + keyReset + formatPriorityBadge(r)
+			meta += "  " + pcol + pglyph + " " + fmt.Sprintf("P%d", clampPriority(r.Priority)) + keyReset
+		} else {
+			meta += keyOverlay + "  " + pglyph + " -" + keyReset
 		}
 		score := st.jevPriority(r, now)
 		scoreColor := keyStGood
@@ -3655,7 +3665,59 @@ func renderTeach(width, height int, names []string, active int, r row, field, pr
 		}
 		sc.emit(fieldTitle(instrTitle, field == 3))
 		sc.emit(renderField(fv, sc.width))
+		histTitle := fmt.Sprintf("History (%d)", len(history))
+		sc.emit(fieldTitle(histTitle, field == 4))
+		for _, line := range historyFeedLines(history, histScroll, 6, sc.width, field == 4) {
+			sc.emit(line)
+		}
 	}, "h/l choose,j/k field,space toggle,enter save,esc back")
+}
+
+// historyFeedLines renders a scrollable newest-first audit feed for one pane.
+func historyFeedLines(items []paneHistoryItem, scroll, visible, width int, focused bool) []string {
+	if len(items) == 0 {
+		return []string{keyOverlay + "  no feedback or score traces for this pane yet" + keyReset}
+	}
+	if visible < 1 {
+		visible = 1
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	if scroll > max(0, len(items)-visible) {
+		scroll = max(0, len(items)-visible)
+	}
+	var out []string
+	end := scroll + visible
+	if end > len(items) {
+		end = len(items)
+	}
+	for i := scroll; i < end; i++ {
+		it := items[i]
+		glyph, color := historyKindIcon(it.Kind)
+		when := ago(it.At.Unix())
+		head := fmt.Sprintf("%s %s  %s", glyph, it.Title, when)
+		if it.Total > 0 {
+			head += fmt.Sprintf("  rank %d/%d", it.Rank+1, it.Total)
+		}
+		if it.Kind == "score" || (it.Score != 0 && it.Kind != "priority") {
+			head += fmt.Sprintf("  %+.2f", it.Score)
+		}
+		prefix := "  "
+		if focused && i == scroll {
+			prefix = keySelectBg + keySelectFg + keyBold + "> " + keyReset + color
+			out = append(out, fitLine(prefix+head+keyReset, width))
+		} else {
+			out = append(out, fitLine(prefix+color+head+keyReset, width))
+		}
+		if body := strings.TrimSpace(it.Body); body != "" {
+			out = append(out, fitLine(keyOverlay+"    "+clip(body, max(8, width-6))+keyReset, width))
+		}
+	}
+	if scroll > 0 || end < len(items) {
+		out = append(out, keyOverlay+fmt.Sprintf("  … %d more  (j/k scroll when History focused)", max(0, len(items)-visible))+keyReset)
+	}
+	return out
 }
 
 // renderPriority draws the standalone 'p' priority chooser.
@@ -3823,6 +3885,8 @@ func runPicker() int {
 	teachFeats := []teachFeat{}
 	teachFeatSel := 0
 	teachEd := vimline.New("")
+	teachHistory := []paneHistoryItem{}
+	teachHistScroll := 0
 	prioritizing := false
 	priChoice := 0
 	priRow := row{}
@@ -4089,12 +4153,36 @@ func runPicker() int {
 
 	commitPriority := func() {
 		ps := st.ensurePane(priRow.PaneID)
+		beforeSet, beforePri := ps.PrioritySet, ps.Priority
 		applyPriorityChoice(ps, priChoice)
 		if saveSt(0) {
 			if ps.PrioritySet {
 				status = "priority " + priorityLabel(true, ps.Priority) + ": " + priRow.Label
 			} else {
 				status = "priority cleared: " + priRow.Label
+			}
+			// Audit trail: priority pins are operator judgment, same log as teaches.
+			if beforeSet != ps.PrioritySet || beforePri != ps.Priority {
+				now := time.Now()
+				feedback := "cleared priority"
+				if ps.PrioritySet {
+					feedback = "set " + priorityLabel(true, ps.Priority)
+				}
+				t := jevTeaching{
+					ID:          fmt.Sprintf("priority-%d-%s", now.Unix(), strings.ReplaceAll(priRow.PaneID, ":", "-")),
+					Timestamp:   now.Unix(),
+					TimeRFC3339: now.Format(time.RFC3339),
+					Feedback:    feedback,
+					Intent:      "priority",
+					Pane: jevPaneContext{
+						PaneID: priRow.PaneID, Label: priRow.Label, Status: statusWord(priRow.Status),
+						Priority: ps.Priority, PrioritySet: ps.PrioritySet,
+						JevPriority: st.jevPriority(priRow, now.Unix()),
+					},
+					Features: jevFeatures(priRow, now.Unix()),
+					Session:  jevSessionContext{ActiveTab: views(st)[tab].Kind, SocketPath: os.Getenv("HERDR_SOCKET_PATH"), FocusedPane: frozen.FocusedPaneID},
+				}
+				_ = commitTeaching(st, t, func() bool { return saveSt(0) })
 			}
 		}
 		prioritizing = false
@@ -4437,7 +4525,7 @@ func runPicker() int {
 			if teachPref == 1 {
 				reasonLabel = "review"
 			}
-			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachField, teachPref, teachPriChoice, teachFeats, teachFeatSel, teachEd.View(reasonLabel, teachField == 3), st, time.Now().Unix())
+			frame = renderTeach(w, h, viewNames(st), tab, teachRow, teachField, teachPref, teachPriChoice, teachFeats, teachFeatSel, teachEd.View(reasonLabel, teachField == 3), st, time.Now().Unix(), teachHistory, teachHistScroll)
 		case creating:
 			frame = renderForm(w, h, viewNames(st), tab, formField, editing, formEd.View("Name", formField == 0), newSort, newLimit, newOnly, newWhere, status)
 		default:
@@ -4847,6 +4935,11 @@ func runPicker() int {
 					}
 					continue
 				}
+				if teachField == 4 {
+					// History is read-only audit. Enter still saves the teach form.
+					commitTeach()
+					continue
+				}
 				commitTeach()
 				continue
 			case "j", "down", "tab":
@@ -4854,7 +4947,13 @@ func runPicker() int {
 					teachEd.Feed(key)
 					continue
 				}
-				if teachField < 3 {
+				if teachField == 4 && key != "tab" {
+					if teachHistScroll < max(0, len(teachHistory)-1) {
+						teachHistScroll++
+					}
+					continue
+				}
+				if teachField < 4 {
 					teachField++
 				}
 				continue
@@ -4863,10 +4962,28 @@ func runPicker() int {
 					teachEd.Feed(key)
 					continue
 				}
+				if teachField == 4 {
+					if teachHistScroll > 0 {
+						teachHistScroll--
+					} else {
+						teachField--
+					}
+					continue
+				}
 				if teachField > 0 {
 					teachField--
 				}
 				continue
+			case "ctrl-d":
+				if teachField == 4 {
+					teachHistScroll = min(teachHistScroll+3, max(0, len(teachHistory)-1))
+					continue
+				}
+			case "ctrl-u":
+				if teachField == 4 {
+					teachHistScroll = max(0, teachHistScroll-3)
+					continue
+				}
 			}
 			if teachField == 0 {
 				switch key {
@@ -5310,6 +5427,8 @@ func runPicker() int {
 			teachPriChoice = priorityChoiceIndex(teachRow.PrioritySet, teachRow.Priority)
 			teachFeats = teachFeatureChoices(teachRow, st, time.Now().Unix())
 			teachFeatSel = 0
+			teachHistory = loadPaneHistory(st, teachRow.PaneID, 50)
+			teachHistScroll = 0
 			teachRank = sel
 			teachTotal = len(txHits)
 			teachEd = vimline.New("")
@@ -5347,6 +5466,8 @@ func runPicker() int {
 				teachPriChoice = priorityChoiceIndex(teachRow.PrioritySet, teachRow.Priority)
 				teachFeats = teachFeatureChoices(teachRow, st, time.Now().Unix())
 				teachFeatSel = 0
+				teachHistory = loadPaneHistory(st, teachRow.PaneID, 50)
+				teachHistScroll = 0
 				teachRank = sel
 				teachTotal = len(rows)
 				teachEd = vimline.New("")

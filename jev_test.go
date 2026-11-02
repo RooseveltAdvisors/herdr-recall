@@ -341,7 +341,7 @@ func TestRenderTeachVisualPreferences(t *testing.T) {
 
 	// When pref is 0 (Prefer (+)), "Prefer (+)" chip should be highlighted.
 	// Signature: field, pref, priChoice, feats, featSel.
-	framePrefer := renderTeach(100, 28, []string{"Inbox"}, 0, r, 0, 0, 0, feats, 0, fv, st, now)
+	framePrefer := renderTeach(100, 34, []string{"Inbox"}, 0, r, 0, 0, 0, feats, 0, fv, st, now, nil, 0)
 	plainPrefer := stripANSI(framePrefer)
 
 	if !strings.Contains(plainPrefer, "Teach Jev: portal-billing (w1:p1)") {
@@ -652,12 +652,99 @@ func TestRenderTeachGreatJobReviewLabel(t *testing.T) {
 	fv := vimline.View{Label: "review", Text: "monitoring caught outliers I had forgotten"}
 	feats := teachFeatureChoices(r, st, now)
 	// pref=1 Great job, field=3 review comment focused
-	frame := stripANSI(renderTeach(100, 28, []string{"Inbox"}, 0, r, 3, 1, 0, feats, 0, fv, st, now))
+	frame := stripANSI(renderTeach(100, 34, []string{"Inbox"}, 0, r, 3, 1, 0, feats, 0, fv, st, now, nil, 0))
 	if !strings.Contains(frame, "Review comment") {
 		t.Fatalf("review comment field missing:\n%s", frame)
 	}
 	if !strings.Contains(frame, "Great job") {
 		t.Fatalf("great job pref missing:\n%s", frame)
+	}
+}
+
+func TestPriorityBadgeIncludesStatusStyleIcon(t *testing.T) {
+	r := row{PrioritySet: true, Priority: 0}
+	badge := stripANSI(formatPriorityBadge(r))
+	if !strings.Contains(badge, "◆") || !strings.Contains(badge, "P0") {
+		t.Fatalf("badge = %q, want ◆P0", badge)
+	}
+	glyph, color := priorityMark(true, 1)
+	if glyph != "◆" || color == "" {
+		t.Fatalf("priorityMark P1 = %q %q", glyph, color)
+	}
+	open, dim := priorityMark(false, 0)
+	if open != "◇" || dim == "" {
+		t.Fatalf("unset mark = %q %q", open, dim)
+	}
+	labels := priorityChoiceLabels()
+	if !strings.Contains(labels[1], "◆") || !strings.Contains(labels[1], "P0") {
+		t.Fatalf("choice labels = %v", labels)
+	}
+}
+
+func TestLoadPaneHistoryMergesTeachAndScore(t *testing.T) {
+	useTempConfig(t)
+	now := time.Now()
+	st := &store{Version: 1, Panes: map[string]*paneStat{}, Jev: &jevState{
+		Teachings: []jevTeaching{{
+			ID: "t1", Timestamp: now.Unix(), TimeRFC3339: now.Format(time.RFC3339),
+			Intent: "review", Feedback: "monitoring caught outliers",
+			Pane: jevPaneContext{PaneID: "w1:pM", Label: "portal-mediorbis", JevPriority: 0.9},
+			Selected: []string{"label:portal-mediorbis"}, InboxRank: 0, InboxTotal: 4,
+		}},
+	}}
+	// Disk teaching for same pane
+	_ = logJevTeaching(jevTeaching{
+		ID: "t2", Timestamp: now.Add(-time.Hour).Unix(), TimeRFC3339: now.Add(-time.Hour).Format(time.RFC3339),
+		Intent: "prefer", Feedback: "care about this",
+		Pane: jevPaneContext{PaneID: "w1:pM", Label: "portal-mediorbis"},
+		Selected: []string{"status:blocked"},
+	})
+	// ML score trace
+	jevCallLogOverride = filepath.Join(configDir(), "jev-calls.jsonl")
+	t.Cleanup(func() { jevCallLogOverride = "" })
+	recordJevCall(row{PaneID: "w1:pM", Label: "portal-mediorbis", Status: "blocked"}, "test-model", map[string]any{"q": 1}, `{"ok":true}`, 0.77, true)
+
+	got := loadPaneHistory(st, "w1:pM", 20)
+	if len(got) < 3 {
+		t.Fatalf("want >=3 history items, got %d: %+v", len(got), got)
+	}
+	kinds := map[string]bool{}
+	for _, it := range got {
+		kinds[it.Kind] = true
+	}
+	for _, want := range []string{"review", "prefer", "score"} {
+		if !kinds[want] {
+			t.Fatalf("missing kind %s in %+v", want, got)
+		}
+	}
+	// Newest first: review (now) before prefer (hour ago)
+	if got[0].Kind != "review" && got[0].Kind != "score" {
+		t.Fatalf("expected recent first, got %s", got[0].Kind)
+	}
+}
+
+func TestRenderTeachShowsHistoryFeed(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{Version: 1, Panes: map[string]*paneStat{}}
+	r := row{PaneID: "w1:pM", Label: "portal-mediorbis", Status: "blocked"}
+	hist := []paneHistoryItem{
+		{At: time.Unix(now, 0), Kind: "review", Title: "great job ★", Body: "monitoring caught outliers", Rank: 0, Total: 5, Score: 0.9},
+		{At: time.Unix(now-60, 0), Kind: "score", Title: "score jev +0.77 (ok)", Body: "features: status:blocked", Score: 0.77},
+		{At: time.Unix(now-120, 0), Kind: "priority", Title: "set P0", Body: ""},
+	}
+	fv := vimline.View{Label: "reason"}
+	frame := stripANSI(renderTeach(110, 40, []string{"Inbox"}, 0, r, 4, 0, 0, nil, 0, fv, st, now, hist, 0))
+	if !strings.Contains(frame, "History (3)") {
+		t.Fatalf("history header missing:\n%s", frame)
+	}
+	for _, want := range []string{"great job", "score jev", "set P0", "monitoring caught outliers"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("missing %q in:\n%s", want, frame)
+		}
+	}
+	// Meta shows priority icon grammar even when unset
+	if !strings.Contains(frame, "◇") {
+		t.Fatalf("unset priority icon missing:\n%s", frame)
 	}
 }
 

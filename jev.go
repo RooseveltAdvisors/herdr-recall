@@ -744,6 +744,205 @@ func logJevTeaching(t jevTeaching) error {
 	return err
 }
 
+// paneHistoryItem is one audit-trail row for the teach menu time feed:
+// manual feedback, chip selections, priority pins, and ML score traces.
+type paneHistoryItem struct {
+	At       time.Time
+	Kind     string // teach|prefer|demote|review|feedback|directive|priority|score|neutral
+	Title    string
+	Body     string
+	Score    float64
+	Selected []string
+	Features []string
+	Rank     int
+	Total    int
+}
+
+func teachingsLogPath() string {
+	return filepath.Join(configDir(), "jev-teachings.jsonl")
+}
+
+// loadPaneHistory merges teachings (memory + jsonl) and Jev call traces for
+// one pane into a newest-first time feed. limit caps the returned rows.
+func loadPaneHistory(st *store, paneID string, limit int) []paneHistoryItem {
+	if paneID == "" {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 40
+	}
+	var items []paneHistoryItem
+	seen := map[string]bool{}
+	addTeach := func(t jevTeaching) {
+		if t.Pane.PaneID != paneID {
+			return
+		}
+		key := t.ID
+		if key == "" {
+			key = fmt.Sprintf("%d:%s:%s", t.Timestamp, t.Intent, t.Feedback)
+		}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		at := time.Unix(t.Timestamp, 0)
+		if t.TimeRFC3339 != "" {
+			if parsed, err := time.Parse(time.RFC3339, t.TimeRFC3339); err == nil {
+				at = parsed
+			}
+		}
+		kind := t.Intent
+		if kind == "" {
+			kind = "teach"
+		}
+		title := historyTeachTitle(kind, t)
+		body := strings.TrimSpace(t.Feedback)
+		if body == "" && len(t.Selected) > 0 {
+			body = "chips: " + joinClip(t.Selected, 4)
+		} else if body != "" && len(t.Selected) > 0 {
+			body = body + " · chips: " + joinClip(t.Selected, 3)
+		}
+		if len(t.RuleTexts) > 0 {
+			if body != "" {
+				body += " · "
+			}
+			body += "rules: " + joinClip(t.RuleTexts, 2)
+		}
+		items = append(items, paneHistoryItem{
+			At: at, Kind: kind, Title: title, Body: body,
+			Score: t.Pane.JevPriority, Selected: t.Selected, Features: t.Features,
+			Rank: t.InboxRank, Total: t.InboxTotal,
+		})
+	}
+	if st != nil && st.Jev != nil {
+		for _, t := range st.Jev.Teachings {
+			addTeach(t)
+		}
+	}
+	if b, err := os.ReadFile(teachingsLogPath()); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var t jevTeaching
+			if json.Unmarshal([]byte(line), &t) != nil {
+				continue
+			}
+			addTeach(t)
+		}
+	}
+	if b, err := os.ReadFile(jevCallLogPath()); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var rec jevCallRecord
+			if json.Unmarshal([]byte(line), &rec) != nil {
+				continue
+			}
+			if rec.PaneID != paneID {
+				continue
+			}
+			at := time.Now()
+			if rec.Time != "" {
+				if parsed, err := time.Parse(time.RFC3339, rec.Time); err == nil {
+					at = parsed
+				}
+			}
+			key := "score:" + rec.Time + ":" + fmt.Sprintf("%.4f", rec.Noul)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			status := "ok"
+			if !rec.OK {
+				status = "fail"
+			}
+			model := rec.Model
+			if model == "" {
+				model = "jev"
+			}
+			title := fmt.Sprintf("score %s %+.2f (%s)", model, rec.Noul, status)
+			body := ""
+			if len(rec.Features) > 0 {
+				body = "features: " + joinClip(rec.Features, 5)
+			}
+			items = append(items, paneHistoryItem{
+				At: at, Kind: "score", Title: title, Body: body,
+				Score: rec.Noul, Features: rec.Features,
+			})
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].At.Equal(items[j].At) {
+			return items[i].Title < items[j].Title
+		}
+		return items[i].At.After(items[j].At)
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
+}
+
+func historyTeachTitle(kind string, t jevTeaching) string {
+	switch kind {
+	case "prefer":
+		return "prefer (+)"
+	case "demote":
+		return "demote (-)"
+	case "review":
+		return "great job ★"
+	case "priority":
+		label := strings.TrimSpace(t.Feedback)
+		if label == "" {
+			label = "priority pin"
+		}
+		return label
+	case "directive":
+		return "directive"
+	case "feedback":
+		return "feedback"
+	case "neutral":
+		return "teach (neutral)"
+	default:
+		if kind == "" {
+			return "teach"
+		}
+		return kind
+	}
+}
+
+func joinClip(parts []string, n int) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	if n > 0 && len(parts) > n {
+		return strings.Join(parts[:n], ", ") + "…"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// historyKindIcon is the left glyph for an audit row (status-style).
+func historyKindIcon(kind string) (glyph, color string) {
+	switch kind {
+	case "prefer", "review":
+		return "▲", keyStGood
+	case "demote":
+		return "▼", keyStBad
+	case "priority":
+		return "◆", keyPri1
+	case "score":
+		return "●", keyAccentFg
+	case "directive", "feedback":
+		return "▸", keyStBusy
+	default:
+		return "·", keyOverlay
+	}
+}
+
 func clampWeight(w float64) float64 {
 	if w > 1 {
 		return 1
