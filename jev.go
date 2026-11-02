@@ -325,6 +325,9 @@ func jevFeatures(r row, now int64) []string {
 	if r.Fav {
 		f = append(f, "favorite:yes")
 	}
+	if r.PrioritySet {
+		f = append(f, fmt.Sprintf("priority:P%d", clampPriority(r.Priority)))
+	}
 	if repo := jevRepoFeature(r.CWD); repo != "" {
 		f = append(f, repo)
 	}
@@ -402,11 +405,35 @@ func (s *store) jevWeight(r row, now int64) float64 {
 
 // jevPriority combines the endpoint answer with the learned preference.
 func (s *store) jevPriority(r row, now int64) float64 {
+	// Human P0-P4 pins always apply, even before Jev state exists.
+	base := humanPriorityBoost(r)
 	if s.Jev == nil {
-		return 0
+		return base + jevUrgency(r, now)
 	}
 	p := s.localTeacherScore(r, now)
-	return p + s.jevWeight(r, now) + s.jevRuleBonus(r, now) + jevUrgency(r, now)
+	return p + s.jevWeight(r, now) + s.jevRuleBonus(r, now) + jevUrgency(r, now) + base
+}
+
+// humanPriorityBoost is the beads-tui P0..P4 pin contribution to ranking.
+// P0 is highest. Unset panes contribute nothing.
+func humanPriorityBoost(r row) float64 {
+	if !r.PrioritySet {
+		return 0
+	}
+	switch clampPriority(r.Priority) {
+	case 0:
+		return 0.45
+	case 1:
+		return 0.28
+	case 2:
+		return 0.12
+	case 3:
+		return 0.04
+	case 4:
+		return -0.08
+	default:
+		return 0
+	}
 }
 
 func (s *store) localTeacherScore(r row, now int64) float64 {
@@ -524,6 +551,9 @@ func teachShift(st *store, r row, now int64) float64 {
 			shift -= 0.15
 		case "prefer":
 			shift += 0.15
+		case "review":
+			// Ranking-quality confirmation is a stronger positive than prefer.
+			shift += 0.30
 		}
 	}
 	if shift > 0.3 {
@@ -587,6 +617,17 @@ func (s *store) jevPrefer(r row, up bool) {
 // jevPreferSelected applies a plus or minus only to the features the captain
 // checked. Unchecked features are not credited for this teaching.
 func (s *store) jevPreferSelected(features []string, up bool) {
+	s.jevBumpSelected(features, up, 0.1, 0.5)
+}
+
+// jevReviewSelected records a ranking-quality review (Great job). The bump is
+// stronger than prefer because the captain confirmed the algo ranked well,
+// not only that the features matter in general.
+func (s *store) jevReviewSelected(features []string) {
+	s.jevBumpSelected(features, true, 0.2, 0.6)
+}
+
+func (s *store) jevBumpSelected(features []string, up bool, base, idDelta float64) {
 	if len(features) == 0 {
 		return
 	}
@@ -596,9 +637,9 @@ func (s *store) jevPreferSelected(features []string, up bool) {
 		sign = 1
 	}
 	for _, f := range features {
-		delta := 0.1
+		delta := base
 		if strings.HasPrefix(f, "id:") {
-			delta = 0.5
+			delta = idDelta
 		}
 		s.Jev.Weights[f] = clampWeight(s.Jev.Weights[f] + sign*delta)
 	}
@@ -625,7 +666,7 @@ type jevTeaching struct {
 	Timestamp   int64             `json:"timestamp"`
 	TimeRFC3339 string            `json:"time_rfc3339"`
 	Feedback    string            `json:"feedback"`
-	Intent      string            `json:"intent"` // "prefer", "demote", "directive", "feedback"
+	Intent      string            `json:"intent"` // "prefer", "review", "demote", "directive", "feedback", "neutral"
 	Pane        jevPaneContext    `json:"pane"`
 	InboxRank   int               `json:"inbox_rank"`
 	InboxTotal  int               `json:"inbox_total"`
@@ -651,6 +692,8 @@ type jevPaneContext struct {
 	DoneState     string  `json:"done_state,omitempty"`
 	Visits        int64   `json:"visits"`
 	Last          int64   `json:"last"`
+	Priority      int     `json:"priority,omitempty"`
+	PrioritySet   bool    `json:"priority_set,omitempty"`
 	JevScore      float64 `json:"jev_score"`
 	JevPriority   float64 `json:"jev_priority"`
 }
