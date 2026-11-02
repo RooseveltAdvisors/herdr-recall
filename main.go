@@ -70,12 +70,14 @@ const (
 	keyStBusy   = "\x1b[38;5;221m" // working: yellow
 	keyStGood   = "\x1b[38;5;44m"  // done: teal
 	keyStFree   = "\x1b[38;5;114m" // idle: green
-	// beads-tui P0..P4 ramp: red -> orange -> yellow -> blue -> gray
-	keyPri0     = "\x1b[38;5;196m"
-	keyPri1     = "\x1b[38;5;208m"
-	keyPri2     = "\x1b[38;5;220m"
-	keyPri3     = "\x1b[38;5;39m"
-	keyPri4     = "\x1b[38;5;245m"
+	// beads-tui redshift ramp for P0..P4: red (hot/urgent) -> blue (cool).
+	// Same codes as beads-tui render.go priorityP0..P3; P4 is blue (not gray)
+	// so the cool end of the ramp stays blue as the captain asked.
+	keyPri0 = "\x1b[38;5;196m" // red
+	keyPri1 = "\x1b[38;5;208m" // orange
+	keyPri2 = "\x1b[38;5;220m" // yellow
+	keyPri3 = "\x1b[38;5;75m"  // light blue
+	keyPri4 = "\x1b[38;5;39m"  // blue
 )
 
 // ---------------------------------------------------------------------------
@@ -1785,23 +1787,29 @@ func priorityColor(p int) string {
 	}
 }
 
-// priorityMark is the status-style icon for a human P0..P4 pin.
-// Status uses ●/○. Priority uses a filled diamond so the two never collide.
-func priorityMark(set bool, p int) (glyph, color string) {
-	if !set {
-		return "◇", keyOverlay
-	}
-	return "◆", priorityColor(clampPriority(p))
-}
-
-// formatPriorityBadge renders icon+P0..P4 like status renders icon+word.
-// Unset returns empty so the row column stays blank.
+// formatPriorityBadge matches beads-tui formatPriority: coloured "P0".."P4".
+// P0 is bold red. Unset returns empty so the row keeps only the status dot.
 func formatPriorityBadge(r row) string {
 	if !r.PrioritySet {
 		return ""
 	}
-	glyph, color := priorityMark(true, r.Priority)
-	return color + keyBold + glyph + fmt.Sprintf("P%d", clampPriority(r.Priority)) + keyReset
+	p := clampPriority(r.Priority)
+	color := priorityColor(p)
+	label := fmt.Sprintf("P%d", p)
+	if p == 0 {
+		return color + keyBold + label + keyReset
+	}
+	return color + label + keyReset
+}
+
+// nameColor is the scan color for the pane label. When a human pin is set,
+// the name takes the same redshift color as the P0..P4 pill (beads-tui style
+// urgency scan). Unset names stay the default body text color.
+func nameColor(r row) string {
+	if r.PrioritySet {
+		return priorityColor(r.Priority)
+	}
+	return keyText
 }
 
 func priorityLabel(set bool, p int) string {
@@ -1812,15 +1820,8 @@ func priorityLabel(set bool, p int) string {
 }
 
 func priorityChoiceLabels() []string {
-	// Icon + label, same grammar as status chips (glyph then word).
-	return []string{
-		"◇ -",
-		"◆ P0",
-		"◆ P1",
-		"◆ P2",
-		"◆ P3",
-		"◆ P4",
-	}
+	// Plain P0..P4 like beads-tui. Row/chooser color carries the meaning.
+	return []string{"-" /* unset */, "P0", "P1", "P2", "P3", "P4"}
 }
 
 // priorityChoiceIndex maps PrioritySet+Priority to the chooser index 0..5.
@@ -2201,7 +2202,7 @@ func allHelpEntries() []helpEntry {
 		{"z / u", "undo the last e, returning thread to queue"},
 		{"i", "teach Jev: prefer, great-job review, demote, priority, features, and pane history audit trail"},
 		{"space", "in teach: toggle the highlighted feature chip"},
-		{"p", "set beads-style priority P0-P4 with status-style diamond icon (or clear)"},
+		{"p", "set beads-style priority P0-P4 next to the status dot; colors the pane name (or clear)"},
 		{"J", "Jev dashboard: inspect and delete learned weights, see preview"},
 		{"h", "set, change, or cancel a reminder"},
 		{"n", "sticky note on selected thread, edited with vim keys"},
@@ -2836,9 +2837,16 @@ func anchorSel(cur, next []row, sel int, fallback string) int {
 	return pinSel(next, sel, id)
 }
 
-func formatLabelWithNote(label, note, remind string, labelW int, selected, due bool) string {
+func formatLabelWithNote(label, note, remind string, labelW int, selected, due bool, nameFg string) string {
+	if nameFg == "" {
+		nameFg = keyText
+	}
 	if note == "" && remind == "" {
-		return pad(clipTail(label, max(1, labelW-1)), labelW)
+		name := clipTail(label, max(1, labelW-1))
+		if selected {
+			return pad(name, labelW)
+		}
+		return pad(nameFg+name+keyReset, labelW)
 	}
 	suffixPlain := ""
 	if remind != "" {
@@ -2854,26 +2862,30 @@ func formatLabelWithNote(label, note, remind string, labelW int, selected, due b
 	clippedName := clipTail(label, maxName)
 	rem := labelW - len([]rune(clippedName)) - 3
 	if rem < 4 {
-		return pad(clipTail(label, max(1, labelW-1)), labelW)
+		name := clipTail(label, max(1, labelW-1))
+		if selected {
+			return pad(name, labelW)
+		}
+		return pad(nameFg+name+keyReset, labelW)
 	}
 	if selected {
+		// Selected row paints its own fg over the whole span; keep plain text.
 		return pad(clippedName+suffixPlain, labelW)
 	}
 	var b strings.Builder
-	b.WriteString(clippedName)
+	b.WriteString(nameFg + clippedName + keyReset)
 	if remind != "" {
 		color := keyAccentFg
 		if due {
 			color = keyStBad
 		}
 		shown := clip(remind, rem)
-		b.WriteString(keySub + " · " + color + shown)
+		b.WriteString(keySub + " · " + color + shown + keyReset)
 		rem -= len([]rune(shown)) + 3
 	}
 	if note != "" && rem >= 4 {
-		b.WriteString(keySub + " · " + clip(note, rem-3))
+		b.WriteString(keySub + " · " + clip(note, rem-3) + keyReset)
 	}
-	b.WriteString(keyText)
 	return pad(b.String(), labelW)
 }
 
@@ -3086,11 +3098,12 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
+	// beads-tui order: status icon, then P0..P4 pill, then the title.
+	// priW reserves "P0 " (3 cells) so the pill sits right next to the status dot.
 	starW, dotW, priW, statusW, metaW := 2, 2, 3, 10, 22
 	if narrow {
 		// The name is the point of the picker. A narrow pane keeps the coloured
-		// dot and a short "2m ago", and gives every remaining column to the label.
-		// Priority still shows (P0 is 2 cells) so a set urgency is never lost.
+		// dot, the P0 pill, and a short "2m ago".
 		statusW, metaW = 0, 8
 		priW = 3
 	}
@@ -3127,20 +3140,14 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		if r.RemindAt > 0 {
 			remind, _ = remindWhen(r.RemindAt, time.Unix(now, 0))
 		}
-		labelCell := formatLabelWithNote(r.Label, r.Note, remind, labelW, i == sel, r.RemindAt > 0 && r.RemindAt <= now)
-		dotCell := scol + glyph
-		if i == sel {
-			dotCell += keySelectFg + " "
-		} else {
-			dotCell += keyReset + " "
-		}
+		// Order matches beads-tui: status glyph, P0 pill, then the name.
+		// The name takes the priority redshift color when a pin is set.
+		labelCell := formatLabelWithNote(r.Label, r.Note, remind, labelW, i == sel, r.RemindAt > 0 && r.RemindAt <= now, nameColor(r))
+		dotCell := scol + glyph + keyReset
 		priCell := strings.Repeat(" ", priW)
 		if badge := formatPriorityBadge(r); badge != "" {
-			if i == sel {
-				priCell = pad(badge+keySelectFg, priW)
-			} else {
-				priCell = pad(badge+keyReset, priW)
-			}
+			// One space after the pill so it sits next to the status dot.
+			priCell = pad(badge+" ", priW)
 		}
 		var statusCell string
 		switch {
@@ -3161,6 +3168,8 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		}
 		metaCol := metricText(r, width, metricKind)
 		if i == sel {
+			// Selected row: keep status color on the dot and priority color on
+			// the P0 pill; the rest of the row uses the selection span.
 			span := keySelectBg + keySelectFg + keyBold
 			line := span
 			if r.Fav {
@@ -3168,10 +3177,18 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			} else {
 				line += "  "
 			}
-			line += dotCell + labelCell + priCell + statusCell + metaCol
+			// Re-apply select bg after colored cells so the bar stays solid.
+			line += scol + glyph + keySelectBg + keySelectFg + " "
+			if badge := formatPriorityBadge(r); badge != "" {
+				line += badge + keySelectBg + keySelectFg + keyBold + " "
+			} else {
+				line += strings.Repeat(" ", priW)
+			}
+			line += labelCell + statusCell + metaCol
 			emit(pad(line, width) + keyReset)
 		} else {
-			emit(starCell + dotCell + keyText + labelCell + priCell + statusCell + keyText + metaCol + keyReset)
+			// status-dot + P0 + name (priority-colored) + status word + meta
+			emit(starCell + dotCell + " " + priCell + labelCell + statusCell + keyText + metaCol + keyReset)
 		}
 		shown++
 	}
@@ -3627,11 +3644,10 @@ func renderTeach(width, height int, names []string, active int, r row, field, pr
 		if r.Note != "" {
 			meta += keyOverlay + "  note: " + keyReset + keyText + r.Note + keyReset
 		}
-		pglyph, pcol := priorityMark(r.PrioritySet, r.Priority)
 		if r.PrioritySet {
-			meta += "  " + pcol + pglyph + " " + fmt.Sprintf("P%d", clampPriority(r.Priority)) + keyReset
+			meta += "  " + formatPriorityBadge(r)
 		} else {
-			meta += keyOverlay + "  " + pglyph + " -" + keyReset
+			meta += keyOverlay + "  -" + keyReset
 		}
 		score := st.jevPriority(r, now)
 		scoreColor := keyStGood

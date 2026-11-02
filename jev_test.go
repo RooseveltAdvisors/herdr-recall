@@ -675,23 +675,58 @@ func TestRenderTeachGreatJobReviewLabel(t *testing.T) {
 	}
 }
 
-func TestPriorityBadgeIncludesStatusStyleIcon(t *testing.T) {
-	r := row{PrioritySet: true, Priority: 0}
-	badge := stripANSI(formatPriorityBadge(r))
-	if !strings.Contains(badge, "◆") || !strings.Contains(badge, "P0") {
-		t.Fatalf("badge = %q, want ◆P0", badge)
+func TestPriorityBadgeMatchesBeadsTuiGrammar(t *testing.T) {
+	// beads-tui formatPriority is coloured "P0".."P4", P0 bold red.
+	r0 := row{PrioritySet: true, Priority: 0}
+	badge := formatPriorityBadge(r0)
+	if stripANSI(badge) != "P0" {
+		t.Fatalf("badge plain = %q, want P0", stripANSI(badge))
 	}
-	glyph, color := priorityMark(true, 1)
-	if glyph != "◆" || color == "" {
-		t.Fatalf("priorityMark P1 = %q %q", glyph, color)
+	if !strings.Contains(badge, keyPri0) || !strings.Contains(badge, keyBold) {
+		t.Fatalf("P0 must be bold red: %q", badge)
 	}
-	open, dim := priorityMark(false, 0)
-	if open != "◇" || dim == "" {
-		t.Fatalf("unset mark = %q %q", open, dim)
+	r4 := row{PrioritySet: true, Priority: 4}
+	b4 := formatPriorityBadge(r4)
+	if stripANSI(b4) != "P4" || !strings.Contains(b4, keyPri4) {
+		t.Fatalf("P4 must be blue: plain=%q raw=%q", stripANSI(b4), b4)
+	}
+	if nameColor(r0) != keyPri0 || nameColor(row{}) != keyText {
+		t.Fatalf("nameColor P0=%q unset=%q", nameColor(r0), nameColor(row{}))
 	}
 	labels := priorityChoiceLabels()
-	if !strings.Contains(labels[1], "◆") || !strings.Contains(labels[1], "P0") {
+	if labels[1] != "P0" || labels[5] != "P4" {
 		t.Fatalf("choice labels = %v", labels)
+	}
+}
+
+func TestPriorityPillSitsNextToStatusDot(t *testing.T) {
+	// beads-tui order: status glyph, then P0, then the title.
+	rows := []row{{
+		PaneID: "w1:p1", Label: "portal-mediorbis", Status: "blocked",
+		PrioritySet: true, Priority: 0, Last: time.Now().Unix(),
+	}}
+	frame := renderFrame(rows, -1, 0, vimline.View{Label: "/"}, "", 100, 14, []string{"Inbox"}, 0, "both", "")
+	plain := stripANSI(frame)
+	// Find the data row (skip tab bar).
+	idx := strings.Index(plain, "portal-mediorbis")
+	if idx < 0 {
+		t.Fatalf("label missing:\n%s", plain)
+	}
+	// Walk back on the same line for "● P0 portal" or "●P0 portal".
+	lineStart := strings.LastIndex(plain[:idx], "\n") + 1
+	line := plain[lineStart : idx+len("portal-mediorbis")]
+	if !strings.Contains(line, "P0") {
+		t.Fatalf("P0 missing on row line %q", line)
+	}
+	p0 := strings.Index(line, "P0")
+	name := strings.Index(line, "portal-mediorbis")
+	// Status glyph is before P0; name is after P0.
+	if p0 < 0 || name < p0 {
+		t.Fatalf("want status…P0…name order, got %q", line)
+	}
+	// Colored frame must paint the name with P0 red.
+	if !strings.Contains(frame, keyPri0) {
+		t.Fatalf("P0 red missing from colored frame")
 	}
 }
 
@@ -756,9 +791,9 @@ func TestRenderTeachShowsHistoryFeed(t *testing.T) {
 			t.Fatalf("missing %q in:\n%s", want, frame)
 		}
 	}
-	// Meta shows priority icon grammar even when unset
-	if !strings.Contains(frame, "◇") {
-		t.Fatalf("unset priority icon missing:\n%s", frame)
+	// Unset priority shows a plain dash in teach meta, not a diamond.
+	if !strings.Contains(frame, "-") {
+		t.Fatalf("unset priority marker missing:\n%s", frame)
 	}
 }
 
