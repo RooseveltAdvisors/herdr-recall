@@ -202,8 +202,8 @@ type paneStat struct {
 	InInbox       bool   `json:"in_inbox,omitempty"`
 	// Priority is beads-tui style P0..P4 when PrioritySet is true.
 	// P0 is highest urgency. Unset panes carry no badge and no rank boost.
-	Priority      int  `json:"priority,omitempty"`
-	PrioritySet   bool `json:"priority_set,omitempty"`
+	Priority    int  `json:"priority,omitempty"`
+	PrioritySet bool `json:"priority_set,omitempty"`
 }
 
 type customTab struct {

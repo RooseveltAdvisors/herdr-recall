@@ -734,7 +734,7 @@ func TestLoadPaneHistoryMergesTeachAndScore(t *testing.T) {
 		Teachings: []jevTeaching{{
 			ID: "t1", Timestamp: now.Unix(), TimeRFC3339: now.Format(time.RFC3339),
 			Intent: "review", Feedback: "monitoring caught outliers",
-			Pane: jevPaneContext{PaneID: "w1:pM", Label: "portal-mediorbis", JevPriority: 0.9},
+			Pane:     jevPaneContext{PaneID: "w1:pM", Label: "portal-mediorbis", JevPriority: 0.9},
 			Selected: []string{"label:portal-mediorbis"}, InboxRank: 0, InboxTotal: 4,
 		}},
 	}}
@@ -742,7 +742,7 @@ func TestLoadPaneHistoryMergesTeachAndScore(t *testing.T) {
 	_ = logJevTeaching(jevTeaching{
 		ID: "t2", Timestamp: now.Add(-time.Hour).Unix(), TimeRFC3339: now.Add(-time.Hour).Format(time.RFC3339),
 		Intent: "prefer", Feedback: "care about this",
-		Pane: jevPaneContext{PaneID: "w1:pM", Label: "portal-mediorbis"},
+		Pane:     jevPaneContext{PaneID: "w1:pM", Label: "portal-mediorbis"},
 		Selected: []string{"status:blocked"},
 	})
 	// ML score trace
