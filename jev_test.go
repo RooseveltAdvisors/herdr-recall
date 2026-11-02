@@ -355,7 +355,7 @@ func TestRenderTeachVisualPreferences(t *testing.T) {
 	if !strings.Contains(plainPrefer, "h/l choose") || !strings.Contains(plainPrefer, "enter save") {
 		t.Fatalf("footer missing in frame:\n%s", plainPrefer)
 	}
-	if !strings.Contains(plainPrefer, "[x] blocked") || !strings.Contains(plainPrefer, "[x] billing") {
+	if !strings.Contains(plainPrefer, "[x] blocked") || !strings.Contains(plainPrefer, "[x] portal-billing") {
 		t.Fatalf("feature chips missing in frame:\n%s", plainPrefer)
 	}
 	if !strings.Contains(plainPrefer, "Features to guide") {
@@ -383,29 +383,41 @@ func TestJevFeaturesCarryAgentRepoAndDomain(t *testing.T) {
 	for _, f := range jevFeatures(r, now) {
 		got[f] = true
 	}
-	for _, want := range []string{"status:blocked", "agent:pi", "repo:portal", "tok:billing", "tok:stripe", "tok:portal", "label:portal", "note:yes"} {
+	for _, want := range []string{"status:blocked", "agent:pi", "repo:portal", "label:portal", "note:yes"} {
 		if !got[want] {
 			t.Fatalf("missing %s in %v", want, got)
 		}
 	}
 	for f := range got {
+		if strings.HasPrefix(f, "tok:") {
+			t.Fatalf("bag-of-words tok leaked: %s", f)
+		}
 		if strings.HasPrefix(f, "domain:") {
 			t.Fatalf("static domain feature leaked: %s", f)
 		}
 	}
+	rank := map[string]bool{}
+	for _, f := range jevRankFeatures(jevFeatures(r, now)) {
+		rank[f] = true
+	}
+	if rank["agent:pi"] {
+		t.Fatal("common agent:pi must not enter the ranker diet")
+	}
+	if !rank["status:blocked"] || !rank["repo:portal"] {
+		t.Fatalf("structured rank features missing: %v", rank)
+	}
 }
 
-func TestUnknownWordBecomesAFeatureWithoutADictionary(t *testing.T) {
-	now := time.Now().Unix()
-	r := row{PaneID: "p", Label: "covenant-kiosk rollout", Status: "working", Agent: "agy", Last: now}
-	got := map[string]bool{}
-	for _, f := range jevFeatures(r, now) {
-		got[f] = true
+func TestSentenceLabelIsNotAFeature(t *testing.T) {
+	if jevLabelFeature("this is just agent routine 30 minutes check") != "" {
+		t.Fatal("sentence label became a feature")
 	}
-	if !got["tok:covenant"] || !got["tok:kiosk"] || !got["tok:rollout"] {
-		t.Fatalf("new project words missing: %v", got)
+	if jevLabelFeature("portal billing") != "label:portal" {
+		t.Fatal("short tab labels must still become label features")
 	}
+}
 
+func TestUnknownWordStillParsesInTeachText(t *testing.T) {
 	adj, rules := parseJevFeedback("prefer covenant over rollout", nil)
 	if len(rules) != 0 {
 		t.Fatalf("rules = %v", rules)
@@ -413,34 +425,22 @@ func TestUnknownWordBecomesAFeatureWithoutADictionary(t *testing.T) {
 	if adj["tok:covenant"] <= 0 || adj["tok:rollout"] >= 0 {
 		t.Fatalf("adjust = %v", adj)
 	}
-
-	st := &store{Version: 1, Panes: map[string]*paneStat{}}
-	st.applyJevDirective(adj, nil)
-	if st.jevWeight(r, now) <= st.jevWeight(row{PaneID: "q", Label: "rollout", Status: "working", Last: now}, now) {
-		t.Fatal("unknown word did not rank the named pane higher")
-	}
 }
 
-func TestCommonTokensStartUnchecked(t *testing.T) {
+func TestAgentAndTokStartUnchecked(t *testing.T) {
 	now := time.Now().Unix()
-	rows := []row{
-		{PaneID: "a", Label: "alpha billing", Status: "idle", CWD: "/work/alpha", Last: now},
-		{PaneID: "b", Label: "beta billing", Status: "idle", CWD: "/work/beta", Last: now},
-		{PaneID: "c", Label: "gamma billing", Status: "idle", CWD: "/work/gamma", Last: now},
-		{PaneID: "d", Label: "delta billing", Status: "idle", CWD: "/work/delta", Last: now},
-	}
+	r := row{PaneID: "a", Label: "alpha", Status: "idle", Agent: "pi", CWD: "/work/alpha", Last: now}
 	st := &store{Version: 1, Panes: map[string]*paneStat{}}
-	st.observeRows(rows, now)
-	choices := teachFeatureChoices(rows[0], st, now)
+	choices := teachFeatureChoices(r, st, now)
 	on := map[string]bool{}
 	for _, c := range choices {
 		on[c.key] = c.on
 	}
-	if on["tok:billing"] {
-		t.Fatal("common term billing started checked")
+	if on["agent:pi"] {
+		t.Fatal("agent:pi started checked")
 	}
-	if !on["tok:alpha"] {
-		t.Fatal("rare term alpha started unchecked")
+	if !on["status:idle"] {
+		t.Fatal("status should start checked")
 	}
 }
 

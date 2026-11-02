@@ -3377,9 +3377,10 @@ type teachFeat struct {
 func teachDefaultOn(f string, st *store) bool {
 	kind, _, _ := strings.Cut(f, ":")
 	switch kind {
-	case "cadence", "visit", "age", "ws":
+	case "cadence", "visit", "age", "ws", "agent", "tok":
+		// agent and tok are weak or noisy; captain must opt in.
 		return false
-	case "tok", "label", "repo":
+	case "label", "repo":
 		return st == nil || !st.jevCommon(f)
 	default:
 		return true

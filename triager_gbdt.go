@@ -58,8 +58,11 @@ func examplesFromJevLog() []triagerExample {
 			continue
 		}
 		feats := map[string]float64{}
-		for _, f := range rec.Features {
+		for _, f := range jevRankFeatures(rec.Features) {
 			feats[f] = 1
+		}
+		if len(feats) == 0 {
+			continue
 		}
 		out = append(out, triagerExample{Y: rec.Noul, Feats: feats})
 	}
@@ -80,7 +83,7 @@ func writeTriagerExamples(st *store, rows []row, now int64) (int, error) {
 			continue
 		}
 		feats := map[string]float64{}
-		for _, f := range jevFeatures(r, now) {
+		for _, f := range jevRankFeatures(jevFeatures(r, now)) {
 			feats[f] = 1
 		}
 		out = append(out, triagerExample{Y: y + teachShift(st, r, now), Feats: feats})
@@ -141,7 +144,7 @@ func walkGBDT(n *gbNode, names []string, feats map[string]float64) float64 {
 
 func (m *gbdtModel) scoreRow(r row, now int64) float64 {
 	feats := map[string]float64{}
-	for _, f := range jevFeatures(r, now) {
+	for _, f := range jevRankFeatures(jevFeatures(r, now)) {
 		feats[f] = 1
 	}
 	return m.score(feats)

@@ -302,6 +302,8 @@ func jevFeatures(r row, now int64) []string {
 	if sw := statusWord(r.Status); sw != "" {
 		f = append(f, "status:"+sw)
 	}
+	// agent: is kept as a weak prior only. It is confounded with fleet mix
+	// (most panes are one harness), so it is not a default teach chip.
 	if a := strings.ToLower(strings.TrimSpace(r.Agent)); a != "" && a != "unknown" && a != "none" {
 		f = append(f, "agent:"+a)
 	}
@@ -333,7 +335,8 @@ func jevFeatures(r row, now int64) []string {
 	if r.Last > 0 && now-r.Last < 5*60 {
 		f = append(f, "attention:hot")
 	}
-	f = append(f, jevContentFeatures(r.Label, r.Note, r.Workspace)...)
+	// No bag-of-words tok: features. Rare one-hots overfit at n~100.
+	// Named ids (corr=...) and short tab labels stay.
 	f = append(f, jevIDFeatures(r.Label, r.Note, r.Workspace)...)
 	if lab := jevLabelFeature(r.Label); lab != "" {
 		f = append(f, lab)
@@ -365,13 +368,9 @@ func (s *store) jevSignalFeatures(r row, now int64) []string {
 			if val == "hot" {
 				continue
 			}
-		case "tok":
-			if s.jevCommon(f) {
-				continue
-			}
-			if !jevTextHasToken(r.Label, val) && !jevTextHasToken(r.Note, val) && !jevTextHasToken(r.Workspace, val) {
-				continue
-			}
+		case "tok", "agent":
+			// tok bag-of-words and agent identity are not trained implicitly.
+			continue
 		}
 		out = append(out, f)
 	}
@@ -421,7 +420,7 @@ func (s *store) localTeacherScore(r row, now int64) float64 {
 	}
 	if len(s.Jev.Distilled) > 0 {
 		sum := s.Jev.DistillBias
-		for _, f := range jevFeatures(r, now) {
+		for _, f := range jevRankFeatures(jevFeatures(r, now)) {
 			sum += s.Jev.Distilled[f]
 		}
 		return sum
@@ -457,7 +456,7 @@ func (s *store) fitLocalTriager(rows []row, now int64) int {
 			continue
 		}
 		y += teachShift(s, r, now)
-		set = append(set, ex{feats: jevFeatures(r, now), y: y})
+		set = append(set, ex{feats: jevRankFeatures(jevFeatures(r, now)), y: y})
 	}
 	if len(set) < 8 {
 		return 0
@@ -743,19 +742,28 @@ func jevRepoFeature(cwd string) string {
 }
 
 func jevLabelFeature(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	// Free-text teach sentences must not become label features.
+	if len([]rune(label)) > 40 || strings.ContainsAny(label, ".?!") || strings.Count(label, " ") > 3 {
+		return ""
+	}
 	toks := strings.Fields(label)
 	if len(toks) == 0 {
 		return ""
 	}
 	tok := strings.ToLower(toks[0])
-	if tok == "" {
+	tok = strings.Trim(tok, "-_:/")
+	if tok == "" || len(tok) < 2 || jevGrammarWord(tok) {
 		return ""
 	}
 	return "label:" + tok
 }
 
-// jevContentFeatures turns the pane's own words into features.
-// A new project name appears here with no code change.
+// jevContentFeatures is retained for teach free-text parsing helpers that
+// still split words. Ranking no longer injects bag-of-words tok features.
 func jevContentFeatures(parts ...string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -773,6 +781,37 @@ func jevContentFeatures(parts ...string) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// jevRankFeature reports whether f belongs in the ranking model.
+// Structured state, short tab labels, repos, and named ids pass.
+// Bag-of-words tokens and sentence labels do not.
+func jevRankFeature(f string) bool {
+	kind, val, ok := strings.Cut(f, ":")
+	if !ok || val == "" {
+		return false
+	}
+	switch kind {
+	case "status", "age", "visit", "cadence", "note", "manual", "remind", "favorite", "repo", "attention", "id":
+		return true
+	case "label":
+		return !strings.Contains(val, " ") && len(val) <= 32
+	case "agent":
+		// Weak prior only when the harness is uncommon in the fleet mix.
+		return val != "pi"
+	default:
+		return false
+	}
+}
+
+func jevRankFeatures(feats []string) []string {
+	out := make([]string, 0, len(feats))
+	for _, f := range feats {
+		if jevRankFeature(f) {
+			out = append(out, f)
+		}
+	}
 	return out
 }
 
