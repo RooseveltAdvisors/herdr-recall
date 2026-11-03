@@ -4120,6 +4120,11 @@ func runPicker() int {
 	// resync adopts another writer's on-disk update before this event is
 	// handled, keeping the row the captain is pointing at selected by pane ID.
 	resync := func(cur []row) []row {
+		// Transcript hits use session ids, not live pane ids. Never replace
+		// them with the pane list or j/k selection has nothing to move on.
+		if views(st)[tab].Kind == "transcripts" {
+			return transcriptRows(txHits)
+		}
 		if lk.acquire() != nil {
 			return visible()
 		}
@@ -4137,7 +4142,9 @@ func runPicker() int {
 		next, err := persistStore(lk, st)
 		if next != st {
 			st = next
-			rows = rebase(rows)
+			if views(st)[tab].Kind != "transcripts" {
+				rows = rebase(rows)
+			}
 		}
 		if err != nil {
 			status = note.refuse(err, tok)
@@ -4191,6 +4198,11 @@ func runPicker() int {
 		st.ActiveQuery = searchEd.String()
 		if sel >= 0 && sel < len(list) {
 			st.ActivePaneID = list[sel].PaneID
+		}
+		// Transcript hit lists are session-id rows. Saving every frame races the
+		// lock and rebase() would replace them with pane rows, resetting sel.
+		if views(st)[tab].Kind == "transcripts" {
+			return
 		}
 		saveSt(viewTok)
 	}
@@ -4632,6 +4644,10 @@ func runPicker() int {
 		}
 		if sel < 0 {
 			sel = 0
+		}
+		// Keep the transcript status line in sync with selection motion.
+		if views(st)[tab].Kind == "transcripts" && len(txHits) > 0 {
+			status = fmt.Sprintf("%s \u00b7 %d matches \u00b7 row %d of %d", txRoleLabel(txRole), len(txHits), sel+1, len(txHits))
 		}
 		if !showJev && !reminding && !teaching && !prioritizing {
 			note.stale()
