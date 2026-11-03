@@ -3370,7 +3370,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	}
 	extra := "arrows tabs   g i/l/t/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && names[active] == "Transcripts" {
-		extra = "esc list  j/k move  ctrl-n/p while typing  / type  1-4 filter  s sort"
+		extra = "esc list  j/k  ctrl-u/d half  ctrl-n/p type-nav  / type  1-4 filter"
 	}
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
@@ -5261,6 +5261,16 @@ func runPicker() int {
 				refreshTx(searchEd.String())
 				continue
 			}
+			// Half-page while the query is focused (do not let ctrl-u clear the field).
+			if views(st)[tab].Kind == "transcripts" && (key == "ctrl-u" || key == "ctrl-d") {
+				step := txHalfPage(h)
+				if key == "ctrl-d" {
+					sel = moveSel(sel, step, len(rows))
+				} else {
+					sel = moveSel(sel, -step, len(rows))
+				}
+				continue
+			}
 			if views(st)[tab].Kind == "transcripts" {
 				if role, ok := txRoleFromKey(key); ok && searchEd.Mode() != vimline.ModeInsert {
 					txRole = role
@@ -5323,9 +5333,17 @@ func runPicker() int {
 			case vimline.ActLast:
 				sel = max(0, len(rows)-1)
 			case vimline.ActPageUp:
-				sel = max(0, sel-half)
+				step := half
+				if views(st)[tab].Kind == "transcripts" {
+					step = txHalfPage(h)
+				}
+				sel = moveSel(sel, -step, len(rows))
 			case vimline.ActPageDown:
-				sel = min(sel+half, max(0, len(rows)-1))
+				step := half
+				if views(st)[tab].Kind == "transcripts" {
+					step = txHalfPage(h)
+				}
+				sel = moveSel(sel, step, len(rows))
 			}
 			if views(st)[tab].Kind == "transcripts" {
 				refreshTx(searchEd.String())
@@ -5879,18 +5897,17 @@ func runPicker() int {
 				rebuild()
 			}
 		case key == "ctrl-u":
-			if sel > half {
-				sel -= half
-			} else {
-				sel = 0
+			step := half
+			if views(st)[tab].Kind == "transcripts" {
+				step = txHalfPage(h)
 			}
+			sel = moveSel(sel, -step, len(rows))
 		case key == "ctrl-d" && !searching:
-			if sel+half < len(rows) {
-				sel += half
+			step := half
+			if views(st)[tab].Kind == "transcripts" {
+				step = txHalfPage(h)
 			}
-			if sel >= len(rows) {
-				sel = max(0, len(rows)-1)
-			}
+			sel = moveSel(sel, step, len(rows))
 		case key == "bs":
 			if stateFilter != "" {
 				stateFilter = ""

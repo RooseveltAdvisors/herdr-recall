@@ -122,13 +122,29 @@ func TestRankUpKeepsAHandoffInTyped(t *testing.T) {
 
 func TestTranscriptFooterShowsRankKeys(t *testing.T) {
 	move, rank := txKeyLines()
-	if !strings.Contains(move, "esc") || !strings.Contains(move, "j/k") || !strings.Contains(move, "ctrl-n/p") {
+	if !strings.Contains(move, "esc") || !strings.Contains(move, "j/k") || !strings.Contains(move, "ctrl-u/d") {
 		t.Fatalf("move = %q", move)
 	}
 	for _, key := range []string{"1", "+", "-", "i", "s"} {
 		if !strings.Contains(rank, key) {
 			t.Fatalf("rank footer missing %s: %q", key, rank)
 		}
+	}
+}
+
+func TestTxHalfPageUsesVisibleHits(t *testing.T) {
+	// tall pane: several two-line hits visible, half-page at least 1
+	if got := txHalfPage(40); got < 1 {
+		t.Fatalf("half=%d", got)
+	}
+	if got := txHalfPage(8); got != 1 {
+		t.Fatalf("short half=%d want 1", got)
+	}
+	if moveSel(0, 5, 3) != 2 {
+		t.Fatal("clamp high")
+	}
+	if moveSel(2, -10, 3) != 0 {
+		t.Fatal("clamp low")
 	}
 }
 

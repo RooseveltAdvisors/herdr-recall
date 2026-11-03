@@ -1082,7 +1082,7 @@ func clipANSI(s string, n int) string {
 func txKeyLines() (string, string) {
 	// Picker SOTA (fzf/telescope/raycast): type to filter, arrows or ctrl-n/p
 	// move hits while typing, one esc focuses the list for j/k, / returns to type.
-	move := hintFooter("esc", "list", "j/k", "move", "ctrl-n/p", "while typing", "/", "type", "enter", "open")
+	move := hintFooter("esc", "list", "j/k", "move", "ctrl-u/d", "half page", "ctrl-n/p", "while typing", "/", "type")
 	rank := hintFooter("1", "typed", "2", "any user", "3", "replies", "4", "all", "+", "up", "-", "down", "i", "teach", "s", "sort")
 	return move, rank
 }
@@ -1097,6 +1097,46 @@ func txSearchEsc(ed *vimline.Editor, searching bool) (stillSearching bool) {
 		_ = ed.Feed("esc")
 	}
 	return false
+}
+
+// txHalfPage is half the visible hit count (vim/less/fzf half-page).
+// Transcript rows are two lines each, so the step is in hit units, not cells.
+func txHalfPage(height int) int {
+	if height < 8 {
+		height = 8
+	}
+	maxLines := height
+	if height > 6 {
+		maxLines = height - 1
+	}
+	// tabs + search + filters + rules + footer ≈ 9 lines of chrome
+	body := maxLines - 9
+	if body < 4 {
+		body = 4
+	}
+	hitsVisible := body / 2
+	if hitsVisible < 1 {
+		hitsVisible = 1
+	}
+	step := hitsVisible / 2
+	if step < 1 {
+		step = 1
+	}
+	return step
+}
+
+func moveSel(sel, delta, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	sel += delta
+	if sel < 0 {
+		return 0
+	}
+	if sel > n-1 {
+		return n - 1
+	}
+	return sel
 }
 
 // renderTranscriptSplit draws the hit list on the left and the nearby
