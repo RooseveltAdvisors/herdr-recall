@@ -3251,7 +3251,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	}
 	extra := "arrows tabs   g i/l/t/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && names[active] == "Transcripts" {
-		extra = "1 typed  2 any user  3 replies  4 all  + up  - down  i teach  s sort  / type"
+		extra = "esc list  j/k move  ctrl-n/p while typing  / type  1-4 filter  s sort"
 	}
 	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
 		extra += "   s sort"
@@ -4410,9 +4410,24 @@ func runPicker() int {
 			status = clip(res.Err.Error(), 80)
 			return
 		}
+		keepID := ""
+		if sel >= 0 && sel < len(txHits) {
+			keepID = txHits[sel].SessionID
+		}
 		txHits = finishTxHits(st, res.Hits, txRole, txSort, time.Now(), res.Indexed)
 		txPrevID = ""
+		if keepID != "" {
+			for i := range txHits {
+				if txHits[i].SessionID == keepID {
+					sel = i
+					break
+				}
+			}
+		}
 		if sel >= len(txHits) {
+			sel = max(0, len(txHits)-1)
+		}
+		if sel < 0 {
 			sel = 0
 		}
 		status = fmt.Sprintf("%s \u00b7 %d matches \u00b7 row %d of %d", txRoleLabel(txRole), len(txHits), min(sel+1, len(txHits)), len(txHits))
@@ -5111,6 +5126,12 @@ func runPicker() int {
 			continue
 		}
 		if searching && !showHelp {
+			if views(st)[tab].Kind == "transcripts" && key == "esc" {
+				// One Esc leaves the field and keeps the filter so j/k move hits.
+				searching = txSearchEsc(searchEd, searching)
+				refreshTx(searchEd.String())
+				continue
+			}
 			if views(st)[tab].Kind == "transcripts" {
 				if role, ok := txRoleFromKey(key); ok && searchEd.Mode() != vimline.ModeInsert {
 					txRole = role

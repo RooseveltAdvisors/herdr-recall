@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/RooseveltAdvisors/vimline"
 )
 
 func TestParseCcriderSearch(t *testing.T) {
@@ -120,13 +122,29 @@ func TestRankUpKeepsAHandoffInTyped(t *testing.T) {
 
 func TestTranscriptFooterShowsRankKeys(t *testing.T) {
 	move, rank := txKeyLines()
-	if !strings.Contains(move, "enter") || !strings.Contains(move, "fork") {
+	if !strings.Contains(move, "esc") || !strings.Contains(move, "j/k") || !strings.Contains(move, "ctrl-n/p") {
 		t.Fatalf("move = %q", move)
 	}
 	for _, key := range []string{"1", "+", "-", "i", "s"} {
 		if !strings.Contains(rank, key) {
 			t.Fatalf("rank footer missing %s: %q", key, rank)
 		}
+	}
+}
+
+func TestTxSearchEscFocusesList(t *testing.T) {
+	ed := vimline.New("portal")
+	if ed.Mode() != vimline.ModeInsert {
+		t.Fatal("new editor starts in insert")
+	}
+	if txSearchEsc(ed, true) {
+		t.Fatal("esc should leave searching so j/k own the list")
+	}
+	if ed.Mode() != vimline.ModeNormal {
+		t.Fatalf("mode = %v, want normal after esc", ed.Mode())
+	}
+	if ed.String() != "portal" {
+		t.Fatalf("query cleared: %q", ed.String())
 	}
 }
 

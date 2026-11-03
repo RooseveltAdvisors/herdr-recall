@@ -1080,9 +1080,23 @@ func clipANSI(s string, n int) string {
 }
 
 func txKeyLines() (string, string) {
-	move := hintFooter("j/k", "move", "enter", "open", "f", "fork", "b", "full", "/", "type")
+	// Picker SOTA (fzf/telescope/raycast): type to filter, arrows or ctrl-n/p
+	// move hits while typing, one esc focuses the list for j/k, / returns to type.
+	move := hintFooter("esc", "list", "j/k", "move", "ctrl-n/p", "while typing", "/", "type", "enter", "open")
 	rank := hintFooter("1", "typed", "2", "any user", "3", "replies", "4", "all", "+", "up", "-", "down", "i", "teach", "s", "sort")
 	return move, rank
+}
+
+// txSearchEsc focuses the hit list and keeps the query. One Esc is enough.
+// A second Esc on an empty query closes via the normal cancel path.
+func txSearchEsc(ed *vimline.Editor, searching bool) (stillSearching bool) {
+	if ed == nil {
+		return false
+	}
+	if ed.Mode() == vimline.ModeInsert {
+		_ = ed.Feed("esc")
+	}
+	return false
 }
 
 // renderTranscriptSplit draws the hit list on the left and the nearby
