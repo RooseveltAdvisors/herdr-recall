@@ -166,6 +166,47 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 	}
 }
 
+func TestFloaxScratchIsHiddenFromCollectRows(t *testing.T) {
+	snap := &snapshot{
+		Panes: []paneRec{
+			{PaneID: "w1:pOK", TabID: "w1:t1", WorkspaceID: "w1", AgentStatus: "idle"},
+			{PaneID: "w1G:p1", TabID: "w1G:t1", WorkspaceID: "w1G", AgentStatus: "idle", Label: ""},
+			{PaneID: "w1:pFx", TabID: "w1:t2", WorkspaceID: "w1", Label: "\u2302 floax", AgentStatus: "idle"},
+		},
+		Tabs: []tabRec{
+			{TabID: "w1:t1", WorkspaceID: "w1", Label: "notes"},
+			{TabID: "w1G:t1", WorkspaceID: "w1G", Label: "1"},
+			{TabID: "w1:t2", WorkspaceID: "w1", Label: "shell"},
+		},
+		Workspaces: []wsRec{
+			{WorkspaceID: "w1", Label: "wiseman"},
+			{WorkspaceID: "w1G", Label: "floax"},
+		},
+	}
+	st := &store{Version: 1, Panes: map[string]*paneStat{
+		"w1:pOK":  {Label: "notes", Visits: 2},
+		"w1G:p1":  {Label: "1", Visits: 9},
+		"w1:pFx":  {Label: "1", Visits: 3},
+	}}
+	got := collectRows(snap, st)
+	ids := map[string]bool{}
+	for _, r := range got {
+		ids[r.PaneID] = true
+		if r.PaneID == "w1G:p1" || r.PaneID == "w1:pFx" {
+			t.Fatalf("floax scratch still listed: %+v", r)
+		}
+	}
+	if !ids["w1:pOK"] {
+		t.Fatal("normal pane hidden")
+	}
+	if !isFloaxScratch(snap, "w1G:p1") || !isFloaxScratch(snap, "w1:pFx") {
+		t.Fatal("detector missed floax")
+	}
+	if isFloaxScratch(snap, "w1:pOK") {
+		t.Fatal("normal pane marked floax")
+	}
+}
+
 func TestRowTitleIsTabNameOnly(t *testing.T) {
 	snap := &snapshot{
 		Panes: []paneRec{{

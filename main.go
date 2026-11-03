@@ -107,6 +107,7 @@ type paneRec struct {
 	PaneID       string `json:"pane_id"`
 	TabID        string `json:"tab_id"`
 	WorkspaceID  string `json:"workspace_id"`
+	Label        string `json:"label,omitempty"`
 	AgentStatus  string `json:"agent_status"`
 	Agent        string `json:"agent,omitempty"`
 	AgentSession struct {
@@ -1104,6 +1105,9 @@ func recordFocus() (string, error) {
 	if id == "" {
 		return "", fmt.Errorf("no focused pane in snapshot")
 	}
+	if isFloaxScratch(snap, id) {
+		return id, nil
+	}
 	label := paneLabel(snap, id)
 	lk := &storeLock{}
 	if err := lk.acquire(); err != nil {
@@ -1267,6 +1271,57 @@ type row struct {
 	PrioritySet   bool
 }
 
+// isFloaxScratch reports herdr-floax scratch panes. Parked floax lives in a
+// workspace labeled "floax" with a default tab name "1". Docked floax uses
+// pane label "⌂ floax". Those are not agent work threads for recall.
+func isFloaxScratch(s *snapshot, id string) bool {
+	if s == nil || id == "" {
+		return false
+	}
+	var p *paneRec
+	for i := range s.Panes {
+		if s.Panes[i].PaneID == id {
+			p = &s.Panes[i]
+			break
+		}
+	}
+	if p == nil {
+		return false
+	}
+	wsID := p.WorkspaceID
+	for _, t := range s.Tabs {
+		if t.TabID == p.TabID {
+			if wsID == "" {
+				wsID = t.WorkspaceID
+			}
+			lab := strings.TrimSpace(strings.ToLower(t.Label))
+			if lab == "floax" || strings.Contains(lab, "floax") {
+				return true
+			}
+			break
+		}
+	}
+	for _, w := range s.Workspaces {
+		if w.WorkspaceID == wsID {
+			lab := strings.TrimSpace(strings.ToLower(w.Label))
+			if lab == "floax" {
+				return true
+			}
+			break
+		}
+	}
+	paneLab := strings.TrimSpace(strings.ToLower(p.Label))
+	if paneLab == "floax" || strings.Contains(paneLab, "floax") {
+		return true
+	}
+	// Plugin title uses a house marker before "floax".
+	if strings.Contains(strings.ToLower(p.TerminalTitleStrip), "floax") ||
+		strings.Contains(strings.ToLower(p.TerminalTitle), "floax") {
+		return true
+	}
+	return false
+}
+
 // displayLabel is the Herdr tab name only, the same label prefix k uses
 // for a tab row. Agent titles, workspace names, and cwd are not part of it.
 func displayLabel(s *snapshot, id, stored string) string {
@@ -1306,6 +1361,9 @@ func collectRows(s *snapshot, st *store) []row {
 	var ids []string
 	addID := func(id string) {
 		if id == "" || seen[id] || !live[id] {
+			return
+		}
+		if isFloaxScratch(s, id) {
 			return
 		}
 		seen[id] = true
