@@ -297,10 +297,14 @@ func TestAppearedRowNeverTakesKey(t *testing.T) {
 			if !slices.Equal(after.Favorites, []string{"w1:pB"}) {
 				t.Fatalf("key %q changed favorites: %v", tc.key, after.Favorites)
 			}
-			if *after.Panes["w1:pA"] != (paneStat{Visits: 1, Label: "one"}) {
+			// AgentSeen/AgentAt may update on picker open from live status observe.
+			a, b := *after.Panes["w1:pA"], *after.Panes["w1:pB"]
+			a.AgentSeen, a.AgentAt, a.DoneAt = "", 0, 0
+			b.AgentSeen, b.AgentAt, b.DoneAt = "", 0, 0
+			if a != (paneStat{Visits: 1, Label: "one"}) {
 				t.Fatalf("key %q touched the neighbor row: %+v", tc.key, after.Panes["w1:pA"])
 			}
-			if *after.Panes["w1:pB"] != (paneStat{Visits: 2, Label: "two"}) {
+			if b != (paneStat{Visits: 2, Label: "two"}) {
 				t.Fatalf("key %q mutated the appeared row: %+v", tc.key, after.Panes["w1:pB"])
 			}
 		})

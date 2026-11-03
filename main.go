@@ -10,11 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-
 	"fmt"
-	"github.com/RooseveltAdvisors/vimline"
-	"github.com/RooseveltAdvisors/vimline/duration"
-	"github.com/RooseveltAdvisors/vimline/keys"
 	"net"
 	"os"
 	"os/exec"
@@ -27,6 +23,10 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/RooseveltAdvisors/vimline"
+	"github.com/RooseveltAdvisors/vimline/duration"
+	"github.com/RooseveltAdvisors/vimline/keys"
 )
 
 const pluginID = "RooseveltAdvisors.herdr-recall"
@@ -43,12 +43,14 @@ const (
 )
 
 const (
-	sortDefault = 0
-	sortNewest  = 1
-	sortOldest  = 2
-	sortMost    = 3
-	sortLeast   = 4
-	sortCount   = 5
+	sortDefault     = 0
+	sortNewest      = 1 // operator viewed recently (Last)
+	sortOldest      = 2
+	sortMost        = 3
+	sortLeast       = 4
+	sortAgentNewest = 5 // agent finished / moved recently (AgentAt)
+	sortAgentOldest = 6 // agent quiet longest - radar
+	sortCount       = 7
 )
 
 const (
@@ -190,7 +192,9 @@ func loadSnapshot() (*snapshot, error) {
 
 type paneStat struct {
 	Visits        int64  `json:"visits"`
-	Last          int64  `json:"last"`
+	Last          int64  `json:"last"`                 // operator last viewed / focused
+	AgentAt       int64  `json:"agent_at,omitempty"`   // last meaningful agent status change
+	AgentSeen     string `json:"agent_seen,omitempty"` // last observed status word
 	Label         string `json:"label,omitempty"`
 	Note          string `json:"note,omitempty"`
 	ManualBlocked bool   `json:"manual_blocked,omitempty"`
@@ -1167,6 +1171,59 @@ func activityChanged(now, baseline string) bool {
 	return true
 }
 
+// observeAgentActivity stamps AgentAt when the agent status changes in a
+// meaningful way (start work, finish, block). Operator view time stays in Last.
+// Returns true when the store changed and should be saved.
+func observeAgentActivity(s *snapshot, st *store, now int64) bool {
+	if s == nil || st == nil {
+		return false
+	}
+	changed := false
+	for _, p := range s.Panes {
+		if isFloaxScratch(s, p.PaneID) {
+			continue
+		}
+		sw := statusWord(p.AgentStatus)
+		if sw == "" || sw == "unknown" || sw == "none" {
+			continue
+		}
+		ps, ok := st.Panes[p.PaneID]
+		if !ok {
+			// Only seed store rows for finished or blocked agents so a quiet
+			// neighbor pane is not created by a picker open scan.
+			if sw != "done" && sw != "blocked" {
+				continue
+			}
+			ps = st.ensurePane(p.PaneID)
+		}
+		if ps.AgentSeen == "" {
+			ps.AgentSeen = sw
+			if sw == "done" || sw == "blocked" {
+				ps.AgentAt = now
+				if sw == "done" {
+					ps.DoneAt = now
+				}
+			}
+			changed = true
+			continue
+		}
+		if activityChanged(sw, ps.AgentSeen) {
+			ps.AgentSeen = sw
+			ps.AgentAt = now
+			if sw == "done" {
+				ps.DoneAt = now
+			}
+			changed = true
+			continue
+		}
+		if ps.AgentSeen != sw {
+			ps.AgentSeen = sw
+			changed = true
+		}
+	}
+	return changed
+}
+
 func liveStatusWord(s *snapshot, id string) string {
 	if s == nil {
 		return ""
@@ -1257,7 +1314,8 @@ type row struct {
 	Note          string
 	Section       string
 	Visits        int64
-	Last          int64
+	Last          int64 // operator viewed
+	AgentAt       int64 // agent last meaningful status change
 	Status        string
 	Fav           bool
 	ManualBlocked bool
@@ -1391,12 +1449,12 @@ func collectRows(s *snapshot, st *store) []row {
 			label = ps.Label
 		}
 		label = displayLabel(s, id, label)
-		var visits, last, remindAt, doneAt int64
+		var visits, last, agentAt, remindAt, doneAt int64
 		var note, doneState, snoozeMode, snoozeState string
 		var manualBlocked, done, prioritySet bool
 		var priority int
 		if ps != nil {
-			visits, last = ps.Visits, ps.Last
+			visits, last, agentAt = ps.Visits, ps.Last, ps.AgentAt
 			note = ps.Note
 			manualBlocked = ps.ManualBlocked
 			remindAt = ps.RemindAt
@@ -1433,7 +1491,7 @@ func collectRows(s *snapshot, st *store) []row {
 		out = append(out, row{
 			PaneID: id, WorkspaceID: ws, Workspace: wsLabel,
 			Agent: agent, CWD: cwd, Label: label, Note: note,
-			Visits: visits, Last: last, Status: status,
+			Visits: visits, Last: last, AgentAt: agentAt, Status: status,
 			Fav: st.isFavorite(id), ManualBlocked: manualBlocked,
 			RemindAt: remindAt, Done: done, DoneAt: doneAt, DoneState: doneState,
 			SnoozeMode: snoozeMode, SnoozeState: snoozeState,
@@ -1445,7 +1503,7 @@ func collectRows(s *snapshot, st *store) []row {
 
 func canonicalSort(sort, dir string) string {
 	switch sort {
-	case "newest", "oldest", "most", "least":
+	case "newest", "oldest", "most", "least", "agent-newest", "agent-oldest":
 		return sort
 	case "times":
 		if dir == "asc" {
@@ -1463,7 +1521,8 @@ func canonicalSort(sort, dir string) string {
 func sortBy(list []row, how string) {
 	how = canonicalSort(how, "")
 	byTimes := how == "most" || how == "least"
-	desc := how == "newest" || how == "most"
+	byAgent := how == "agent-newest" || how == "agent-oldest"
+	desc := how == "newest" || how == "most" || how == "agent-newest"
 	sort.SliceStable(list, func(i, j int) bool {
 		if byTimes && list[i].Visits != list[j].Visits {
 			if desc {
@@ -1471,7 +1530,13 @@ func sortBy(list []row, how string) {
 			}
 			return list[i].Visits < list[j].Visits
 		}
-		if !byTimes && list[i].Last != list[j].Last {
+		if byAgent && list[i].AgentAt != list[j].AgentAt {
+			if desc {
+				return list[i].AgentAt > list[j].AgentAt
+			}
+			return list[i].AgentAt < list[j].AgentAt
+		}
+		if !byTimes && !byAgent && list[i].Last != list[j].Last {
 			if desc {
 				return list[i].Last > list[j].Last
 			}
@@ -1771,6 +1836,10 @@ func sortHow(mode int, fallback string) string {
 		return "most"
 	case sortLeast:
 		return "least"
+	case sortAgentNewest:
+		return "agent-newest"
+	case sortAgentOldest:
+		return "agent-oldest"
 	default:
 		return fallback
 	}
@@ -1779,13 +1848,17 @@ func sortHow(mode int, fallback string) string {
 func sortLabel(how string) string {
 	switch canonicalSort(how, "") {
 	case "oldest":
-		return "Oldest"
+		return "Viewed oldest"
 	case "most":
 		return "Most used"
 	case "least":
 		return "Least used"
+	case "agent-newest":
+		return "Agent recent"
+	case "agent-oldest":
+		return "Agent quiet"
 	default:
-		return "Most recent"
+		return "Viewed recent"
 	}
 }
 
@@ -1807,8 +1880,47 @@ func activeSortLabel(st *store, v view, mode int) string {
 	}
 }
 
+// listColHeader names the list columns. Viewed = operator access (Last).
+// Agent = last meaningful agent status change (AgentAt).
+func listColHeader(width int, metricKind string) string {
+	narrow := width < 80
+	starW, dotW, priW, statusW, metaW := 2, 2, 3, 10, 22
+	if narrow {
+		statusW, metaW = 0, 8
+	}
+	labelW := width - starW - dotW - priW - statusW - metaW
+	if labelW < 4 {
+		labelW = 4
+	}
+	name := pad(clip("name", labelW), labelW)
+	pri := pad("", priW)
+	st := ""
+	if statusW > 0 {
+		st = pad(clip("status", statusW), statusW)
+	}
+	meta := "viewed"
+	switch metricKind {
+	case "agent-newest", "agent-oldest":
+		meta = "agent"
+	case "most", "least", "times":
+		meta = "used"
+	case "newest", "oldest", "last":
+		meta = "viewed"
+	default:
+		if width >= 72 {
+			meta = "viewed · agent"
+		}
+	}
+	meta = pad(clip(meta, metaW), metaW)
+	return keyOverlay + "  " + name + pri + st + meta + keyReset
+}
+
 func metricText(r row, width int, kind string) string {
-	when := ago(r.Last)
+	viewed := ago(r.Last)
+	agent := "—"
+	if r.AgentAt > 0 {
+		agent = ago(r.AgentAt)
+	}
 	times := "once"
 	switch {
 	case r.Visits == 0:
@@ -1818,14 +1930,19 @@ func metricText(r row, width int, kind string) string {
 	}
 	switch kind {
 	case "newest", "oldest", "last":
-		return when
+		return "v " + viewed
+	case "agent-newest", "agent-oldest":
+		return "a " + agent
 	case "most", "least", "times":
 		return times
 	default:
-		if width < 68 {
-			return when
+		if width < 72 {
+			return "v " + viewed
 		}
-		return times + " · " + when
+		if width < 96 {
+			return "v " + viewed + " · a " + agent
+		}
+		return times + " · v " + viewed + " · a " + agent
 	}
 }
 
@@ -3075,7 +3192,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		case "Most used":
 			sortPill = "Most used"
 		default:
-			sortPill = "Most recent"
+			sortPill = "Viewed recent"
 		}
 	}
 	// The tab bar, hint, and search line are painted first and never scroll
@@ -3108,6 +3225,8 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		}
 	}
 	emit(leftSearch)
+	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
+	emit(listColHeader(width, metricKind))
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	headerN := len(lines)
 	footerN := 3 // separator plus two hint lines
@@ -3353,7 +3472,9 @@ func fieldTitle(label string, focused bool) string {
 	return keyOverlay + "  " + label + keyReset
 }
 
-func sortLabels() []string  { return []string{"Most recent", "Oldest", "Most used", "Least used"} }
+func sortLabels() []string {
+	return []string{"Viewed recent", "Viewed oldest", "Most used", "Least used", "Agent recent", "Agent quiet"}
+}
 func limitLabels() []string { return []string{"10", "20", "50", "All"} }
 func onlyLabels() []string  { return []string{"Any", "Favorites"} }
 func whereLabels() []string { return []string{"Anywhere", "This workspace"} }
@@ -3601,7 +3722,9 @@ func featureChipLabel(f string) string {
 	case "status", "agent", "domain", "repo", "label", "tok":
 		return val
 	case "age":
-		return "age " + val
+		return "viewed " + val
+	case "agent_age":
+		return "agent " + val
 	case "visit":
 		return "visits " + val
 	case "attention":
@@ -3895,7 +4018,11 @@ func runPicker() int {
 	if err != nil {
 		frozen = &snapshot{}
 	}
-	st.observeRows(collectRows(frozen, st), time.Now().Unix())
+	nowOpen := time.Now().Unix()
+	if observeAgentActivity(frozen, st, nowOpen) {
+		_ = saveStore(st)
+	}
+	st.observeRows(collectRows(frozen, st), nowOpen)
 	tab := openTab(st)
 	sortMode := st.ActiveSort
 	if sortMode < 0 || sortMode >= sortCount {
@@ -4611,6 +4738,8 @@ func runPicker() int {
 			kind := "both"
 			if v.Kind == "custom" {
 				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)
+			} else if sortMode != sortDefault {
+				kind = sortHow(sortMode, "both")
 			}
 			frame = renderFrame(rows, sel, scrollOffset, searchEd.View("/", searching), status, w, h, viewNames(st), tab, kind, stateFilter, activeSortLabel(st, v, sortMode))
 		}

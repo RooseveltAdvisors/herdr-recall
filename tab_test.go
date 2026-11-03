@@ -11,7 +11,7 @@ import (
 
 func TestFormShowsEveryChoice(t *testing.T) {
 	frame := stripANSI(renderForm(80, 24, []string{"All", "Favorites", "Recent"}, 2, 1, true, vimline.View{Label: "Name", Text: "Recent", Focused: true}, "newest", 20, "", "", ""))
-	for _, want := range []string{"Edit tab", "Most recent", "Oldest", "Most used", "Least used", "This workspace"} {
+	for _, want := range []string{"Edit tab", "Viewed recent", "Viewed oldest", "Most used", "Least used", "Agent recent", "Agent quiet", "This workspace"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("form missing %q:\n%s", want, frame)
 		}
@@ -152,7 +152,7 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 		t.Fatalf("filterRows by sticky note = %+v", byNote)
 	}
 
-	// Snoozed pane renders ~ in All tab, and All shows [sort: Most recent].
+	// Snoozed pane renders ~ in All tab, and All shows [sort: Viewed recent].
 	all := rowsFor(snap, st, view{Kind: "all"}, sortDefault)
 	allPlain := stripANSI(renderFrame(all, 0, 0, vimline.View{Label: "/"}, "", 100, 18, viewNames(st), 5, "both", ""))
 	if !strings.Contains(allPlain, "PM") && !strings.Contains(allPlain, "AM") && !strings.Contains(allPlain, "in ") {
@@ -161,8 +161,45 @@ func TestInboxTriageRemindersNotesAndManualBlock(t *testing.T) {
 	if strings.Contains(allPlain, "\u25f7") {
 		t.Fatal("cryptic clock mark is still shown")
 	}
-	if !strings.Contains(allPlain, "[sort: Most recent]") {
-		t.Fatalf("expected [sort: Most recent] pill in All:\n%s", allPlain)
+	if !strings.Contains(allPlain, "[sort: Viewed recent]") {
+		t.Fatalf("expected [sort: Viewed recent] pill in All:\n%s", allPlain)
+	}
+}
+
+func TestObserveAgentActivityStampsFinish(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{Version: 1, Panes: map[string]*paneStat{"p1": {}}}
+	snap := &snapshot{Panes: []paneRec{{
+		PaneID: "p1", TabID: "t1", WorkspaceID: "w1", AgentStatus: "working",
+	}}, Tabs: []tabRec{{TabID: "t1", Label: "notes"}}, Workspaces: []wsRec{{WorkspaceID: "w1", Label: "wiseman"}}}
+	if !observeAgentActivity(snap, st, now) {
+		t.Fatal("first see should change store")
+	}
+	if st.Panes["p1"].AgentSeen != "working" || st.Panes["p1"].AgentAt != 0 {
+		t.Fatalf("first see = %+v", st.Panes["p1"])
+	}
+	snap.Panes[0].AgentStatus = "done"
+	if !observeAgentActivity(snap, st, now+30) {
+		t.Fatal("finish should change store")
+	}
+	if st.Panes["p1"].AgentAt != now+30 || st.Panes["p1"].AgentSeen != "done" {
+		t.Fatalf("finish stamp = %+v", st.Panes["p1"])
+	}
+	list := []row{
+		{PaneID: "old", Label: "old", AgentAt: now - 3600, Last: now},
+		{PaneID: "new", Label: "new", AgentAt: now - 10, Last: now - 9999},
+	}
+	sortBy(list, "agent-newest")
+	if list[0].PaneID != "new" {
+		t.Fatalf("agent-newest order = %+v", list)
+	}
+	sortBy(list, "newest")
+	if list[0].PaneID != "old" {
+		t.Fatalf("viewed-newest order = %+v", list)
+	}
+	h := listColHeader(100, "both")
+	if !strings.Contains(stripANSI(h), "viewed") || !strings.Contains(stripANSI(h), "agent") {
+		t.Fatalf("header = %q", h)
 	}
 }
 
@@ -184,9 +221,9 @@ func TestFloaxScratchIsHiddenFromCollectRows(t *testing.T) {
 		},
 	}
 	st := &store{Version: 1, Panes: map[string]*paneStat{
-		"w1:pOK":  {Label: "notes", Visits: 2},
-		"w1G:p1":  {Label: "1", Visits: 9},
-		"w1:pFx":  {Label: "1", Visits: 3},
+		"w1:pOK": {Label: "notes", Visits: 2},
+		"w1G:p1": {Label: "1", Visits: 9},
+		"w1:pFx": {Label: "1", Visits: 3},
 	}}
 	got := collectRows(snap, st)
 	ids := map[string]bool{}

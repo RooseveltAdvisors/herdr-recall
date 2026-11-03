@@ -119,7 +119,7 @@ func TestStableNavigationWithoutItemShifting(t *testing.T) {
 		})
 	}
 
-	w, h := 80, 14 // visible rows ~ 7
+	w, h := 80, 18 // visible rows ~ 7 after tab/search/column headers
 	fv := vimline.View{Label: "/"}
 
 	// Simulate pressing j down to row 10, then k back up to row 7.

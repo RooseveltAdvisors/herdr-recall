@@ -295,6 +295,25 @@ func jevAgeBucket(r row, now int64) string {
 	}
 }
 
+// jevAgentAgeBucket is how long since the agent last finished or moved.
+// Recent agent activity tracks current work. Old agent finish is radar.
+func jevAgentAgeBucket(r row, now int64) string {
+	if r.AgentAt == 0 {
+		return "agent_age:none"
+	}
+	d := now - r.AgentAt
+	switch {
+	case d < 10*60:
+		return "agent_age:fresh"
+	case d < time.Hour.Milliseconds()/1000:
+		return "agent_age:hour"
+	case d < 24*3600:
+		return "agent_age:day"
+	default:
+		return "agent_age:old"
+	}
+}
+
 // jevFeatures names the dimensions preference is learned over.
 // Topic words come from the pane itself. There is no topic dictionary.
 func jevFeatures(r row, now int64) []string {
@@ -308,6 +327,7 @@ func jevFeatures(r row, now int64) []string {
 		f = append(f, "agent:"+a)
 	}
 	f = append(f, jevAgeBucket(r, now))
+	f = append(f, jevAgentAgeBucket(r, now))
 	f = append(f, jevVisitFeature(r.Visits))
 	f = append(f, jevCadence(now))
 	if r.Note != "" {
@@ -1023,7 +1043,7 @@ func jevRankFeature(f string) bool {
 		return false
 	}
 	switch kind {
-	case "status", "age", "visit", "cadence", "note", "manual", "remind", "favorite", "repo", "attention", "id":
+	case "status", "age", "agent_age", "visit", "cadence", "note", "manual", "remind", "favorite", "repo", "attention", "id":
 		return true
 	case "label":
 		return !strings.Contains(val, " ") && len(val) <= 32
