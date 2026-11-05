@@ -222,20 +222,43 @@ type customTab struct {
 }
 
 type store struct {
-	Version      int                  `json:"version"`
-	Panes        map[string]*paneStat `json:"panes"`
-	Favorites    []string             `json:"favorites"`
-	TabsInit     bool                 `json:"tabs_init"`
-	Tabs         []customTab          `json:"tabs,omitempty"`
-	InboxOrder   []string             `json:"inbox_order,omitempty"`
-	ActiveTab    int                  `json:"active_tab,omitempty"`
-	ActiveTabSet bool                 `json:"active_tab_set,omitempty"`
-	ActiveSort   int                  `json:"active_sort,omitempty"`
-	ActiveState  string               `json:"active_state,omitempty"`
-	ActiveQuery  string               `json:"active_query,omitempty"`
-	ActivePaneID string               `json:"active_pane_id,omitempty"`
-	SnoozePicks  []string             `json:"snooze_picks,omitempty"`
-	Jev          *jevState            `json:"jev,omitempty"`
+	Version       int                  `json:"version"`
+	Panes         map[string]*paneStat `json:"panes"`
+	Favorites     []string             `json:"favorites"`
+	TabsInit      bool                 `json:"tabs_init"`
+	Tabs          []customTab          `json:"tabs,omitempty"`
+	InboxOrder    []string             `json:"inbox_order,omitempty"`
+	ActiveTab     int                  `json:"active_tab,omitempty"`
+	ActiveTabSet  bool                 `json:"active_tab_set,omitempty"`
+	ActiveSort    int                  `json:"active_sort,omitempty"`
+	ActiveState   string               `json:"active_state,omitempty"`
+	ActiveQuery   string               `json:"active_query,omitempty"`
+	ActivePaneID  string               `json:"active_pane_id,omitempty"`
+	SnoozePicks   []string             `json:"snooze_picks,omitempty"`
+	ExpandedPanes map[string]bool      `json:"expanded_panes,omitempty"`
+	Jev           *jevState            `json:"jev,omitempty"`
+}
+
+func (s *store) isExpanded(paneID string) bool {
+	if s == nil || s.ExpandedPanes == nil {
+		return false
+	}
+	return s.ExpandedPanes[paneID]
+}
+
+func (s *store) toggleExpanded(paneID string) bool {
+	if s == nil {
+		return false
+	}
+	if s.ExpandedPanes == nil {
+		s.ExpandedPanes = map[string]bool{}
+	}
+	if s.ExpandedPanes[paneID] {
+		delete(s.ExpandedPanes, paneID)
+		return false
+	}
+	s.ExpandedPanes[paneID] = true
+	return true
 }
 
 func defaultSnoozePicks() []string {
@@ -1061,6 +1084,11 @@ func (s *store) prune(live map[string]bool, keep int) {
 			delete(s.Panes, e.id)
 		}
 	}
+	for id := range s.ExpandedPanes {
+		if !live[id] {
+			delete(s.ExpandedPanes, id)
+		}
+	}
 }
 
 func (s *store) ensurePane(id string) *paneStat {
@@ -1369,6 +1397,14 @@ type row struct {
 	SnoozeState   string
 	Priority      int
 	PrioritySet   bool
+	TabID         string   `json:"tab_id,omitempty"`
+	IsSubpane     bool     `json:"is_subpane,omitempty"`
+	ParentPaneID  string   `json:"parent_pane_id,omitempty"`
+	SubpaneCount  int      `json:"subpane_count,omitempty"`
+	SubpaneIDs    []string `json:"subpane_ids,omitempty"`
+	SubpanePos    string   `json:"subpane_pos,omitempty"`
+	TreeBranch    string   `json:"tree_branch,omitempty"`
+	Expanded      bool     `json:"expanded,omitempty"`
 }
 
 // isFloaxScratch reports herdr-floax scratch panes. Parked floax lives in a
@@ -1448,6 +1484,107 @@ func displayLabel(s *snapshot, id, stored string) string {
 	return id
 }
 
+type tabLayoutInfo struct {
+	MainPaneID string
+	SubpaneIDs []string
+	Positions  map[string]string // paneID -> "right" / "bottom" / "bottom-right" / "split"
+}
+
+func determineSubpanePos(mainRect, subRect rect) string {
+	if subRect.Y > mainRect.Y && subRect.X > mainRect.X {
+		return "bottom-right"
+	}
+	if subRect.Y > mainRect.Y {
+		return "bottom"
+	}
+	if subRect.X > mainRect.X {
+		return "right"
+	}
+	return "split"
+}
+
+func detectTabPaneLayouts(s *snapshot) map[string]*tabLayoutInfo {
+	res := map[string]*tabLayoutInfo{}
+	if s == nil {
+		return res
+	}
+	// 1. From layouts: accurate geometry (X, Y)
+	for _, l := range s.Layouts {
+		var valid []layoutPane
+		for _, lp := range l.Panes {
+			if !isFloaxScratch(s, lp.PaneID) {
+				valid = append(valid, lp)
+			}
+		}
+		if len(valid) == 0 {
+			continue
+		}
+		// Sort by Y ascending, then X ascending -> top-left pane is first!
+		sort.Slice(valid, func(i, j int) bool {
+			if valid[i].Rect.Y != valid[j].Rect.Y {
+				return valid[i].Rect.Y < valid[j].Rect.Y
+			}
+			return valid[i].Rect.X < valid[j].Rect.X
+		})
+		main := valid[0]
+		info := &tabLayoutInfo{
+			MainPaneID: main.PaneID,
+			Positions:  map[string]string{},
+		}
+		for _, sub := range valid[1:] {
+			info.SubpaneIDs = append(info.SubpaneIDs, sub.PaneID)
+			info.Positions[sub.PaneID] = determineSubpanePos(main.Rect, sub.Rect)
+		}
+		res[l.TabID] = info
+	}
+	// 2. Fallback for tabs without layout entries
+	panesByTab := map[string][]string{}
+	for _, p := range s.Panes {
+		if !isFloaxScratch(s, p.PaneID) && p.TabID != "" {
+			panesByTab[p.TabID] = append(panesByTab[p.TabID], p.PaneID)
+		}
+	}
+	for tid, pids := range panesByTab {
+		if res[tid] == nil && len(pids) > 0 {
+			info := &tabLayoutInfo{
+				MainPaneID: pids[0],
+				Positions:  map[string]string{},
+			}
+			for _, sub := range pids[1:] {
+				info.SubpaneIDs = append(info.SubpaneIDs, sub)
+				info.Positions[sub] = "split"
+			}
+			res[tid] = info
+		}
+	}
+	return res
+}
+
+func subpaneDisplayLabel(s *snapshot, p paneRec, pos string) string {
+	shortID := p.PaneID
+	if idx := strings.LastIndex(p.PaneID, ":"); idx >= 0 {
+		shortID = p.PaneID[idx+1:]
+	}
+	title := strings.TrimSpace(p.TerminalTitleStrip)
+	if title == "" {
+		title = strings.TrimSpace(p.TerminalTitle)
+	}
+	if strings.HasPrefix(title, "π -") || strings.HasPrefix(title, "pi -") || strings.Contains(title, "wiseman") {
+		title = ""
+	}
+	var parts []string
+	parts = append(parts, shortID)
+	if title != "" {
+		parts = append(parts, title)
+	} else if p.Agent != "" && p.Agent != "unknown" && p.Agent != "none" {
+		parts = append(parts, p.Agent)
+	}
+	if pos != "" && pos != "split" {
+		parts = append(parts, "("+pos+")")
+	}
+	return strings.Join(parts, " · ")
+}
+
 func collectRows(s *snapshot, st *store) []row {
 	statusOf := map[string]string{}
 	for _, p := range s.Panes {
@@ -1483,6 +1620,11 @@ func collectRows(s *snapshot, st *store) []row {
 	for _, p := range s.Panes {
 		addID(p.PaneID)
 	}
+	layouts := detectTabPaneLayouts(s)
+	paneByID := map[string]*paneRec{}
+	for i := range s.Panes {
+		paneByID[s.Panes[i].PaneID] = &s.Panes[i]
+	}
 	var out []row
 	for _, id := range ids {
 		ps := st.Panes[id]
@@ -1513,16 +1655,15 @@ func collectRows(s *snapshot, st *store) []row {
 			status = "blocked"
 		}
 		agent, cwd, ws, wsLabel := "", "", "", ""
-		for _, p := range s.Panes {
-			if p.PaneID == id {
-				ws = p.WorkspaceID
-				agent = p.Agent
-				cwd = p.CWD
-				if cwd == "" {
-					cwd = p.ForegroundCWD
-				}
-				break
+		tabID := ""
+		if p := paneByID[id]; p != nil {
+			ws = p.WorkspaceID
+			agent = p.Agent
+			cwd = p.CWD
+			if cwd == "" {
+				cwd = p.ForegroundCWD
 			}
+			tabID = p.TabID
 		}
 		for _, w := range s.Workspaces {
 			if w.WorkspaceID == ws {
@@ -1530,16 +1671,82 @@ func collectRows(s *snapshot, st *store) []row {
 				break
 			}
 		}
+
+		isSubpane := false
+		parentPaneID := ""
+		subpaneCount := 0
+		var subpaneIDs []string
+		subpanePos := ""
+
+		if tabID != "" {
+			if info := layouts[tabID]; info != nil && len(info.SubpaneIDs) > 0 {
+				if id == info.MainPaneID {
+					subpaneCount = len(info.SubpaneIDs)
+					subpaneIDs = info.SubpaneIDs
+				} else {
+					isSubpane = true
+					parentPaneID = info.MainPaneID
+					subpanePos = info.Positions[id]
+					if p := paneByID[id]; p != nil {
+						label = subpaneDisplayLabel(s, *p, subpanePos)
+					}
+				}
+			}
+		}
+
 		out = append(out, row{
-			PaneID: id, WorkspaceID: ws, Workspace: wsLabel,
+			PaneID: id, TabID: tabID, WorkspaceID: ws, Workspace: wsLabel,
 			Agent: agent, CWD: cwd, Label: label, Note: note,
 			Visits: visits, Last: last, AgentAt: agentAt, Status: status,
 			Fav: st.isFavorite(id), ManualBlocked: manualBlocked,
 			RemindAt: remindAt, Done: done, DoneAt: doneAt, DoneState: doneState,
 			SnoozeMode: snoozeMode, SnoozeState: snoozeState,
 			Priority: priority, PrioritySet: prioritySet,
+			IsSubpane: isSubpane, ParentPaneID: parentPaneID,
+			SubpaneCount: subpaneCount, SubpaneIDs: subpaneIDs, SubpanePos: subpanePos,
 		})
 	}
+
+	// Aggregate subpane state into main panes so collapsed tabs reflect if
+	// any subpane is working, blocked, or recently finished.
+	subpanesByParent := map[string][]row{}
+	for _, r := range out {
+		if r.IsSubpane && r.ParentPaneID != "" {
+			subpanesByParent[r.ParentPaneID] = append(subpanesByParent[r.ParentPaneID], r)
+		}
+	}
+	for i := range out {
+		if !out[i].IsSubpane && out[i].SubpaneCount > 0 {
+			subs := subpanesByParent[out[i].PaneID]
+			for _, sub := range subs {
+				if sub.Last > out[i].Last {
+					out[i].Last = sub.Last
+				}
+				if sub.AgentAt > out[i].AgentAt {
+					out[i].AgentAt = sub.AgentAt
+				}
+				if sub.Fav {
+					out[i].Fav = true
+				}
+				if sub.ManualBlocked {
+					out[i].ManualBlocked = true
+				}
+				if sub.RemindAt > 0 && (out[i].RemindAt == 0 || sub.RemindAt < out[i].RemindAt) {
+					out[i].RemindAt = sub.RemindAt
+				}
+				subSW := statusWord(sub.Status)
+				mainSW := statusWord(out[i].Status)
+				if subSW == "working" {
+					out[i].Status = sub.Status
+				} else if subSW == "blocked" && mainSW != "working" {
+					out[i].Status = sub.Status
+				} else if subSW == "done" && mainSW != "working" && mainSW != "blocked" {
+					out[i].Status = sub.Status
+				}
+			}
+		}
+	}
+
 	return out
 }
 
@@ -1773,15 +1980,64 @@ func (s *store) addToInbox(id string) {
 	s.InboxOrder = append(s.InboxOrder, id)
 }
 
-func rowsFor(s *snapshot, st *store, v view, mode int) []row {
+func assembleTreeRows(roots []row, all []row, st *store, query string) []row {
+	subpanesByParent := map[string][]row{}
+	for _, r := range all {
+		if r.IsSubpane && r.ParentPaneID != "" {
+			subpanesByParent[r.ParentPaneID] = append(subpanesByParent[r.ParentPaneID], r)
+		}
+	}
+
+	q := strings.TrimSpace(query)
+	var out []row
+	for _, root := range roots {
+		subs := subpanesByParent[root.PaneID]
+		anySubMatches := false
+		if q != "" {
+			for _, sub := range subs {
+				if rowMatches(sub, q) {
+					anySubMatches = true
+					break
+				}
+			}
+		}
+		expanded := st.isExpanded(root.PaneID) || (q != "" && anySubMatches)
+		root.Expanded = expanded
+		out = append(out, root)
+		if expanded && len(subs) > 0 {
+			for i, sub := range subs {
+				if i == len(subs)-1 {
+					sub.TreeBranch = "└─ "
+				} else {
+					sub.TreeBranch = "├─ "
+				}
+				out = append(out, sub)
+			}
+		}
+	}
+	return out
+}
+
+func rowsFor(s *snapshot, st *store, v view, mode int, query ...string) []row {
 	all := collectRows(s, st)
 	now := time.Now().Unix()
-	if v.Kind == "inbox" {
-		return inboxVisible(syncInboxRows(all, st, now))
+	var roots []row
+	for _, r := range all {
+		if !r.IsSubpane {
+			roots = append(roots, r)
+		}
 	}
-	// Reference tabs (Recent, Most used, All, Favorites) show every pane, done or not,
-	// so Recent and Most used keep their full 50 history slots. Done rows carry a check mark.
-	return rowsForInner(all, s, st, v, mode, now)
+	var sortedRoots []row
+	if v.Kind == "inbox" {
+		sortedRoots = inboxVisible(syncInboxRows(roots, st, now))
+	} else {
+		sortedRoots = rowsForInner(roots, s, st, v, mode, now)
+	}
+	q := ""
+	if len(query) > 0 {
+		q = query[0]
+	}
+	return assembleTreeRows(sortedRoots, all, st, q)
 }
 
 // triageVisible drops rows done by e. A snoozed row keeps its badge and stays
@@ -3016,11 +3272,33 @@ func filterByState(rows []row, state string) []row {
 	return out
 }
 
+func rowMatches(r row, q string) bool {
+	q = strings.ToLower(q)
+	return strings.Contains(strings.ToLower(r.Label), q) ||
+		strings.Contains(strings.ToLower(r.Note), q) ||
+		strings.Contains(strings.ToLower(r.CWD), q) ||
+		strings.Contains(strings.ToLower(r.PaneID), q) ||
+		strings.Contains(strings.ToLower(r.Agent), q) ||
+		strings.Contains(strings.ToLower(r.Workspace), q)
+}
+
 func filterRows(rows []row, query string) []row {
-	q := strings.ToLower(query)
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return rows
+	}
+	matches := map[string]bool{}
+	for _, r := range rows {
+		if rowMatches(r, q) {
+			matches[r.PaneID] = true
+			if r.IsSubpane && r.ParentPaneID != "" {
+				matches[r.ParentPaneID] = true
+			}
+		}
+	}
 	out := make([]row, 0, len(rows))
 	for _, r := range rows {
-		if strings.Contains(strings.ToLower(r.Label), q) || strings.Contains(strings.ToLower(r.Note), q) {
+		if matches[r.PaneID] {
 			out = append(out, r)
 		}
 	}
@@ -3091,6 +3369,99 @@ func formatLabelWithNote(label, note, remind string, labelW int, selected, due b
 		b.WriteString(keySub + " · " + clip(note, rem-3))
 	}
 	b.WriteString(keyText)
+	return pad(b.String(), labelW)
+}
+
+func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) string {
+	treePrefix := "  "
+	subBadge := ""
+	if r.IsSubpane {
+		branch := r.TreeBranch
+		if branch == "" {
+			branch = "└─ "
+		}
+		treePrefix = "  " + branch
+	} else if r.SubpaneCount > 0 {
+		if r.Expanded {
+			treePrefix = "▾ "
+		} else {
+			treePrefix = "▸ "
+			plural := "subpanes"
+			if r.SubpaneCount == 1 {
+				plural = "subpane"
+			}
+			subBadge = fmt.Sprintf(" · %d %s", r.SubpaneCount, plural)
+		}
+	}
+
+	pfxLen := len([]rune(treePrefix))
+	badgeLen := len([]rune(subBadge))
+	remW := labelW - pfxLen - badgeLen
+	if remW < 4 {
+		remW = 4
+	}
+
+	suffixPlain := ""
+	if remind != "" {
+		suffixPlain += " · " + remind
+	}
+	if r.Note != "" {
+		suffixPlain += " · " + r.Note
+	}
+
+	maxName := max(4, remW-len([]rune(suffixPlain))-1)
+	clippedName := clipTail(r.Label, maxName)
+	rem := remW - len([]rune(clippedName)) - 3
+	if rem < 4 {
+		clippedName = clipTail(r.Label, max(1, remW-1))
+		suffixPlain = ""
+		rem = remW - len([]rune(clippedName))
+	}
+
+	if selected {
+		core := clippedName + suffixPlain
+		if len([]rune(core)) < remW {
+			core += strings.Repeat(" ", remW-len([]rune(core)))
+		}
+		return pad(treePrefix+core+subBadge, labelW)
+	}
+
+	// Unselected styling
+	var b strings.Builder
+	if r.IsSubpane {
+		b.WriteString(keyOverlay + treePrefix + keyReset)
+	} else if r.SubpaneCount > 0 {
+		if r.Expanded {
+			b.WriteString(keyAccentFg + keyBold + "▾ " + keyReset)
+		} else {
+			b.WriteString(keyOverlay + "▸ " + keyReset)
+		}
+	} else {
+		b.WriteString(treePrefix)
+	}
+
+	b.WriteString(keyText + clippedName + keyReset)
+
+	if subBadge != "" {
+		b.WriteString(keyOverlay + subBadge + keyReset)
+	}
+
+	if remind != "" && rem >= 4 {
+		color := keyAccentFg
+		if due {
+			color = keyStBad
+		}
+		shown := clip(remind, max(1, rem-3))
+		b.WriteString(keySub + " · " + color + shown + keyReset)
+		rem -= len([]rune(shown)) + 3
+	}
+
+	if r.Note != "" && rem >= 4 {
+		shown := clip(r.Note, rem-3)
+		b.WriteString(keySub + " · " + shown + keyReset)
+		rem -= len([]rune(shown)) + 3
+	}
+
 	return pad(b.String(), labelW)
 }
 
@@ -3349,7 +3720,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		}
 		// Order matches beads-tui: status glyph, P0 pill, then the name.
 		// Only the pill is priority-colored; the pane name stays body text.
-		labelCell := formatLabelWithNote(r.Label, r.Note, remind, labelW, i == sel, r.RemindAt > 0 && r.RemindAt <= now)
+		labelCell := formatLabelWithTree(r, remind, labelW, i == sel, r.RemindAt > 0 && r.RemindAt <= now)
 		dotCell := scol + glyph + keyReset
 		priCell := strings.Repeat(" ", priW)
 		if badge := formatPriorityBadge(r); badge != "" {
@@ -3417,9 +3788,25 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	if fv.Focused {
 		emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "esc", "browse", "ctrl+c", "close"))
 	} else {
-		emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "p", "pri", "J", "jev", "h", "remind", "n", "note", "!", "block", "/", "search"))
+		spaceAction := ""
+		if sel >= 0 && sel < len(rows) {
+			if rows[sel].SubpaneCount > 0 {
+				if rows[sel].Expanded {
+					spaceAction = "collapse"
+				} else {
+					spaceAction = fmt.Sprintf("expand (%d)", rows[sel].SubpaneCount)
+				}
+			} else if rows[sel].IsSubpane {
+				spaceAction = "collapse"
+			}
+		}
+		if spaceAction != "" {
+			emit(hintFooter("enter", "switch", "space", spaceAction, "e", "done", "i", "teach", "p", "pri", "h", "remind", "n", "note", "!", "block", "/", "search"))
+		} else {
+			emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "p", "pri", "J", "jev", "h", "remind", "n", "note", "!", "block", "/", "search"))
+		}
 	}
-	extra := "arrows tabs   g i/l/t/r tab   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
+	extra := "arrows tabs   g i/l/t/r tab   space tree   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
 	if len(names) > 0 && names[active] == "Transcripts" {
 		extra = "esc list  j/k  ctrl-u/d half  ctrl-n/p type-nav  / type  1-4 filter"
 	}
@@ -4156,7 +4543,7 @@ func runPicker() int {
 		if tab < 0 {
 			tab = 0
 		}
-		allRows = rowsFor(frozen, st, vs[tab], sortMode)
+		allRows = rowsFor(frozen, st, vs[tab], sortMode, searchEd.String())
 	}
 	visible := func() []row {
 		out := filterByState(allRows, stateFilter)
@@ -5424,6 +5811,8 @@ func runPicker() int {
 			}
 			if views(st)[tab].Kind == "transcripts" {
 				refreshTx(searchEd.String())
+			} else {
+				rebuild()
 			}
 			continue
 		}
@@ -5787,6 +6176,30 @@ func runPicker() int {
 				priRow = rows[sel]
 				priChoice = priorityChoiceIndex(priRow.PrioritySet, priRow.Priority)
 			}
+		case (key == " " || key == "space" || (key == "tab" && views(st)[tab].Kind != "transcripts")) && !searching && !showHelp:
+			if len(rows) == 0 || sel < 0 || sel >= len(rows) {
+				break
+			}
+			r := rows[sel]
+			if r.SubpaneCount == 0 && !r.IsSubpane {
+				break
+			}
+			targetID := r.PaneID
+			if r.IsSubpane {
+				targetID = r.ParentPaneID
+			}
+			if targetID != "" {
+				expanded := st.toggleExpanded(targetID)
+				saveSt(0)
+				rebuild()
+				rows = visible()
+				sel = pinSel(rows, sel, targetID)
+				if expanded {
+					status = "expanded subpanes"
+				} else {
+					status = "collapsed subpanes"
+				}
+			}
 		case key == "e" && !searching && !showHelp:
 			if !pointed() {
 				break
@@ -5807,6 +6220,16 @@ func runPicker() int {
 				ps.SnoozeState = ""
 				ps.DoneState = baselineState(liveStatusWord(frozen, r.PaneID))
 				st.removeFromInbox(r.PaneID)
+				if !r.IsSubpane && r.SubpaneCount > 0 && !st.isExpanded(r.PaneID) {
+					for _, subID := range r.SubpaneIDs {
+						subPS := st.ensurePane(subID)
+						subPS.Done = true
+						subPS.DoneAt = now
+						subPS.ManualBlocked = false
+						subPS.RemindAt = 0
+						st.removeFromInbox(subID)
+					}
+				}
 				// e archives. It is neutral, so it does not teach Jev.
 				status = "done: " + r.Label + " (z undo)"
 				doneID = r.PaneID

@@ -446,18 +446,20 @@ func TestPickerPaintsAtPtySize(t *testing.T) {
 	cfg := os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
 	seed := mustLoad(t)
 	seed.TabsInit = true
-	var panes []string
+	var panes, tabs []string
 	for i := range 60 {
 		id := fmt.Sprintf("w1:p%d", i)
+		tid := fmt.Sprintf("t%d", i)
 		seed.Favorites = append(seed.Favorites, id)
-		panes = append(panes, fmt.Sprintf(`{"pane_id":%q,"tab_id":"tA","workspace_id":"w1","agent_status":"idle","terminal_title_stripped":"pane %d","cwd":"/p"}`, id, i))
+		panes = append(panes, fmt.Sprintf(`{"pane_id":%q,"tab_id":%q,"workspace_id":"w1","agent_status":"idle","terminal_title_stripped":"pane %d","cwd":"/p"}`, id, tid, i))
+		tabs = append(tabs, fmt.Sprintf(`{"tab_id":%q,"workspace_id":"w1","label":%q,"focused":%v}`, tid, fmt.Sprintf("pane-%d", i), i == 0))
 	}
 	seed.ActiveTabSet = true
 	seed.ActiveTab = 0
 	if err := saveStore(seed); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := `{"result":{"snapshot":{"focused_pane_id":"w1:p0","focused_tab_id":"tA","focused_workspace_id":"w1","panes":[` + strings.Join(panes, ",") + `],"tabs":[{"tab_id":"tA","workspace_id":"w1","label":"alpha","focused":true}],"workspaces":[{"workspace_id":"w1","label":"Work","active_tab_id":"tA","focused":true}],"layouts":[]}}}`
+	snapshot := `{"result":{"snapshot":{"focused_pane_id":"w1:p0","focused_tab_id":"t0","focused_workspace_id":"w1","panes":[` + strings.Join(panes, ",") + `],"tabs":[` + strings.Join(tabs, ",") + `],"workspaces":[{"workspace_id":"w1","label":"Work","active_tab_id":"t0","focused":true}],"layouts":[]}}}`
 
 	p := startPicker(t, bin, cfg, "PATH="+herdrShim(t, snapshot))
 	_, frame, _ := strings.Cut(p.frames(1), "\x1b[2J\x1b[H")
