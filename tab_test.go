@@ -397,3 +397,88 @@ func TestPruneDoesNotPanicBelowTheCap(t *testing.T) {
 		t.Fatalf("rows = %d, want 2 after pruning to cap", len(st.Panes))
 	}
 }
+
+func TestRecentTabSortCyclesAndJevAttention(t *testing.T) {
+	now := time.Now().Unix()
+	st := &store{Version: 2, Panes: map[string]*paneStat{}, TabsInit: true, Tabs: defaultTabs()}
+	st.Panes["p1"] = &paneStat{Visits: 5, Last: now - 10, AgentAt: now - 5000, AgentSeen: "idle", Label: "operator-recent"}
+	st.Panes["p2"] = &paneStat{Visits: 2, Last: now - 3600, AgentAt: now - 30, AgentSeen: "done", Label: "agent-recent"}
+	st.Panes["p3"] = &paneStat{Visits: 1, Last: now - 20000, AgentAt: now - 14400, AgentSeen: "done", Label: "agent-radar"}
+
+	snap := &snapshot{Panes: []paneRec{
+		{PaneID: "p1", TabID: "t1", WorkspaceID: "w1", AgentStatus: "idle"},
+		{PaneID: "p2", TabID: "t2", WorkspaceID: "w1", AgentStatus: "done"},
+		{PaneID: "p3", TabID: "t3", WorkspaceID: "w1", AgentStatus: "done"},
+	}, Tabs: []tabRec{
+		{TabID: "t1", Label: "operator-recent"},
+		{TabID: "t2", Label: "agent-recent"},
+		{TabID: "t3", Label: "agent-radar"},
+	}}
+
+	recentView := view{Kind: "custom", Idx: 0}
+
+	// Default sort on Recent is Viewed recent
+	defaultList := rowsFor(snap, st, recentView, sortDefault)
+	if len(defaultList) < 3 || defaultList[0].PaneID != "p1" {
+		t.Fatalf("expected p1 first on default viewed recent, got: %+v", defaultList)
+	}
+
+	// Pressing s switches to Agent recent (sortAgentNewest)
+	agentList := rowsFor(snap, st, recentView, sortAgentNewest)
+	if len(agentList) < 3 || agentList[0].PaneID != "p2" {
+		t.Fatalf("expected p2 first on agent recent, got: %+v", agentList)
+	}
+
+	// Pressing s again switches to Agent quiet / radar (sortAgentOldest)
+	quietList := rowsFor(snap, st, recentView, sortAgentOldest)
+	if len(quietList) < 3 || quietList[0].PaneID != "p3" {
+		t.Fatalf("expected p3 first on agent quiet, got: %+v", quietList)
+	}
+
+	// Header inspection at wide terminal (>= 72 cols)
+	hDefault := listColHeader(90, "newest")
+	if !strings.Contains(hDefault, "[viewed] · agent") {
+		t.Fatalf("expected [viewed] · agent in header, got: %q", hDefault)
+	}
+	hAgent := listColHeader(90, "agent-newest")
+	if !strings.Contains(hAgent, "viewed · [agent]") {
+		t.Fatalf("expected viewed · [agent] in header, got: %q", hAgent)
+	}
+
+	// Row metric text at wide terminal (>= 72 cols) shows both v and a
+	m := metricText(defaultList[0], 90, "both")
+	if !strings.Contains(m, "v ") || !strings.Contains(m, "a ") {
+		t.Fatalf("expected both viewed and agent in metricText, got: %q", m)
+	}
+
+	// Jev attention features and urgency
+	p2Row := agentList[0] // finished 30s ago
+	feats2 := jevFeatures(p2Row, now)
+	hasFresh := false
+	for _, f := range feats2 {
+		if f == "attention:agent_fresh" {
+			hasFresh = true
+		}
+	}
+	if !hasFresh {
+		t.Fatalf("expected attention:agent_fresh for p2, got: %v", feats2)
+	}
+	if u := jevUrgency(p2Row, now); u < 0.15 {
+		t.Fatalf("expected boosted urgency for fresh finish, got: %v", u)
+	}
+
+	p3Row := quietList[0] // finished 4h ago, unattended
+	feats3 := jevFeatures(p3Row, now)
+	hasRadar := false
+	for _, f := range feats3 {
+		if f == "attention:radar" {
+			hasRadar = true
+		}
+	}
+	if !hasRadar {
+		t.Fatalf("expected attention:radar for p3, got: %v", feats3)
+	}
+	if u := jevUrgency(p3Row, now); u < 0.13 {
+		t.Fatalf("expected boosted urgency for radar finish, got: %v", u)
+	}
+}

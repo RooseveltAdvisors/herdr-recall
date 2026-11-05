@@ -45,11 +45,11 @@ const (
 const (
 	sortDefault     = 0
 	sortNewest      = 1 // operator viewed recently (Last)
-	sortOldest      = 2
-	sortMost        = 3
-	sortLeast       = 4
-	sortAgentNewest = 5 // agent finished / moved recently (AgentAt)
-	sortAgentOldest = 6 // agent quiet longest - radar
+	sortAgentNewest = 2 // agent finished / moved recently (AgentAt)
+	sortAgentOldest = 3 // agent quiet longest - radar
+	sortOldest      = 4
+	sortMost        = 5
+	sortLeast       = 6
 	sortCount       = 7
 )
 
@@ -1856,7 +1856,11 @@ func rowsForInner(all []row, s *snapshot, st *store, v view, mode int, now int64
 			}
 			list = append(list, r)
 		}
-		sortBy(list, canonicalSort(ct.Sort, ct.Dir))
+		how := canonicalSort(ct.Sort, ct.Dir)
+		if mode != sortDefault {
+			how = sortHow(mode, how)
+		}
+		sortBy(list, how)
 		if ct.Limit > 0 && len(list) > ct.Limit {
 			list = list[:ct.Limit]
 		}
@@ -1872,16 +1876,16 @@ func sortHow(mode int, fallback string) string {
 	switch mode {
 	case sortNewest:
 		return "newest"
+	case sortAgentNewest:
+		return "agent-newest"
+	case sortAgentOldest:
+		return "agent-oldest"
 	case sortOldest:
 		return "oldest"
 	case sortMost:
 		return "most"
 	case sortLeast:
 		return "least"
-	case sortAgentNewest:
-		return "agent-newest"
-	case sortAgentOldest:
-		return "agent-oldest"
 	default:
 		return fallback
 	}
@@ -1908,17 +1912,17 @@ func activeSortLabel(st *store, v view, mode int) string {
 	if v.Kind == "inbox" {
 		return ""
 	}
-	if v.Kind == "custom" && v.Idx >= 0 && v.Idx < len(st.Tabs) {
-		return sortLabel(canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir))
-	}
 	if mode != sortDefault {
 		return sortLabel(sortHow(mode, "newest"))
+	}
+	if v.Kind == "custom" && v.Idx >= 0 && v.Idx < len(st.Tabs) {
+		return sortLabel(canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir))
 	}
 	switch v.Kind {
 	case "favorites":
 		return "Starred"
 	default:
-		return "Most recent"
+		return "Viewed recent"
 	}
 }
 
@@ -1941,16 +1945,23 @@ func listColHeader(width int, metricKind string) string {
 		st = pad(clip("status", statusW), statusW)
 	}
 	meta := "viewed"
-	switch metricKind {
-	case "agent-newest", "agent-oldest":
-		meta = "agent"
-	case "most", "least", "times":
-		meta = "used"
-	case "newest", "oldest", "last":
-		meta = "viewed"
-	default:
-		if width >= 72 {
+	if width >= 72 {
+		switch metricKind {
+		case "agent-newest", "agent-oldest":
+			meta = "viewed · [agent]"
+		case "newest", "oldest", "last":
+			meta = "[viewed] · agent"
+		default:
 			meta = "viewed · agent"
+		}
+	} else {
+		switch metricKind {
+		case "agent-newest", "agent-oldest":
+			meta = "agent"
+		case "most", "least", "times":
+			meta = "used"
+		default:
+			meta = "viewed"
 		}
 	}
 	meta = pad(clip(meta, metaW), metaW)
@@ -1970,22 +1981,20 @@ func metricText(r row, width int, kind string) string {
 	case r.Visits > 1:
 		times = fmt.Sprintf("%d times", r.Visits)
 	}
-	switch kind {
-	case "newest", "oldest", "last":
-		return "v " + viewed
-	case "agent-newest", "agent-oldest":
-		return "a " + agent
-	case "most", "least", "times":
-		return times
-	default:
-		if width < 72 {
+	if width < 72 {
+		switch kind {
+		case "agent-newest", "agent-oldest":
+			return "a " + agent
+		case "most", "least", "times":
+			return times
+		default:
 			return "v " + viewed
 		}
-		if width < 96 {
-			return "v " + viewed + " · a " + agent
-		}
-		return times + " · v " + viewed + " · a " + agent
 	}
+	if width < 96 {
+		return "v " + viewed + " · a " + agent
+	}
+	return times + " · v " + viewed + " · a " + agent
 }
 
 // priorityColor returns the beads-tui P0..P4 color ramp.
@@ -3414,7 +3423,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	if len(names) > 0 && names[active] == "Transcripts" {
 		extra = "esc list  j/k  ctrl-u/d half  ctrl-n/p type-nav  / type  1-4 filter"
 	}
-	if len(names) > 0 && (names[active] == "All" || names[active] == "Favorites") {
+	if len(names) > 0 && names[active] != "Inbox" && names[active] != "Later" && names[active] != "Transcripts" {
 		extra += "   s sort"
 	}
 	if !fv.Focused && (strings.TrimSpace(fv.Text) != "" || state != "") {
@@ -3770,6 +3779,12 @@ func featureChipLabel(f string) string {
 	case "visit":
 		return "visits " + val
 	case "attention":
+		if val == "agent_fresh" {
+			return "just finished"
+		}
+		if val == "radar" {
+			return "unattended radar"
+		}
 		if val == "waiting_on_human" {
 			return "waiting on you"
 		}
@@ -4797,6 +4812,9 @@ func runPicker() int {
 			kind := "both"
 			if v.Kind == "custom" {
 				kind = canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir)
+				if sortMode != sortDefault {
+					kind = sortHow(sortMode, kind)
+				}
 			} else if sortMode != sortDefault {
 				kind = sortHow(sortMode, "both")
 			}
@@ -5720,14 +5738,19 @@ func runPicker() int {
 			continue
 		case key == "s" && !searching && !showHelp:
 			v := views(st)[tab]
-			if v.Kind != "all" && v.Kind != "favorites" {
+			if v.Kind == "inbox" || v.Kind == "later" {
 				break
 			}
-			if v.Kind == "all" && sortMode == sortDefault {
-				sortMode = sortOldest
+			if sortMode == sortDefault {
+				// On Recent, first 's' press jumps directly to Agent recent!
+				if v.Kind == "custom" && canonicalSort(st.Tabs[v.Idx].Sort, st.Tabs[v.Idx].Dir) == "newest" {
+					sortMode = sortAgentNewest
+				} else {
+					sortMode = (sortDefault + 1) % sortCount
+				}
 			} else {
 				sortMode = (sortMode + 1) % sortCount
-				if v.Kind == "all" && sortMode == sortDefault {
+				if sortMode == sortDefault {
 					sortMode = sortNewest
 				}
 			}

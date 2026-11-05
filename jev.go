@@ -352,6 +352,12 @@ func jevFeatures(r row, now int64) []string {
 		f = append(f, repo)
 	}
 	sw := statusWord(r.Status)
+	if (sw == "done" || sw == "blocked") && r.AgentAt > 0 && now-r.AgentAt < 15*60 {
+		f = append(f, "attention:agent_fresh")
+	}
+	if (sw == "done" || sw == "blocked") && r.AgentAt > 0 && now-r.AgentAt > 2*3600 && (r.Last == 0 || r.Last < r.AgentAt) {
+		f = append(f, "attention:radar")
+	}
 	if (sw == "blocked" || sw == "done") && r.Last > 0 && now-r.Last > 30*60 {
 		f = append(f, "attention:waiting_on_human")
 	}
@@ -592,15 +598,25 @@ func jevUrgency(r row, now int64) float64 {
 	if r.RemindAt > 0 && r.RemindAt <= now {
 		return 0.2
 	}
-	switch statusWord(r.Status) {
+	sw := statusWord(r.Status)
+	urgency := 0.0
+	switch sw {
 	case "blocked":
-		return 0.15
+		urgency = 0.15
 	case "done":
-		return 0.08
+		urgency = 0.08
 	case "working":
-		return 0.02
+		urgency = 0.02
 	}
-	return 0
+	// Fresh finish (<15m): relevant to current work stream, boost priority
+	if (sw == "done" || sw == "blocked") && r.AgentAt > 0 && now-r.AgentAt < 15*60 {
+		urgency += 0.08
+	}
+	// Radar item (>2h unattended finish): elevate so it stays on captain's radar
+	if (sw == "done" || sw == "blocked") && r.AgentAt > 0 && now-r.AgentAt > 2*3600 && (r.Last == 0 || r.Last < r.AgentAt) {
+		urgency += 0.06
+	}
+	return urgency
 }
 
 // jevLearn reinforces the chosen row and decays the rows skipped above it.
