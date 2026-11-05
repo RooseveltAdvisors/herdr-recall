@@ -1262,12 +1262,54 @@ func jumpTo(paneID string) error {
 	return focusPane(paneID)
 }
 
+func resolveHerdrSocket() string {
+	if sock := os.Getenv("HERDR_SOCKET_PATH"); sock != "" {
+		return sock
+	}
+	session := os.Getenv("HERDR_SESSION")
+	if session == "" {
+		session = "wiseman"
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		p := filepath.Join(home, ".config/herdr/sessions", session, "herdr.sock")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+func closePopup() error {
+	sock := resolveHerdrSocket()
+	if sock == "" {
+		return errors.New("herdr socket not found")
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	req, err := json.Marshal(map[string]any{
+		"id":     "recall-close-popup",
+		"method": "popup.close",
+		"params": map[string]any{},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(append(req, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
 // focusPane uses herdr's pane.focus API. Direction hops miss panes that are
 // not a neighbor, so Enter looked like it did nothing.
 func focusPane(paneID string) error {
-	sock := os.Getenv("HERDR_SOCKET_PATH")
+	sock := resolveHerdrSocket()
 	if sock == "" {
-		return fmt.Errorf("HERDR_SOCKET_PATH unset")
+		return fmt.Errorf("herdr socket not found")
 	}
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
@@ -3980,6 +4022,7 @@ func runPicker() int {
 		c.Stdin = tty
 		_ = c.Run()
 		tty.WriteString("\x1b[?25h")
+		_ = closePopup()
 	}()
 	// The fields paint their own cursor cell, so the terminal cursor is hidden
 	// for the whole session. It cannot drift and the frame is screenshot-exact.
@@ -5944,7 +5987,14 @@ func openPicker() int {
 	// and does not change the tab layout. Exiting the process dismisses it, so
 	// no pane close or tab close is ever issued. The CLI help omits popup, but
 	// the 0.9.3 server implements it (width/height are popup-only flags).
-	if _, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "popup", "--width", "95%", "--height", "95%"); err != nil {
+	out, err := herdr("plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "picker", "--placement", "popup", "--width", "95%", "--height", "95%")
+	if err != nil {
+		msg := err.Error() + " " + string(out)
+		if strings.Contains(msg, "a popup pane is already open") || strings.Contains(msg, "ui_busy") {
+			// Toggle / dismiss: if a popup is already open or stuck, dismiss it.
+			_ = closePopup()
+			return 0
+		}
 		fmt.Fprintf(os.Stderr, "recall: open picker: %v\n", err)
 		return 1
 	}

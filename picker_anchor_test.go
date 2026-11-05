@@ -161,6 +161,36 @@ func (p *pickerRun) frames(n int) string {
 	}
 }
 
+func TestClosePopupSendsRPC(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "herdr.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("unix socket: %v", err)
+	}
+	defer ln.Close()
+	rpc := make(chan string, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			defer c.Close()
+			req, _ := bufio.NewReader(c).ReadString('\n')
+			rpc <- req
+		}
+	}()
+
+	t.Setenv("HERDR_SOCKET_PATH", sock)
+	if err := closePopup(); err != nil {
+		t.Fatalf("closePopup failed: %v", err)
+	}
+	select {
+	case req := <-rpc:
+		if !strings.Contains(req, "popup.close") {
+			t.Fatalf("expected popup.close in req, got %q", req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("closePopup never sent RPC")
+	}
+}
+
 // TestVanishedAnchorNeverSubstitutes pins the ruled refusal: when the pane the
 // drawn cursor pointed at leaves the list between the frame and the keypress,
 // the row action is ignored with a visible note and the neighbor row is
