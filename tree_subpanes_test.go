@@ -47,25 +47,37 @@ func TestDetectTabPaneLayoutsTopLeftIsMain(t *testing.T) {
 }
 
 func TestSubpaneDisplayLabelFormatting(t *testing.T) {
-	p := paneRec{
+	// 1. Explicit pane label takes precedence over pane ID
+	pNamed := paneRec{
+		PaneID: "w1:p16T",
+		Label:  "beads-qa-checks",
+		Agent:  "pi",
+	}
+	gotNamed := subpaneDisplayLabel(nil, pNamed, "", "right")
+	if gotNamed != "beads-qa-checks · pi · (right)" {
+		t.Fatalf("expected pane name beads-qa-checks without pane ID, got: %q", gotNamed)
+	}
+
+	// 2. Custom terminal title used instead of pane ID
+	pTitle := paneRec{
 		PaneID:             "w1:p116",
 		TerminalTitleStrip: "worker-build",
 		Agent:              "pi",
 	}
-	got := subpaneDisplayLabel(nil, p, "right")
-	if got != "p116 · worker-build · (right)" {
-		t.Fatalf("unexpected label: %q", got)
+	gotTitle := subpaneDisplayLabel(nil, pTitle, "", "right")
+	if gotTitle != "worker-build · pi · (right)" {
+		t.Fatalf("expected title worker-build without pane ID, got: %q", gotTitle)
 	}
 
-	// Generic title falls back to agent
+	// 3. Generic title falls back to short pane ID
 	pGeneric := paneRec{
 		PaneID:             "w1:p117",
 		TerminalTitleStrip: "π - wiseman",
 		Agent:              "pi",
 	}
-	gotGeneric := subpaneDisplayLabel(nil, pGeneric, "bottom")
+	gotGeneric := subpaneDisplayLabel(nil, pGeneric, "", "bottom")
 	if gotGeneric != "p117 · pi · (bottom)" {
-		t.Fatalf("unexpected generic label: %q", gotGeneric)
+		t.Fatalf("unnamed pane should fall back to short pane ID, got: %q", gotGeneric)
 	}
 }
 

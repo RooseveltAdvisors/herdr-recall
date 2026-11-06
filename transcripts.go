@@ -795,9 +795,12 @@ func txLiveMeta(s *snapshot, sessionID string) txLive {
 				break
 			}
 		}
-		pane := strings.TrimSpace(p.TerminalTitleStrip)
-		if pane == "" || strings.Contains(pane, "/") || len([]rune(pane)) > 28 {
-			pane = p.PaneID
+		pane := paneName(&p, "")
+		if pane == "" {
+			pane = strings.TrimSpace(p.TerminalTitleStrip)
+			if pane == "" || strings.Contains(pane, "/") || len([]rune(pane)) > 28 {
+				pane = p.PaneID
+			}
 		}
 		return txLive{Tab: tab, Pane: pane, Agent: p.Agent}
 	}

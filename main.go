@@ -1405,6 +1405,7 @@ type row struct {
 	SubpanePos    string   `json:"subpane_pos,omitempty"`
 	TreeBranch    string   `json:"tree_branch,omitempty"`
 	Expanded      bool     `json:"expanded,omitempty"`
+	PaneName      string   `json:"pane_name,omitempty"`
 }
 
 // isFloaxScratch reports herdr-floax scratch panes. Parked floax lives in a
@@ -1458,6 +1459,30 @@ func isFloaxScratch(s *snapshot, id string) bool {
 	return false
 }
 
+func paneName(p *paneRec, stored string) string {
+	if p == nil {
+		if stored != "" && !strings.Contains(stored, ":") {
+			return strings.TrimSpace(stored)
+		}
+		return ""
+	}
+	if name := strings.TrimSpace(p.Label); name != "" && name != "⌂ floax" {
+		return name
+	}
+	title := strings.TrimSpace(p.TerminalTitleStrip)
+	if title == "" {
+		title = strings.TrimSpace(p.TerminalTitle)
+	}
+	if title != "" && !strings.HasPrefix(title, "π -") && !strings.HasPrefix(title, "pi -") &&
+		!strings.Contains(title, "wiseman") && title != "bash" && title != "zsh" {
+		return title
+	}
+	if stored != "" && !strings.Contains(stored, ":") {
+		return strings.TrimSpace(stored)
+	}
+	return ""
+}
+
 // displayLabel is the Herdr tab name only, the same label prefix k uses
 // for a tab row. Agent titles, workspace names, and cwd are not part of it.
 func displayLabel(s *snapshot, id, stored string) string {
@@ -1473,6 +1498,16 @@ func displayLabel(s *snapshot, id, stored string) string {
 			return stored
 		}
 		return id
+	}
+	for _, t := range s.Tabs {
+		if t.TabID == p.TabID {
+			if name := strings.TrimSpace(t.Label); name != "" && name != "1" {
+				return name
+			}
+		}
+	}
+	if name := paneName(p, stored); name != "" {
+		return name
 	}
 	for _, t := range s.Tabs {
 		if t.TabID == p.TabID {
@@ -1560,23 +1595,19 @@ func detectTabPaneLayouts(s *snapshot) map[string]*tabLayoutInfo {
 	return res
 }
 
-func subpaneDisplayLabel(s *snapshot, p paneRec, pos string) string {
+func subpaneDisplayLabel(s *snapshot, p paneRec, stored, pos string) string {
+	name := paneName(&p, stored)
 	shortID := p.PaneID
 	if idx := strings.LastIndex(p.PaneID, ":"); idx >= 0 {
 		shortID = p.PaneID[idx+1:]
 	}
-	title := strings.TrimSpace(p.TerminalTitleStrip)
-	if title == "" {
-		title = strings.TrimSpace(p.TerminalTitle)
-	}
-	if strings.HasPrefix(title, "π -") || strings.HasPrefix(title, "pi -") || strings.Contains(title, "wiseman") {
-		title = ""
+	mainIdent := shortID
+	if name != "" {
+		mainIdent = name
 	}
 	var parts []string
-	parts = append(parts, shortID)
-	if title != "" {
-		parts = append(parts, title)
-	} else if p.Agent != "" && p.Agent != "unknown" && p.Agent != "none" {
+	parts = append(parts, mainIdent)
+	if p.Agent != "" && p.Agent != "unknown" && p.Agent != "none" {
 		parts = append(parts, p.Agent)
 	}
 	if pos != "" && pos != "split" {
@@ -1677,6 +1708,14 @@ func collectRows(s *snapshot, st *store) []row {
 		subpaneCount := 0
 		var subpaneIDs []string
 		subpanePos := ""
+		pName := ""
+		if p := paneByID[id]; p != nil {
+			stored := ""
+			if ps != nil {
+				stored = ps.Label
+			}
+			pName = paneName(p, stored)
+		}
 
 		if tabID != "" {
 			if info := layouts[tabID]; info != nil && len(info.SubpaneIDs) > 0 {
@@ -1688,7 +1727,11 @@ func collectRows(s *snapshot, st *store) []row {
 					parentPaneID = info.MainPaneID
 					subpanePos = info.Positions[id]
 					if p := paneByID[id]; p != nil {
-						label = subpaneDisplayLabel(s, *p, subpanePos)
+						stored := ""
+						if ps != nil {
+							stored = ps.Label
+						}
+						label = subpaneDisplayLabel(s, *p, stored, subpanePos)
 					}
 				}
 			}
@@ -1704,6 +1747,7 @@ func collectRows(s *snapshot, st *store) []row {
 			Priority: priority, PrioritySet: prioritySet,
 			IsSubpane: isSubpane, ParentPaneID: parentPaneID,
 			SubpaneCount: subpaneCount, SubpaneIDs: subpaneIDs, SubpanePos: subpanePos,
+			PaneName: pName,
 		})
 	}
 
@@ -3384,6 +3428,9 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 	} else if r.SubpaneCount > 0 {
 		if r.Expanded {
 			treePrefix = "▾ "
+			if r.PaneName != "" && r.PaneName != r.Label {
+				subBadge = " · " + r.PaneName
+			}
 		} else {
 			treePrefix = "▸ "
 			plural := "subpanes"
