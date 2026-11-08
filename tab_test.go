@@ -482,3 +482,29 @@ func TestRecentTabSortCyclesAndJevAttention(t *testing.T) {
 		t.Fatalf("expected boosted urgency for radar finish, got: %v", u)
 	}
 }
+
+func TestAgentRecentSinksZeroAgentAtAndTieBreaks(t *testing.T) {
+	now := time.Now().Unix()
+	list := []row{
+		{PaneID: "zero", Label: "zero", AgentAt: 0, Last: now},
+		{PaneID: "a1", Label: "a1", AgentAt: now - 100, Last: now - 500},
+		{PaneID: "a2", Label: "a2", AgentAt: now - 100, Last: now - 10},
+	}
+	sortBy(list, "agent-newest")
+	if list[0].PaneID != "a2" {
+		t.Fatalf("expected a2 first (tie-break by Last), got %s", list[0].PaneID)
+	}
+	if list[1].PaneID != "a1" {
+		t.Fatalf("expected a1 second, got %s", list[1].PaneID)
+	}
+	if list[2].PaneID != "zero" {
+		t.Fatalf("expected zero agentAt to sink to bottom, got %s", list[2].PaneID)
+	}
+	m := metricText(row{Last: 0, AgentAt: now - 60}, 100, "both")
+	if strings.Contains(m, "never") {
+		t.Fatalf("metricText should not say never, got: %q", m)
+	}
+	if !strings.Contains(m, "unviewed") || !strings.Contains(m, "1m ago") {
+		t.Fatalf("expected unviewed and 1m ago, got: %q", m)
+	}
+}

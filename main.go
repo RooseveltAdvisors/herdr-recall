@@ -1823,11 +1823,22 @@ func sortBy(list []row, how string) {
 			}
 			return list[i].Visits < list[j].Visits
 		}
-		if byAgent && list[i].AgentAt != list[j].AgentAt {
-			if desc {
-				return list[i].AgentAt > list[j].AgentAt
+		if byAgent {
+			// In agent-newest, sink panes with no recorded agent activity to bottom
+			if how == "agent-newest" && (list[i].AgentAt == 0 || list[j].AgentAt == 0) {
+				if list[i].AgentAt != list[j].AgentAt {
+					return list[i].AgentAt > list[j].AgentAt
+				}
+			} else if list[i].AgentAt != list[j].AgentAt {
+				if desc {
+					return list[i].AgentAt > list[j].AgentAt
+				}
+				return list[i].AgentAt < list[j].AgentAt
 			}
-			return list[i].AgentAt < list[j].AgentAt
+			// Tie-break agent sorting by operator viewed recency
+			if list[i].Last != list[j].Last {
+				return list[i].Last > list[j].Last
+			}
 		}
 		if !byTimes && !byAgent && list[i].Last != list[j].Last {
 			if desc {
@@ -2269,7 +2280,10 @@ func listColHeader(width int, metricKind string) string {
 }
 
 func metricText(r row, width int, kind string) string {
-	viewed := ago(r.Last)
+	viewed := "—"
+	if r.Last > 0 {
+		viewed = ago(r.Last)
+	}
 	agent := "—"
 	if r.AgentAt > 0 {
 		agent = ago(r.AgentAt)
@@ -2277,7 +2291,7 @@ func metricText(r row, width int, kind string) string {
 	times := "once"
 	switch {
 	case r.Visits == 0:
-		times = "never"
+		times = "unviewed"
 	case r.Visits > 1:
 		times = fmt.Sprintf("%d times", r.Visits)
 	}
@@ -2293,6 +2307,9 @@ func metricText(r row, width int, kind string) string {
 	}
 	if width < 96 {
 		return "v " + viewed + " · a " + agent
+	}
+	if r.Visits == 0 {
+		return "unviewed · a " + agent
 	}
 	return times + " · v " + viewed + " · a " + agent
 }
