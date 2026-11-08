@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/RooseveltAdvisors/vimline"
 	"github.com/RooseveltAdvisors/vimline/duration"
@@ -1318,6 +1320,7 @@ func closePopup() error {
 		return err
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
 	req, err := json.Marshal(map[string]any{
 		"id":     "recall-close-popup",
 		"method": "popup.close",
@@ -1328,6 +1331,18 @@ func closePopup() error {
 	}
 	if _, err := conn.Write(append(req, '\n')); err != nil {
 		return err
+	}
+	var resp struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil && err != io.EOF {
+		return err
+	}
+	if resp.Error != nil && resp.Error.Code != "popup_not_open" {
+		return fmt.Errorf("popup.close: %s", resp.Error.Message)
 	}
 	return nil
 }
@@ -2687,12 +2702,51 @@ func hintFooter(pairs ...string) string {
 	return strings.Join(parts, keyOverlay+"   "+keyReset)
 }
 
+// runeWidth returns the visual terminal column width of a rune.
+// Matches POSIX wcwidth / Unicode East Asian Width standard:
+// - 0 columns for combining marks, non-spacing runes, zero-width formatters.
+// - 2 columns for CJK ideographs, fullwidth forms, and emoji symbols.
+// - 1 column for standard ASCII and Latin/alphabetic characters.
+func runeWidth(r rune) int {
+	if r < 0x20 || (r >= 0x7f && r < 0xa0) {
+		return 0
+	}
+	if r == 0x200b || r == 0x200c || r == 0x200d || r == 0x2060 || r == 0x2063 || r == 0xfeff {
+		return 0
+	}
+	if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Mc, r) {
+		return 0
+	}
+	if (r >= 0x1100 && r <= 0x115f) ||
+		(r >= 0x2e80 && r <= 0xa4cf && r != 0x303f) ||
+		(r >= 0xac00 && r <= 0xd7a3) ||
+		(r >= 0xf900 && r <= 0xfaff) ||
+		(r >= 0xfe10 && r <= 0xfe19) ||
+		(r >= 0xfe30 && r <= 0xfe6f) ||
+		(r >= 0xff01 && r <= 0xff60) ||
+		(r >= 0xffe0 && r <= 0xffe6) ||
+		(r >= 0x1f300 && r <= 0x1f9ff) ||
+		(r >= 0x20000 && r <= 0x2fffd) ||
+		(r >= 0x30000 && r <= 0x3fffd) {
+		return 2
+	}
+	return 1
+}
+
+func stringWidth(s string) int {
+	w := 0
+	for _, r := range []rune(stripANSI(s)) {
+		w += runeWidth(r)
+	}
+	return w
+}
+
 // fitLine clips a rendered line to w display columns without breaking an ANSI
 // sequence, so a line can never wrap inside a narrow overlay pane.
 func fitLine(s string, w int) string {
 	rs := []rune(s)
 	var out strings.Builder
-	count := 0
+	col := 0
 	for i := 0; i < len(rs); i++ {
 		if rs[i] == 0x1b {
 			j := i
@@ -2707,12 +2761,13 @@ func fitLine(s string, w int) string {
 			out.WriteString(string(rs[i:]))
 			return out.String()
 		}
-		if count >= w {
+		rw := runeWidth(rs[i])
+		if col+rw > w {
 			out.WriteString(keyReset)
 			return out.String()
 		}
 		out.WriteRune(rs[i])
-		count++
+		col += rw
 	}
 	return out.String()
 }
@@ -3458,8 +3513,8 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 		}
 	}
 
-	pfxLen := len([]rune(treePrefix))
-	badgeLen := len([]rune(subBadge))
+	pfxLen := stringWidth(treePrefix)
+	badgeLen := stringWidth(subBadge)
 	remW := labelW - pfxLen - badgeLen
 	if remW < 4 {
 		remW = 4
@@ -3473,21 +3528,18 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 		suffixPlain += " · " + r.Note
 	}
 
-	maxName := max(4, remW-len([]rune(suffixPlain))-1)
+	maxName := max(4, remW-stringWidth(suffixPlain)-1)
 	clippedName := clipTail(r.Label, maxName)
-	rem := remW - len([]rune(clippedName)) - 3
+	rem := remW - stringWidth(clippedName) - 3
 	if rem < 4 {
 		clippedName = clipTail(r.Label, max(1, remW-1))
 		suffixPlain = ""
-		rem = remW - len([]rune(clippedName))
+		rem = remW - stringWidth(clippedName)
 	}
 
 	if selected {
-		core := clippedName + suffixPlain
-		if len([]rune(core)) < remW {
-			core += strings.Repeat(" ", remW-len([]rune(core)))
-		}
-		return pad(treePrefix+core+subBadge, labelW)
+		core := clippedName + subBadge + suffixPlain
+		return pad(treePrefix+core, labelW)
 	}
 
 	// Unselected styling
@@ -3517,13 +3569,13 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 		}
 		shown := clip(remind, max(1, rem-3))
 		b.WriteString(keySub + " · " + color + shown + keyReset)
-		rem -= len([]rune(shown)) + 3
+		rem -= stringWidth(shown) + 3
 	}
 
 	if r.Note != "" && rem >= 4 {
 		shown := clip(r.Note, rem-3)
 		b.WriteString(keySub + " · " + shown + keyReset)
-		rem -= len([]rune(shown)) + 3
+		rem -= stringWidth(shown) + 3
 	}
 
 	return pad(b.String(), labelW)
@@ -3723,6 +3775,12 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	if visible < 1 {
 		visible = 1
 	}
+	if len(rows) > 0 && sel >= len(rows) {
+		sel = len(rows) - 1
+	}
+	if sel < 0 {
+		sel = 0
+	}
 	start := scrollOffset
 	if sel < start {
 		start = sel
@@ -3850,7 +3908,29 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	}
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	if fv.Focused {
-		emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "esc", "browse", "ctrl+c", "close"))
+		if width < 80 {
+			emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "ctrl+c", "close"))
+		} else {
+			emit(hintFooter("enter", "jump", "j/k", "move", "esc", "normal", "esc", "browse", "ctrl+c", "close"))
+		}
+	} else if width < 80 {
+		spaceAction := ""
+		if sel >= 0 && sel < len(rows) {
+			if rows[sel].SubpaneCount > 0 {
+				if rows[sel].Expanded {
+					spaceAction = "collapse"
+				} else {
+					spaceAction = fmt.Sprintf("expand (%d)", rows[sel].SubpaneCount)
+				}
+			} else if rows[sel].IsSubpane {
+				spaceAction = "collapse"
+			}
+		}
+		if spaceAction != "" {
+			emit(hintFooter("enter", "switch", "space", spaceAction, "e", "done", "h", "remind", "/", "search"))
+		} else {
+			emit(hintFooter("enter", "switch", "e", "done", "p", "pri", "h", "remind", "/", "search"))
+		}
 	} else {
 		spaceAction := ""
 		if sel >= 0 && sel < len(rows) {
@@ -3870,7 +3950,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			emit(hintFooter("enter", "switch", "e", "done", "i", "teach", "p", "pri", "J", "jev", "h", "remind", "n", "note", "!", "block", "/", "search"))
 		}
 	}
-	extra := "arrows tabs   g i/l/t/r tab   space tree   m mark   z undo   b/w/i/d/a states   t c/r/x tab   ? help"
+	extra := "arrows tabs  g i/l/t/r tab  space tree  m mark  z undo  b/w/i/d/a states  t c/r/x tab  ? help"
 	if len(names) > 0 && names[active] == "Transcripts" {
 		extra = "esc list  j/k  ctrl-u/d half  ctrl-n/p type-nav  / type  1-4 filter"
 	}
@@ -3880,7 +3960,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	if !fv.Focused && (strings.TrimSpace(fv.Text) != "" || state != "") {
 		extra += "   esc clear"
 	}
-	emit(keyOverlay + extra + keyReset)
+	emit(fitLine(keyOverlay+extra+keyReset, width-1))
 	if status != "" {
 		emit(keySub + status + keyReset)
 	}
@@ -4422,30 +4502,49 @@ func renderPriority(width, height int, names []string, active int, r row, choice
 }
 
 func clipTail(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
+	rs := []rune(s)
+	totalW := 0
+	for _, r := range rs {
+		totalW += runeWidth(r)
+	}
+	if totalW <= n {
 		return s
 	}
 	if n <= 1 {
 		return "…"
 	}
-	return "…" + string(r[len(r)-(n-1):])
+	curW := 0
+	startIdx := len(rs)
+	for i := len(rs) - 1; i >= 0; i-- {
+		rw := runeWidth(rs[i])
+		if curW+rw > n-1 {
+			break
+		}
+		curW += rw
+		startIdx = i
+	}
+	return "…" + string(rs[startIdx:])
 }
 
 func clip(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
+	rs := []rune(s)
+	totalW := 0
+	for i, r := range rs {
+		rw := runeWidth(r)
+		if totalW+rw > n-1 {
+			return string(rs[:i]) + "…"
+		}
+		totalW += rw
 	}
-	return string(r[:n-1]) + "…"
+	return s
 }
 
 func pad(s string, n int) string {
-	r := []rune(stripANSI(s))
-	if len(r) >= n {
+	w := stringWidth(s)
+	if w >= n {
 		return s
 	}
-	return s + strings.Repeat(" ", n-len(r))
+	return s + strings.Repeat(" ", n-w)
 }
 
 func stripANSI(s string) string {
@@ -4559,7 +4658,7 @@ func runPicker() int {
 	remindExisting := int64(0)
 	remindSel := 0
 	remindPointed := ""
-	lastDoneID := ""
+	doneStack := []string{}
 	remindEd := vimline.New("")
 	remindPaneID := ""
 	remindLabel := ""
@@ -5789,9 +5888,12 @@ func runPicker() int {
 				refreshTx(searchEd.String())
 				continue
 			}
-			// Half-page while the query is focused (do not let ctrl-u clear the field).
-			if views(st)[tab].Kind == "transcripts" && (key == "ctrl-u" || key == "ctrl-d") {
-				step := txHalfPage(h)
+			// Half-page navigation while search is focused across all tabs (never delete query text).
+			if key == "ctrl-u" || key == "ctrl-d" {
+				step := half
+				if views(st)[tab].Kind == "transcripts" {
+					step = txHalfPage(h)
+				}
 				if key == "ctrl-d" {
 					sel = moveSel(sel, step, len(rows))
 				} else {
@@ -6303,19 +6405,25 @@ func runPicker() int {
 				status = "moved to inbox: " + r.Label
 			}
 			if saveSt(0) {
-				lastDoneID = doneID
+				if doneID != "" {
+					doneStack = append(doneStack, doneID)
+				}
 			}
 			rebuild()
 		case (key == "z" || key == "u") && !searching && !showHelp:
 			// z is undo. u stays as the vim alias.
-			if lastDoneID == "" {
+			if len(doneStack) == 0 {
+				status = "undo history empty"
 				break
 			}
-			if st.Panes[lastDoneID] == nil {
+			popID := doneStack[len(doneStack)-1]
+			doneStack = doneStack[:len(doneStack)-1]
+			if st.Panes[popID] == nil {
+				status = "cannot undo: pane removed"
 				break
 			}
-			status = "undone"
-			lastDoneID = undoDone(st, lastDoneID, func() bool { return saveSt(0) })
+			undoDone(st, popID, func() bool { return saveSt(0) })
+			status = "undone: " + st.Panes[popID].Label
 			rebuild()
 		case key == "h" && !searching && !showHelp:
 			if !pointed() {
@@ -6427,6 +6535,8 @@ func runPicker() int {
 		case key == "a" && !searching && !showHelp:
 			stateFilter = ""
 			searchEd = vimline.New("")
+			sel = 0
+			rebuild()
 		case key == "r" && !searching && !showHelp && views(st)[tab].Kind == "transcripts":
 			txRole = nextTxRole(txRole)
 			txStamp = ""

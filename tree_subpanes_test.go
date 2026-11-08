@@ -256,3 +256,23 @@ func TestTreeSubpanesPTYNavigation(t *testing.T) {
 		t.Fatalf("expected collapsed again after second space in frame:\n%s", out)
 	}
 }
+
+func TestSubpaneBadgePositionStableBetweenSelectedAndUnselected(t *testing.T) {
+	r := row{
+		Label:        "tree-tab",
+		SubpaneCount: 1,
+		Expanded:     false,
+	}
+	labelW := 60
+	unsel := stripANSI(formatLabelWithTree(r, "", labelW, false, false))
+	sel := stripANSI(formatLabelWithTree(r, "", labelW, true, false))
+
+	if unsel != sel {
+		t.Fatalf("badge position jumped between selected and unselected:\nunselected: %q\nselected:   %q", unsel, sel)
+	}
+
+	// Verify badge is immediately adjacent to the name, not right-aligned at the edge
+	if !strings.HasPrefix(unsel, "▸ tree-tab · 1 subpane") {
+		t.Fatalf("expected badge adjacent to name, got: %q", unsel)
+	}
+}

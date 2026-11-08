@@ -1177,6 +1177,12 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 	if hitsVisible < 1 {
 		hitsVisible = 1
 	}
+	if len(hits) > 0 && sel >= len(hits) {
+		sel = len(hits) - 1
+	}
+	if sel < 0 {
+		sel = 0
+	}
 	start := scrollOffset
 	if sel < start {
 		start = sel
@@ -1186,6 +1192,9 @@ func renderTranscriptSplit(width, height int, names []string, active int, fv vim
 	}
 	if start < 0 {
 		start = 0
+	}
+	if maxStart := max(0, len(hits)-hitsVisible); start > maxStart {
+		start = maxStart
 	}
 	now := time.Now()
 	for i := 0; i < body; i++ {
