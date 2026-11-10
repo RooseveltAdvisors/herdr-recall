@@ -508,3 +508,26 @@ func TestAgentRecentSinksZeroAgentAtAndTieBreaks(t *testing.T) {
 		t.Fatalf("expected unviewed and 1m ago, got: %q", m)
 	}
 }
+
+func TestLongNotePreservesPaneNameAndDisplaysFullNote(t *testing.T) {
+	longNote := "waiting for apple developer program sending activation detail with medical credentials"
+	r := row{
+		Label: "portal-mobile-app",
+		Note:  longNote,
+	}
+	labelW := 50
+	frame := formatLabelWithTree(r, "overdue 2h", labelW, false, true)
+	plain := stripANSI(frame)
+	if !strings.Contains(plain, "portal-mobile-app") {
+		t.Fatalf("long note crushed pane name, got:\n%q", plain)
+	}
+	if stringWidth(frame) != labelW {
+		t.Fatalf("visual width %d != labelW %d", stringWidth(frame), labelW)
+	}
+
+	rows := []row{r}
+	rendered := stripANSI(renderFrame(rows, 0, 0, vimline.View{Label: "/"}, "", 100, 20, []string{"Inbox"}, 0, "both", ""))
+	if !strings.Contains(rendered, "📝 note: "+longNote) {
+		t.Fatalf("expected full unclipped note in footer:\n%s", rendered)
+	}
+}

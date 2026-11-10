@@ -3520,25 +3520,37 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 		remW = 4
 	}
 
-	suffixPlain := ""
+	remindW := 0
 	if remind != "" {
-		suffixPlain += " · " + remind
-	}
-	if r.Note != "" {
-		suffixPlain += " · " + r.Note
+		remindW = stringWidth(remind) + 3 // " · " + remind
 	}
 
-	maxName := max(4, remW-stringWidth(suffixPlain)-1)
+	// Name is primary: guarantee space so long notes never crush the tab name to 4 letters.
+	maxName := remW - remindW
+	if maxName < 16 {
+		maxName = max(4, remW-remindW)
+	}
 	clippedName := clipTail(r.Label, maxName)
-	rem := remW - stringWidth(clippedName) - 3
-	if rem < 4 {
-		clippedName = clipTail(r.Label, max(1, remW-1))
-		suffixPlain = ""
-		rem = remW - stringWidth(clippedName)
+	rem := remW - stringWidth(clippedName) - remindW
+
+	// Note preview: uses remaining space if ample (>=14); otherwise a compact indicator " · 📝"
+	notePreview := ""
+	if r.Note != "" {
+		cleanNote := strings.ReplaceAll(r.Note, "\n", " ")
+		if rem >= 14 {
+			notePreview = " · " + clip(cleanNote, rem-3)
+		} else if rem >= 5 {
+			notePreview = " · 📝"
+		}
+	}
+
+	remindPlain := ""
+	if remind != "" {
+		remindPlain = " · " + remind
 	}
 
 	if selected {
-		core := clippedName + subBadge + suffixPlain
+		core := clippedName + subBadge + remindPlain + notePreview
 		return pad(treePrefix+core, labelW)
 	}
 
@@ -3562,20 +3574,16 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 		b.WriteString(keyOverlay + subBadge + keyReset)
 	}
 
-	if remind != "" && rem >= 4 {
+	if remind != "" {
 		color := keyAccentFg
 		if due {
 			color = keyStBad
 		}
-		shown := clip(remind, max(1, rem-3))
-		b.WriteString(keySub + " · " + color + shown + keyReset)
-		rem -= stringWidth(shown) + 3
+		b.WriteString(keySub + " · " + color + remind + keyReset)
 	}
 
-	if r.Note != "" && rem >= 4 {
-		shown := clip(r.Note, rem-3)
-		b.WriteString(keySub + " · " + shown + keyReset)
-		rem -= stringWidth(shown) + 3
+	if notePreview != "" {
+		b.WriteString(keySub + notePreview + keyReset)
 	}
 
 	return pad(b.String(), labelW)
@@ -3768,7 +3776,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	headerN := len(lines)
 	footerN := 3 // separator plus two hint lines
-	if status != "" {
+	if status != "" || (sel >= 0 && sel < len(rows) && rows[sel].Note != "") {
 		footerN++
 	}
 	visible := maxLines - headerN - footerN
@@ -3963,6 +3971,9 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	emit(fitLine(keyOverlay+extra+keyReset, width-1))
 	if status != "" {
 		emit(keySub + status + keyReset)
+	} else if sel >= 0 && sel < len(rows) && rows[sel].Note != "" {
+		cleanNote := strings.ReplaceAll(rows[sel].Note, "\n", " ↵ ")
+		emit(fitLine(keyAccentFg+"📝 note: "+keyReset+keyText+cleanNote+keyReset, width-1))
 	}
 	if len(lines) > maxLines {
 		lines = lines[:maxLines]
