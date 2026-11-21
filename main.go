@@ -2347,9 +2347,13 @@ func activeSortLabel(st *store, v view, mode int) string {
 // and visited (operator last access).
 func listColHeader(width int, metricKind string) string {
 	narrow := width < 80
+	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	starW, dotW, priW := 2, 2, 3
 	actW := 24
 	visW := 14
+	if isVisits && width >= 95 {
+		visW = 20
+	}
 	if narrow {
 		actW = 14
 		visW = 0
@@ -2373,7 +2377,7 @@ func listColHeader(width int, metricKind string) string {
 		visTitle = "visited ▼"
 	case "oldest":
 		visTitle = "visited ▲"
-	case "most":
+	case "most", "times":
 		visTitle = "visits ▼"
 	case "least":
 		visTitle = "visits ▲"
@@ -2455,25 +2459,49 @@ func agentActivityCell(r row, width int, selected bool, now int64) string {
 	return pad(color+clipped+keyReset, actW)
 }
 
-func visitedCell(r row, width int, selected bool, now int64) string {
+func visitedCell(r row, width int, selected bool, now int64, metricKind string) string {
 	if width < 80 {
 		return ""
 	}
+	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	visW := 14
+	if isVisits && width >= 95 {
+		visW = 20
+	}
 
 	plain := ""
-	if r.Last == 0 {
-		plain = "unopened"
-	} else if now >= r.Last {
-		d := now - r.Last
-		phrase := durationPhrase(d) + " ago"
-		if width >= 105 && r.Visits > 1 {
-			plain = fmt.Sprintf("%s (%dx)", phrase, r.Visits)
+	if isVisits {
+		// Most used tab: lead with visit count!
+		times := "once"
+		switch {
+		case r.Visits == 0:
+			times = "never"
+		case r.Visits > 1:
+			times = fmt.Sprintf("%d visits", r.Visits)
+		default:
+			times = "1 visit"
+		}
+		if r.Last > 0 && width >= 95 {
+			d := now - r.Last
+			plain = fmt.Sprintf("%s (%s ago)", times, durationPhrase(d))
 		} else {
-			plain = phrase
+			plain = times
 		}
 	} else {
-		plain = "just now"
+		// Recent / default tabs: lead with recency!
+		if r.Last == 0 {
+			plain = "unopened"
+		} else if now >= r.Last {
+			d := now - r.Last
+			phrase := durationPhrase(d) + " ago"
+			if width >= 105 && r.Visits > 1 {
+				plain = fmt.Sprintf("%s (%dx)", phrase, r.Visits)
+			} else {
+				plain = phrase
+			}
+		} else {
+			plain = "just now"
+		}
 	}
 
 	clipped := clip(plain, visW)
@@ -4021,9 +4049,13 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
+	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	starW, dotW, priW := 2, 2, 3
 	actW := 24
 	visW := 14
+	if isVisits && width >= 95 {
+		visW = 20
+	}
 	if narrow {
 		actW = 14
 		visW = 0
@@ -4070,7 +4102,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			priCell = pad(badge+" ", priW)
 		}
 		actCell := agentActivityCell(r, width, i == sel, now)
-		visCell := visitedCell(r, width, i == sel, now)
+		visCell := visitedCell(r, width, i == sel, now, metricKind)
 
 		if i == sel {
 			// Selected row: keep status color on the dot and priority color on
