@@ -565,14 +565,19 @@ func TestIntuitiveColumnsAndRichAgentActivity(t *testing.T) {
 	}
 
 	rUnopened := row{Last: 0}
-	visUnopened := stripANSI(visitedCell(rUnopened, 100, false, now))
+	visUnopened := stripANSI(visitedCell(rUnopened, 100, false, now, "newest"))
 	if !strings.Contains(visUnopened, "unopened") {
 		t.Fatalf("expected 'unopened', got %q", visUnopened)
 	}
 
 	rVisited := row{Last: now - 600, Visits: 4}
-	visVisited := stripANSI(visitedCell(rVisited, 110, false, now))
+	visVisited := stripANSI(visitedCell(rVisited, 110, false, now, "newest"))
 	if !strings.Contains(visVisited, "10m ago (4x)") {
 		t.Fatalf("expected '10m ago (4x)', got %q", visVisited)
+	}
+
+	visMostUsed := stripANSI(visitedCell(rVisited, 100, false, now, "most"))
+	if !strings.Contains(visMostUsed, "4 visits") {
+		t.Fatalf("expected '4 visits' in Most used, got %q", visMostUsed)
 	}
 }
