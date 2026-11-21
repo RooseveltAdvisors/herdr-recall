@@ -1544,19 +1544,32 @@ func determineSubpanePos(mainRect, subRect rect) string {
 	if subRect.Y > mainRect.Y && subRect.X > mainRect.X {
 		return "bottom-right"
 	}
+	if subRect.Y < mainRect.Y && subRect.X < mainRect.X {
+		return "top-left"
+	}
 	if subRect.Y > mainRect.Y {
 		return "bottom"
+	}
+	if subRect.Y < mainRect.Y {
+		return "top"
 	}
 	if subRect.X > mainRect.X {
 		return "right"
 	}
+	if subRect.X < mainRect.X {
+		return "left"
+	}
 	return "split"
 }
 
-func detectTabPaneLayouts(s *snapshot) map[string]*tabLayoutInfo {
+func detectTabPaneLayouts(s *snapshot, stores ...*store) map[string]*tabLayoutInfo {
 	res := map[string]*tabLayoutInfo{}
 	if s == nil {
 		return res
+	}
+	var st *store
+	if len(stores) > 0 {
+		st = stores[0]
 	}
 	// 1. From layouts: accurate geometry (X, Y)
 	for _, l := range s.Layouts {
@@ -1569,19 +1582,60 @@ func detectTabPaneLayouts(s *snapshot) map[string]*tabLayoutInfo {
 		if len(valid) == 0 {
 			continue
 		}
-		// Sort by Y ascending, then X ascending -> top-left pane is first!
-		sort.Slice(valid, func(i, j int) bool {
-			if valid[i].Rect.Y != valid[j].Rect.Y {
-				return valid[i].Rect.Y < valid[j].Rect.Y
+
+		// Select the pane the operator actually used in this tab:
+		// 1. Pane with highest st.Panes[pid].Last (most recently accessed by operator).
+		// 2. Focused pane in Herdr for this tab (l.FocusedPaneID).
+		// 3. Fall back to top-left pane by geometry (min Y, then min X).
+		var main layoutPane
+		bestLast := int64(0)
+		for _, lp := range valid {
+			if st != nil {
+				if ps := st.Panes[lp.PaneID]; ps != nil && ps.Last > bestLast {
+					bestLast = ps.Last
+					main = lp
+				}
 			}
-			return valid[i].Rect.X < valid[j].Rect.X
-		})
-		main := valid[0]
+		}
+		if bestLast == 0 {
+			foundFocused := false
+			if l.FocusedPaneID != "" {
+				for _, lp := range valid {
+					if lp.PaneID == l.FocusedPaneID {
+						main = lp
+						foundFocused = true
+						break
+					}
+				}
+			}
+			if !foundFocused {
+				sort.Slice(valid, func(i, j int) bool {
+					if valid[i].Rect.Y != valid[j].Rect.Y {
+						return valid[i].Rect.Y < valid[j].Rect.Y
+					}
+					return valid[i].Rect.X < valid[j].Rect.X
+				})
+				main = valid[0]
+			}
+		}
+
 		info := &tabLayoutInfo{
 			MainPaneID: main.PaneID,
 			Positions:  map[string]string{},
 		}
-		for _, sub := range valid[1:] {
+		var subs []layoutPane
+		for _, lp := range valid {
+			if lp.PaneID != main.PaneID {
+				subs = append(subs, lp)
+			}
+		}
+		sort.Slice(subs, func(i, j int) bool {
+			if subs[i].Rect.Y != subs[j].Rect.Y {
+				return subs[i].Rect.Y < subs[j].Rect.Y
+			}
+			return subs[i].Rect.X < subs[j].Rect.X
+		})
+		for _, sub := range subs {
 			info.SubpaneIDs = append(info.SubpaneIDs, sub.PaneID)
 			info.Positions[sub.PaneID] = determineSubpanePos(main.Rect, sub.Rect)
 		}
@@ -1596,13 +1650,28 @@ func detectTabPaneLayouts(s *snapshot) map[string]*tabLayoutInfo {
 	}
 	for tid, pids := range panesByTab {
 		if res[tid] == nil && len(pids) > 0 {
+			var mainID string
+			bestLast := int64(0)
+			for _, pid := range pids {
+				if st != nil {
+					if ps := st.Panes[pid]; ps != nil && ps.Last > bestLast {
+						bestLast = ps.Last
+						mainID = pid
+					}
+				}
+			}
+			if mainID == "" {
+				mainID = pids[0]
+			}
 			info := &tabLayoutInfo{
-				MainPaneID: pids[0],
+				MainPaneID: mainID,
 				Positions:  map[string]string{},
 			}
-			for _, sub := range pids[1:] {
-				info.SubpaneIDs = append(info.SubpaneIDs, sub)
-				info.Positions[sub] = "split"
+			for _, subID := range pids {
+				if subID != mainID {
+					info.SubpaneIDs = append(info.SubpaneIDs, subID)
+					info.Positions[subID] = "split"
+				}
 			}
 			res[tid] = info
 		}
@@ -1666,7 +1735,7 @@ func collectRows(s *snapshot, st *store) []row {
 	for _, p := range s.Panes {
 		addID(p.PaneID)
 	}
-	layouts := detectTabPaneLayouts(s)
+	layouts := detectTabPaneLayouts(s, st)
 	paneByID := map[string]*paneRec{}
 	for i := range s.Panes {
 		paneByID[s.Panes[i].PaneID] = &s.Panes[i]

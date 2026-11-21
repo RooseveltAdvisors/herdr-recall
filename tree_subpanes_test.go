@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectTabPaneLayoutsTopLeftIsMain(t *testing.T) {
@@ -274,5 +275,44 @@ func TestSubpaneBadgePositionStableBetweenSelectedAndUnselected(t *testing.T) {
 	// Verify badge is immediately adjacent to the name, not right-aligned at the edge
 	if !strings.HasPrefix(unsel, "▸ tree-tab · 1 subpane") {
 		t.Fatalf("expected badge adjacent to name, got: %q", unsel)
+	}
+}
+
+func TestDetectTabPaneLayoutsPicksActualUsedPane(t *testing.T) {
+	now := time.Now().Unix()
+	snap := &snapshot{
+		Panes: []paneRec{
+			{PaneID: "w1:pTopLeft", TabID: "t1", WorkspaceID: "w1"},
+			{PaneID: "w1:pRight", TabID: "t1", WorkspaceID: "w1"},
+		},
+		Layouts: []layoutRec{
+			{
+				TabID: "t1",
+				Panes: []layoutPane{
+					{PaneID: "w1:pTopLeft", Rect: rect{X: 0, Y: 0, Width: 80, Height: 40}},
+					{PaneID: "w1:pRight", Rect: rect{X: 80, Y: 0, Width: 80, Height: 40}},
+				},
+			},
+		},
+	}
+	st := &store{Version: 2, Panes: map[string]*paneStat{
+		"w1:pTopLeft": {Last: now - 3600, Label: "old-runner"},
+		"w1:pRight":   {Last: now - 10, Label: "active-editor"},
+	}}
+
+	layouts := detectTabPaneLayouts(snap, st)
+	info := layouts["t1"]
+	if info == nil {
+		t.Fatal("expected layout for t1")
+	}
+	// The pane actually used most recently (w1:pRight) must be Main!
+	if info.MainPaneID != "w1:pRight" {
+		t.Fatalf("expected active-editor w1:pRight as main, got %q", info.MainPaneID)
+	}
+	if len(info.SubpaneIDs) != 1 || info.SubpaneIDs[0] != "w1:pTopLeft" {
+		t.Fatalf("expected w1:pTopLeft as subpane, got %v", info.SubpaneIDs)
+	}
+	if info.Positions["w1:pTopLeft"] != "left" {
+		t.Fatalf("expected left position relative to main, got %q", info.Positions["w1:pTopLeft"])
 	}
 }
