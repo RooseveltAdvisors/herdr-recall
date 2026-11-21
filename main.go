@@ -1390,37 +1390,39 @@ func focusPane(paneID string) error {
 // ---------------------------------------------------------------------------
 
 type row struct {
-	PaneID        string
-	WorkspaceID   string
-	Workspace     string
-	Agent         string
-	CWD           string
-	Label         string
-	Note          string
-	Section       string
-	Visits        int64
-	Last          int64 // operator viewed
-	AgentAt       int64 // agent last meaningful status change
-	Status        string
-	Fav           bool
-	ManualBlocked bool
-	RemindAt      int64
-	Done          bool
-	DoneAt        int64
-	DoneState     string
-	SnoozeMode    string
-	SnoozeState   string
-	Priority      int
-	PrioritySet   bool
-	TabID         string   `json:"tab_id,omitempty"`
-	IsSubpane     bool     `json:"is_subpane,omitempty"`
-	ParentPaneID  string   `json:"parent_pane_id,omitempty"`
-	SubpaneCount  int      `json:"subpane_count,omitempty"`
-	SubpaneIDs    []string `json:"subpane_ids,omitempty"`
-	SubpanePos    string   `json:"subpane_pos,omitempty"`
-	TreeBranch    string   `json:"tree_branch,omitempty"`
-	Expanded      bool     `json:"expanded,omitempty"`
-	PaneName      string   `json:"pane_name,omitempty"`
+	PaneID          string
+	WorkspaceID     string
+	Workspace       string
+	Agent           string
+	CWD             string
+	Label           string
+	Note            string
+	Section         string
+	Visits          int64
+	Last            int64 // operator viewed
+	AgentAt         int64 // agent last meaningful status change
+	Status          string
+	Fav             bool
+	ManualBlocked   bool
+	RemindAt        int64
+	Done            bool
+	DoneAt          int64
+	DoneState       string
+	SnoozeMode      string
+	SnoozeState     string
+	Priority        int
+	PrioritySet     bool
+	TabID           string   `json:"tab_id,omitempty"`
+	IsSubpane       bool     `json:"is_subpane,omitempty"`
+	ParentPaneID    string   `json:"parent_pane_id,omitempty"`
+	SubpaneCount    int      `json:"subpane_count,omitempty"`
+	SubpaneIDs      []string `json:"subpane_ids,omitempty"`
+	SubpanePos      string   `json:"subpane_pos,omitempty"`
+	TreeBranch      string   `json:"tree_branch,omitempty"`
+	Expanded        bool     `json:"expanded,omitempty"`
+	PaneName        string   `json:"pane_name,omitempty"`
+	IsActiveInTab   bool     `json:"is_active_in_tab,omitempty"`
+	ActivePaneIdent string   `json:"active_pane_ident,omitempty"`
 }
 
 // isFloaxScratch reports herdr-floax scratch panes. Parked floax lives in a
@@ -1535,9 +1537,10 @@ func displayLabel(s *snapshot, id, stored string) string {
 }
 
 type tabLayoutInfo struct {
-	MainPaneID string
-	SubpaneIDs []string
-	Positions  map[string]string // paneID -> "right" / "bottom" / "bottom-right" / "split"
+	MainPaneID    string
+	FocusedPaneID string
+	SubpaneIDs    []string
+	Positions     map[string]string // paneID -> "right" / "bottom" / "bottom-right" / "split"
 }
 
 func determineSubpanePos(mainRect, subRect rect) string {
@@ -1620,8 +1623,9 @@ func detectTabPaneLayouts(s *snapshot, stores ...*store) map[string]*tabLayoutIn
 		}
 
 		info := &tabLayoutInfo{
-			MainPaneID: main.PaneID,
-			Positions:  map[string]string{},
+			MainPaneID:    main.PaneID,
+			FocusedPaneID: l.FocusedPaneID,
+			Positions:     map[string]string{},
 		}
 		var subs []layoutPane
 		for _, lp := range valid {
@@ -1793,6 +1797,8 @@ func collectRows(s *snapshot, st *store) []row {
 		var subpaneIDs []string
 		subpanePos := ""
 		pName := ""
+		isActiveInTab := false
+		activeIdent := ""
 		if p := paneByID[id]; p != nil {
 			stored := ""
 			if ps != nil {
@@ -1806,6 +1812,18 @@ func collectRows(s *snapshot, st *store) []row {
 				if id == info.MainPaneID {
 					subpaneCount = len(info.SubpaneIDs)
 					subpaneIDs = info.SubpaneIDs
+					isActiveInTab = true
+					activeP := paneByID[info.MainPaneID]
+					activeName := paneName(activeP, "")
+					if activeName != "" && activeName != label {
+						activeIdent = activeName
+					} else {
+						shortID := info.MainPaneID
+						if idx := strings.LastIndex(info.MainPaneID, ":"); idx >= 0 {
+							shortID = info.MainPaneID[idx+1:]
+						}
+						activeIdent = shortID
+					}
 				} else {
 					isSubpane = true
 					parentPaneID = info.MainPaneID
@@ -1816,6 +1834,9 @@ func collectRows(s *snapshot, st *store) []row {
 							stored = ps.Label
 						}
 						label = subpaneDisplayLabel(s, *p, stored, subpanePos)
+					}
+					if info.FocusedPaneID == id {
+						isActiveInTab = true
 					}
 				}
 			}
@@ -1831,7 +1852,8 @@ func collectRows(s *snapshot, st *store) []row {
 			Priority: priority, PrioritySet: prioritySet,
 			IsSubpane: isSubpane, ParentPaneID: parentPaneID,
 			SubpaneCount: subpaneCount, SubpaneIDs: subpaneIDs, SubpanePos: subpanePos,
-			PaneName: pName,
+			PaneName:      pName,
+			IsActiveInTab: isActiveInTab, ActivePaneIdent: activeIdent,
 		})
 	}
 
@@ -3560,18 +3582,22 @@ func formatLabelWithNote(label, note, remind string, labelW int, selected, due b
 func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) string {
 	treePrefix := "  "
 	subBadge := ""
+	activePillPlain := ""
 	if r.IsSubpane {
 		branch := r.TreeBranch
 		if branch == "" {
 			branch = "└─ "
 		}
 		treePrefix = "  " + branch
+		if r.IsActiveInTab {
+			activePillPlain = " [active]"
+		}
 	} else if r.SubpaneCount > 0 {
+		if r.ActivePaneIdent != "" {
+			activePillPlain = " [active: " + r.ActivePaneIdent + "]"
+		}
 		if r.Expanded {
 			treePrefix = "▾ "
-			if r.PaneName != "" && r.PaneName != r.Label {
-				subBadge = " · " + r.PaneName
-			}
 		} else {
 			treePrefix = "▸ "
 			plural := "subpanes"
@@ -3584,7 +3610,8 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 
 	pfxLen := stringWidth(treePrefix)
 	badgeLen := stringWidth(subBadge)
-	remW := labelW - pfxLen - badgeLen
+	pillLen := stringWidth(activePillPlain)
+	remW := labelW - pfxLen - badgeLen - pillLen
 	if remW < 4 {
 		remW = 4
 	}
@@ -3619,7 +3646,7 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 	}
 
 	if selected {
-		core := clippedName + subBadge + remindPlain + notePreview
+		core := clippedName + activePillPlain + subBadge + remindPlain + notePreview
 		return pad(treePrefix+core, labelW)
 	}
 
@@ -3638,6 +3665,14 @@ func formatLabelWithTree(r row, remind string, labelW int, selected, due bool) s
 	}
 
 	b.WriteString(keyText + clippedName + keyReset)
+
+	if activePillPlain != "" {
+		if r.IsSubpane {
+			b.WriteString(keySurface + " [" + keyReset + keyStGood + "active" + keyReset + keySurface + "]" + keyReset)
+		} else {
+			b.WriteString(keySurface + " [" + keyReset + keyAccentFg + "active: " + keyReset + keyText + r.ActivePaneIdent + keyReset + keySurface + "]" + keyReset)
+		}
+	}
 
 	if subBadge != "" {
 		b.WriteString(keyOverlay + subBadge + keyReset)

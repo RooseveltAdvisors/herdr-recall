@@ -316,3 +316,58 @@ func TestDetectTabPaneLayoutsPicksActualUsedPane(t *testing.T) {
 		t.Fatalf("expected left position relative to main, got %q", info.Positions["w1:pTopLeft"])
 	}
 }
+
+func TestActivePanePillNextToItemName(t *testing.T) {
+	now := time.Now().Unix()
+	snap := &snapshot{
+		Panes: []paneRec{
+			{PaneID: "w1:pLeft", TabID: "t1", WorkspaceID: "w1", Label: "old-runner"},
+			{PaneID: "w1:pRight", TabID: "t1", WorkspaceID: "w1", Label: "active-editor"},
+		},
+		Tabs: []tabRec{
+			{TabID: "t1", Label: "multi-tab"},
+		},
+		Layouts: []layoutRec{
+			{
+				TabID:         "t1",
+				FocusedPaneID: "w1:pRight",
+				Panes: []layoutPane{
+					{PaneID: "w1:pLeft", Rect: rect{X: 0, Y: 0, Width: 80, Height: 40}},
+					{PaneID: "w1:pRight", Rect: rect{X: 80, Y: 0, Width: 80, Height: 40}},
+				},
+			},
+		},
+	}
+	st := &store{Version: 2, Panes: map[string]*paneStat{
+		"w1:pLeft":  {Last: now - 3600, Label: "old-runner"},
+		"w1:pRight": {Last: now - 10, Label: "active-editor"},
+	}}
+
+	all := collectRows(snap, st)
+	if len(all) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(all))
+	}
+	var mainRow, subRow row
+	for _, r := range all {
+		if !r.IsSubpane {
+			mainRow = r
+		} else {
+			subRow = r
+		}
+	}
+
+	if mainRow.ActivePaneIdent != "active-editor" {
+		t.Fatalf("expected active-editor in ActivePaneIdent, got %q", mainRow.ActivePaneIdent)
+	}
+
+	frame := stripANSI(formatLabelWithTree(mainRow, "", 70, false, false))
+	if !strings.Contains(frame, "[active: active-editor]") {
+		t.Fatalf("expected [active: active-editor] pill in frame, got:\n%s", frame)
+	}
+
+	subRow.IsActiveInTab = true
+	subFrame := stripANSI(formatLabelWithTree(subRow, "", 70, false, false))
+	if !strings.Contains(subFrame, "[active]") {
+		t.Fatalf("expected [active] in subpane frame, got:\n%s", subFrame)
+	}
+}
