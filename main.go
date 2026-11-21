@@ -2343,46 +2343,157 @@ func activeSortLabel(st *store, v view, mode int) string {
 	}
 }
 
-// listColHeader names the list columns. Viewed = operator access (Last).
-// Agent = last meaningful agent status change (AgentAt).
+// listColHeader names the list columns: name, agent activity (Herdr status + duration + radar),
+// and visited (operator last access).
 func listColHeader(width int, metricKind string) string {
 	narrow := width < 80
-	starW, dotW, priW, statusW, metaW := 2, 2, 3, 10, 22
+	starW, dotW, priW := 2, 2, 3
+	actW := 24
+	visW := 14
 	if narrow {
-		statusW, metaW = 0, 8
+		actW = 14
+		visW = 0
 	}
-	labelW := width - starW - dotW - priW - statusW - metaW
+	labelW := width - starW - dotW - priW - actW - visW
 	if labelW < 4 {
 		labelW = 4
 	}
+
 	name := pad(clip("name", labelW), labelW)
 	pri := pad("", priW)
-	st := ""
-	if statusW > 0 {
-		st = pad(clip("status", statusW), statusW)
+
+	actTitle := "agent activity"
+	visTitle := "visited"
+	switch metricKind {
+	case "agent-newest":
+		actTitle = "agent activity ▼"
+	case "agent-oldest":
+		actTitle = "agent activity ▲"
+	case "newest", "last":
+		visTitle = "visited ▼"
+	case "oldest":
+		visTitle = "visited ▲"
+	case "most":
+		visTitle = "visits ▼"
+	case "least":
+		visTitle = "visits ▲"
 	}
-	meta := "viewed"
-	if width >= 72 {
-		switch metricKind {
-		case "agent-newest", "agent-oldest":
-			meta = "viewed · [agent]"
-		case "newest", "oldest", "last":
-			meta = "[viewed] · agent"
-		default:
-			meta = "viewed · agent"
+
+	act := pad(clip(actTitle, actW), actW)
+	vis := ""
+	if visW > 0 {
+		vis = pad(clip(visTitle, visW), visW)
+	}
+
+	return keyOverlay + "  " + name + pri + act + vis + keyReset
+}
+
+func agentActivityCell(r row, width int, selected bool, now int64) string {
+	narrow := width < 80
+	actW := 24
+	if narrow {
+		actW = 14
+	}
+
+	if r.Done && !r.ManualBlocked {
+		mark := "✓ done"
+		if selected {
+			return pad(mark, actW)
+		}
+		return pad(keyStGood+mark+keyReset, actW)
+	}
+
+	sw := statusWord(r.Status)
+	_, scol := statusMark(r.Status)
+
+	d := int64(0)
+	if r.AgentAt > 0 && now >= r.AgentAt {
+		d = now - r.AgentAt
+	}
+
+	plain := ""
+	color := scol
+	switch sw {
+	case "working":
+		if d > 0 {
+			plain = fmt.Sprintf("working %s", durationPhrase(d))
+		} else {
+			plain = "working"
+		}
+	case "done":
+		if d > 0 {
+			dur := durationPhrase(d)
+			if !narrow && d > 2*3600 && (r.Last == 0 || r.Last < r.AgentAt) {
+				plain = fmt.Sprintf("done %s ago (radar)", dur)
+			} else {
+				plain = fmt.Sprintf("done %s ago", dur)
+			}
+		} else {
+			plain = "done"
+		}
+	case "blocked":
+		if d > 0 {
+			plain = fmt.Sprintf("blocked (%s)", durationPhrase(d))
+		} else {
+			plain = "blocked"
+		}
+	case "idle":
+		if d > 3600 && !narrow {
+			plain = fmt.Sprintf("idle %s", durationPhrase(d))
+		} else {
+			plain = "idle"
+		}
+	default:
+		plain = "unknown"
+		color = keyOverlay
+	}
+
+	clipped := clip(plain, actW)
+	if selected {
+		return pad(clipped, actW)
+	}
+	return pad(color+clipped+keyReset, actW)
+}
+
+func visitedCell(r row, width int, selected bool, now int64) string {
+	if width < 80 {
+		return ""
+	}
+	visW := 14
+
+	plain := ""
+	if r.Last == 0 {
+		plain = "unopened"
+	} else if now >= r.Last {
+		d := now - r.Last
+		phrase := durationPhrase(d) + " ago"
+		if width >= 105 && r.Visits > 1 {
+			plain = fmt.Sprintf("%s (%dx)", phrase, r.Visits)
+		} else {
+			plain = phrase
 		}
 	} else {
-		switch metricKind {
-		case "agent-newest", "agent-oldest":
-			meta = "agent"
-		case "most", "least", "times":
-			meta = "used"
-		default:
-			meta = "viewed"
-		}
+		plain = "just now"
 	}
-	meta = pad(clip(meta, metaW), metaW)
-	return keyOverlay + "  " + name + pri + st + meta + keyReset
+
+	clipped := clip(plain, visW)
+	if selected {
+		return pad(clipped, visW)
+	}
+	return pad(keyOverlay+clipped+keyReset, visW)
+}
+
+func durationPhrase(d int64) string {
+	switch {
+	case d < 60:
+		return fmt.Sprintf("%ds", d)
+	case d < 3600:
+		return fmt.Sprintf("%dm", d/60)
+	case d < 86400:
+		return fmt.Sprintf("%dh", d/3600)
+	default:
+		return fmt.Sprintf("%dd", d/86400)
+	}
 }
 
 func metricText(r row, width int, kind string) string {
@@ -3910,16 +4021,14 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
-	// beads-tui order: status icon, then P0..P4 pill, then the title.
-	// priW reserves "P0 " (3 cells) so the pill sits right next to the status dot.
-	starW, dotW, priW, statusW, metaW := 2, 2, 3, 10, 22
+	starW, dotW, priW := 2, 2, 3
+	actW := 24
+	visW := 14
 	if narrow {
-		// The name is the point of the picker. A narrow pane keeps the coloured
-		// dot, the P0 pill, and a short "2m ago".
-		statusW, metaW = 0, 8
-		priW = 3
+		actW = 14
+		visW = 0
 	}
-	labelW := width - starW - dotW - priW - statusW - metaW
+	labelW := width - starW - dotW - priW - actW - visW
 	if labelW < 4 {
 		labelW = 4
 	}
@@ -3944,7 +4053,6 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 		if r.Fav {
 			starCell = keyStar + "*" + keyReset + " "
 		}
-		word := statusWord(r.Status)
 		glyph, scol := statusMark(r.Status)
 		// Prefix k puts the status dot immediately left of the name. The word
 		// stays in its own column, and any sticky note sits dim beside the name.
@@ -3961,24 +4069,9 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			// One space after the pill so it sits next to the status dot.
 			priCell = pad(badge+" ", priW)
 		}
-		var statusCell string
-		switch {
-		case r.Done && !r.ManualBlocked:
-			// Triage state outranks the agent word: this is what e just did.
-			mark := keyStGood + "\u2713 done"
-			if i == sel {
-				statusCell = pad(mark+keySelectFg, statusW)
-			} else {
-				statusCell = pad(mark+keyReset, statusW)
-			}
-		case statusW == 0 || word == "":
-			statusCell = strings.Repeat(" ", statusW)
-		case i == sel:
-			statusCell = pad(scol+word+keySelectFg, statusW)
-		default:
-			statusCell = pad(scol+word+keyReset, statusW)
-		}
-		metaCol := metricText(r, width, metricKind)
+		actCell := agentActivityCell(r, width, i == sel, now)
+		visCell := visitedCell(r, width, i == sel, now)
+
 		if i == sel {
 			// Selected row: keep status color on the dot and priority color on
 			// the P0 pill; the rest of the row uses the selection span.
@@ -3996,11 +4089,11 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			} else {
 				line += strings.Repeat(" ", priW)
 			}
-			line += labelCell + statusCell + metaCol
+			line += labelCell + actCell + visCell
 			emit(pad(line, width) + keyReset)
 		} else {
-			// status-dot + P0 + name (priority-colored) + status word + meta
-			emit(starCell + dotCell + " " + priCell + labelCell + statusCell + keyText + metaCol + keyReset)
+			// status-dot + P0 + name (priority-colored) + agent activity + visited
+			emit(starCell + dotCell + " " + priCell + labelCell + actCell + visCell + keyReset)
 		}
 		shown++
 	}
