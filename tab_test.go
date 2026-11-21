@@ -198,7 +198,7 @@ func TestObserveAgentActivityStampsFinish(t *testing.T) {
 		t.Fatalf("viewed-newest order = %+v", list)
 	}
 	h := listColHeader(100, "both")
-	if !strings.Contains(stripANSI(h), "viewed") || !strings.Contains(stripANSI(h), "agent") {
+	if !strings.Contains(stripANSI(h), "agent activity") || !strings.Contains(stripANSI(h), "visited") {
 		t.Fatalf("header = %q", h)
 	}
 }
@@ -435,14 +435,14 @@ func TestRecentTabSortCyclesAndJevAttention(t *testing.T) {
 		t.Fatalf("expected p3 first on agent quiet, got: %+v", quietList)
 	}
 
-	// Header inspection at wide terminal (>= 72 cols)
+	// Header inspection at wide terminal (>= 80 cols)
 	hDefault := listColHeader(90, "newest")
-	if !strings.Contains(hDefault, "[viewed] · agent") {
-		t.Fatalf("expected [viewed] · agent in header, got: %q", hDefault)
+	if !strings.Contains(hDefault, "visited ▼") {
+		t.Fatalf("expected visited ▼ in header, got: %q", hDefault)
 	}
 	hAgent := listColHeader(90, "agent-newest")
-	if !strings.Contains(hAgent, "viewed · [agent]") {
-		t.Fatalf("expected viewed · [agent] in header, got: %q", hAgent)
+	if !strings.Contains(hAgent, "agent activity ▼") {
+		t.Fatalf("expected agent activity ▼ in header, got: %q", hAgent)
 	}
 
 	// Row metric text at wide terminal (>= 72 cols) shows both v and a
@@ -529,5 +529,50 @@ func TestLongNotePreservesPaneNameAndDisplaysFullNote(t *testing.T) {
 	rendered := stripANSI(renderFrame(rows, 0, 0, vimline.View{Label: "/"}, "", 100, 20, []string{"Inbox"}, 0, "both", ""))
 	if !strings.Contains(rendered, "📝 note: "+longNote) {
 		t.Fatalf("expected full unclipped note in footer:\n%s", rendered)
+	}
+}
+
+func TestIntuitiveColumnsAndRichAgentActivity(t *testing.T) {
+	now := time.Now().Unix()
+	rWorking := row{Status: "working", AgentAt: now - 300, Last: now - 900}
+	actWorking := stripANSI(agentActivityCell(rWorking, 100, false, now))
+	if !strings.Contains(actWorking, "working 5m") {
+		t.Fatalf("expected 'working 5m', got %q", actWorking)
+	}
+
+	rDoneFresh := row{Status: "done", AgentAt: now - 180, Last: now - 900}
+	actDoneFresh := stripANSI(agentActivityCell(rDoneFresh, 100, false, now))
+	if !strings.Contains(actDoneFresh, "done 3m ago") {
+		t.Fatalf("expected 'done 3m ago', got %q", actDoneFresh)
+	}
+
+	rDoneRadar := row{Status: "done", AgentAt: now - 10800, Last: now - 20000}
+	actDoneRadar := stripANSI(agentActivityCell(rDoneRadar, 100, false, now))
+	if !strings.Contains(actDoneRadar, "done 3h ago (radar)") {
+		t.Fatalf("expected 'done 3h ago (radar)', got %q", actDoneRadar)
+	}
+
+	rBlocked := row{Status: "blocked", AgentAt: now - 1800, Last: now - 900}
+	actBlocked := stripANSI(agentActivityCell(rBlocked, 100, false, now))
+	if !strings.Contains(actBlocked, "blocked (30m)") {
+		t.Fatalf("expected 'blocked (30m)', got %q", actBlocked)
+	}
+
+	rTriaged := row{Done: true, Status: "done"}
+	actTriaged := stripANSI(agentActivityCell(rTriaged, 100, false, now))
+	if !strings.Contains(actTriaged, "✓ done") {
+		t.Fatalf("expected '✓ done', got %q", actTriaged)
+	}
+
+	rUnopened := row{Last: 0}
+	visUnopened := stripANSI(visitedCell(rUnopened, 100, false, now))
+	if !strings.Contains(visUnopened, "unopened") {
+		t.Fatalf("expected 'unopened', got %q", visUnopened)
+	}
+
+	rVisited := row{Last: now - 600, Visits: 4}
+	visVisited := stripANSI(visitedCell(rVisited, 110, false, now))
+	if !strings.Contains(visVisited, "10m ago (4x)") {
+		t.Fatalf("expected '10m ago (4x)', got %q", visVisited)
 	}
 }
