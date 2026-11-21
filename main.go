@@ -2111,6 +2111,9 @@ func promoteOverdue(ids []string, byID map[string]row, now int64) []string {
 			rest = append(rest, id)
 		}
 	}
+	sort.SliceStable(due, func(i, j int) bool {
+		return byID[due[i]].RemindAt < byID[due[j]].RemindAt
+	})
 	return append(due, rest...)
 }
 
@@ -2343,16 +2346,125 @@ func activeSortLabel(st *store, v view, mode int) string {
 	}
 }
 
+// browseVisibleLines computes the exact number of visible pane rows that fit
+// in the frame given terminal height and whether the footer shelf is displayed.
+func browseVisibleLines(h int, hasFooterShelf bool) int {
+	maxLines := h
+	if h > 6 {
+		maxLines = h - 1
+	}
+	headerN := 5 // tab bar (1), search bar (1), rule (1), column headers (1), rule (1)
+	footerN := 3 // rule (1), primary hints (1), secondary hints (1)
+	if hasFooterShelf {
+		footerN++ // note preview / status message shelf (1)
+	}
+	vis := maxLines - headerN - footerN
+	if vis < 1 {
+		vis = 1
+	}
+	return vis
+}
+
+// browseWindowOffset computes the window start offset keeping the selection visible.
+func browseWindowOffset(sel, scrollOffset, total, h int, hasFooterShelf bool) int {
+	visible := browseVisibleLines(h, hasFooterShelf)
+	start := scrollOffset
+	if sel < start {
+		start = sel
+	}
+	if sel >= start+visible {
+		start = sel - visible + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if maxStart := max(0, total-visible); start > maxStart {
+		start = maxStart
+	}
+	return start
+}
+
+func helpVisibleLines(h int) int {
+	maxLines := h
+	if h > 6 {
+		maxLines = h - 1
+	}
+	headerN := 3 // title (1), search field / hint (1), rule (1)
+	footerN := 2 // rule (1), footer hint (1)
+	vis := maxLines - headerN - footerN
+	if vis < 1 {
+		vis = 1
+	}
+	return vis
+}
+
+func helpWindowOffset(sel, scrollOffset, total, h int) int {
+	visible := helpVisibleLines(h)
+	start := scrollOffset
+	if sel < start {
+		start = sel
+	}
+	if sel >= start+visible {
+		start = sel - visible + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if maxStart := max(0, total-visible); start > maxStart {
+		start = maxStart
+	}
+	return start
+}
+
+func jevVisibleLines(h int, inboxTopLen int) int {
+	maxLines := h
+	if h > 6 {
+		maxLines = h - 1
+	}
+	headerN := 4 // tab bar (1), rule (1), title/count (1), rule (1)
+	footerN := 2 // rule (1), footer hint (1)
+	previewN := 0
+	if maxLines >= 26 && inboxTopLen > 0 {
+		previewN = 2 + minInt(3, inboxTopLen)
+	}
+	visible := maxLines - headerN - footerN - previewN
+	if visible < 3 {
+		visible = 3
+	}
+	return visible
+}
+
+func jevWindowOffset(sel, scrollOffset, total, h, inboxTopLen int) int {
+	visible := jevVisibleLines(h, inboxTopLen)
+	start := scrollOffset
+	if sel < start {
+		start = sel
+	}
+	if sel >= start+visible {
+		start = sel - visible + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if maxStart := max(0, total-visible); start > maxStart {
+		start = maxStart
+	}
+	return start
+}
+
 // listColHeader names the list columns: name, agent activity (Herdr status + duration + radar),
-// and visited (operator last access).
+// and visited (operator last access) or visits (for Most used).
 func listColHeader(width int, metricKind string) string {
 	narrow := width < 80
+	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	starW, dotW, priW := 2, 2, 3
 	actW := 24
 	visW := 14
-	if narrow {
+	if isVisits && width >= 95 {
+		visW = 20
+	} else if narrow {
 		actW = 14
-		visW = 0
+		visW = 10
 	}
 	labelW := width - starW - dotW - priW - actW - visW
 	if labelW < 4 {
@@ -2360,7 +2472,6 @@ func listColHeader(width int, metricKind string) string {
 	}
 
 	name := pad(clip("name", labelW), labelW)
-	pri := pad("", priW)
 
 	actTitle := "agent activity"
 	visTitle := "visited"
@@ -2373,19 +2484,18 @@ func listColHeader(width int, metricKind string) string {
 		visTitle = "visited ▼"
 	case "oldest":
 		visTitle = "visited ▲"
-	case "most":
+	case "most", "times":
 		visTitle = "visits ▼"
 	case "least":
 		visTitle = "visits ▲"
 	}
 
 	act := pad(clip(actTitle, actW), actW)
-	vis := ""
-	if visW > 0 {
-		vis = pad(clip(visTitle, visW), visW)
-	}
+	vis := pad(clip(visTitle, visW), visW)
 
-	return keyOverlay + "  " + name + pri + act + vis + keyReset
+	// In data rows: starCell (2) + dotCell (2) + priCell (3) = 7 columns before labelCell
+	prefix := strings.Repeat(" ", starW+dotW+priW)
+	return keyOverlay + prefix + name + act + vis + keyReset
 }
 
 func agentActivityCell(r row, width int, selected bool, now int64) string {
@@ -2455,25 +2565,57 @@ func agentActivityCell(r row, width int, selected bool, now int64) string {
 	return pad(color+clipped+keyReset, actW)
 }
 
-func visitedCell(r row, width int, selected bool, now int64) string {
-	if width < 80 {
-		return ""
-	}
+func visitedCell(r row, width int, selected bool, now int64, metricKind string) string {
+	narrow := width < 80
+	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	visW := 14
+	if isVisits && width >= 95 {
+		visW = 20
+	} else if narrow {
+		visW = 10
+	}
 
 	plain := ""
-	if r.Last == 0 {
-		plain = "unopened"
-	} else if now >= r.Last {
-		d := now - r.Last
-		phrase := durationPhrase(d) + " ago"
-		if width >= 105 && r.Visits > 1 {
-			plain = fmt.Sprintf("%s (%dx)", phrase, r.Visits)
+	if isVisits {
+		// Most used tab: lead with visit count!
+		times := "once"
+		switch {
+		case r.Visits == 0:
+			times = "never"
+		case r.Visits > 1:
+			if narrow {
+				times = fmt.Sprintf("%dx", r.Visits)
+			} else {
+				times = fmt.Sprintf("%d visits", r.Visits)
+			}
+		default:
+			if narrow {
+				times = "1x"
+			} else {
+				times = "1 visit"
+			}
+		}
+		if r.Last > 0 && width >= 95 {
+			d := now - r.Last
+			plain = fmt.Sprintf("%s (%s ago)", times, durationPhrase(d))
 		} else {
-			plain = phrase
+			plain = times
 		}
 	} else {
-		plain = "just now"
+		// Recent / default tabs: lead with recency!
+		if r.Last == 0 {
+			plain = "unopened"
+		} else if now >= r.Last {
+			d := now - r.Last
+			phrase := durationPhrase(d) + " ago"
+			if width >= 105 && r.Visits > 1 {
+				plain = fmt.Sprintf("%s (%dx)", phrase, r.Visits)
+			} else {
+				plain = phrase
+			}
+		} else {
+			plain = "just now"
+		}
 	}
 
 	clipped := clip(plain, visW)
@@ -2982,12 +3124,16 @@ type helpEntry struct {
 
 func allHelpEntries() []helpEntry {
 	return []helpEntry{
-		{"enter", "focus / switch to selected pane directly"},
+		{"enter / o", "focus / switch to selected pane directly"},
 		{"j / k / arrows", "move one row, or N rows with a count (e.g. 3j)"},
-		{"gg / G", "jump to first / last row"},
-		{"g i / g l / g t / g r", "jump to Inbox, Later, Transcripts, Recent"},
-		{"left / right", "switch tabs"},
+		{"gg / G", "jump to first / last row, or row N with count (e.g. 5G, 10gg)"},
+		{"H / M / L", "jump to top / middle / bottom of visible screen"},
 		{"ctrl-d / ctrl-u", "scroll half-page down / up"},
+		{"ctrl-f / ctrl-b", "scroll full-page down / up"},
+		{"[ / ] / arrows", "switch between tabs (home-row brackets or arrow keys)"},
+		{"g i / g l / g t / g r", "jump directly to Inbox, Later, Transcripts, Recent"},
+		{"g f / g m / g a", "jump directly to Favorites, Most used, All"},
+		{"space / tab", "expand or collapse subpane tree for multi-pane tabs"},
 		{"e", "mark done. Leaves current list. z undoes"},
 		{"z / u", "undo the last e, returning thread to queue"},
 		{"i", "teach Jev: prefer, great-job review, demote, priority, features, and pane history audit trail"},
@@ -3000,8 +3146,8 @@ func allHelpEntries() []helpEntry {
 		{"m", "mark or unmark favorite star (*)"},
 		{"b w i d a", "filter status: blocked, working, idle, done, all"},
 		{"/", "search tab names and sticky notes, with vim editing"},
-		{"left / right", "switch tabs. h and l do not"},
-		{"s", "on All and Favorites: cycle sort order"},
+		{"ctrl-n / ctrl-p / ctrl-k", "move selection while typing in search mode"},
+		{"s", "cycle sort orders (Viewed recent, Agent recent, Agent quiet, Most used)"},
 		{"t c / t r / t x", "create, revise, or delete a custom tab"},
 		{"?", "open or close this searchable help overlay"},
 		{"esc", "insert to normal, normal to browse, clears search, closes"},
@@ -3989,44 +4135,28 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
 	emit(listColHeader(width, metricKind))
 	emit(keySurface + strings.Repeat("─", max(8, width-1)) + keyReset)
-	headerN := len(lines)
-	footerN := 3 // separator plus two hint lines
-	if status != "" || (sel >= 0 && sel < len(rows) && rows[sel].Note != "") {
-		footerN++
-	}
-	visible := maxLines - headerN - footerN
-	if visible < 1 {
-		visible = 1
-	}
+	hasShelf := status != "" || (sel >= 0 && sel < len(rows) && rows[sel].Note != "")
+	visible := browseVisibleLines(height, hasShelf)
 	if len(rows) > 0 && sel >= len(rows) {
 		sel = len(rows) - 1
 	}
 	if sel < 0 {
 		sel = 0
 	}
-	start := scrollOffset
-	if sel < start {
-		start = sel
-	}
-	if sel >= start+visible {
-		start = sel - visible + 1
-	}
-	if start < 0 {
-		start = 0
-	}
-	if maxStart := max(0, len(rows)-visible); start > maxStart {
-		start = maxStart
-	}
+	start := browseWindowOffset(sel, scrollOffset, len(rows), height, hasShelf)
 	lastSection := ""
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
+	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	starW, dotW, priW := 2, 2, 3
 	actW := 24
 	visW := 14
-	if narrow {
+	if isVisits && width >= 95 {
+		visW = 20
+	} else if narrow {
 		actW = 14
-		visW = 0
+		visW = 10
 	}
 	labelW := width - starW - dotW - priW - actW - visW
 	if labelW < 4 {
@@ -4070,7 +4200,7 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 			priCell = pad(badge+" ", priW)
 		}
 		actCell := agentActivityCell(r, width, i == sel, now)
-		visCell := visitedCell(r, width, i == sel, now)
+		visCell := visitedCell(r, width, i == sel, now, metricKind)
 
 		if i == sel {
 			// Selected row: keep status color on the dot and priority color on
@@ -4787,13 +4917,23 @@ func runPicker() int {
 	// Herdr writes keystrokes to this process's stdin pty. Read that fd.
 	// A second /dev/tty open, plus stty size on every frame, dropped keys.
 	tty := os.Stdin
+	origCmd := exec.Command("stty", "-g")
+	origCmd.Stdin = tty
+	origStty, _ := origCmd.Output()
 	raw := exec.Command("stty", "raw", "-echo")
 	raw.Stdin = tty
 	_ = raw.Run()
 	defer func() {
-		c := exec.Command("stty", "sane")
-		c.Stdin = tty
-		_ = c.Run()
+		saved := strings.TrimSpace(string(origStty))
+		if saved != "" {
+			c := exec.Command("stty", saved)
+			c.Stdin = tty
+			_ = c.Run()
+		} else {
+			c := exec.Command("stty", "sane")
+			c.Stdin = tty
+			_ = c.Run()
+		}
 		tty.WriteString("\x1b[?25h")
 		_ = closePopup()
 	}()
@@ -5286,6 +5426,14 @@ func runPicker() int {
 				return
 			}
 			for _, k := range keys.Split(buf[:n]) {
+				switch k {
+				case "\x06":
+					k = "ctrl-f"
+				case "\x02":
+					k = "ctrl-b"
+				case "\x0b":
+					k = "ctrl-k"
+				}
 				keyCh <- k
 			}
 		}
@@ -5472,31 +5620,9 @@ func runPicker() int {
 		persistView(rows)
 		status = note.keep(status)
 		w, h := termSize(tty)
-		headerLines := 3
-		footerLines := 3
-		if status != "" {
-			footerLines++
-		}
-		maxVisible := h
-		if h > 6 {
-			maxVisible = h - 1
-		}
-		vis := maxVisible - headerLines - footerLines
-		if vis < 1 {
-			vis = 1
-		}
-		if sel < scrollOffset {
-			scrollOffset = sel
-		}
-		if sel >= scrollOffset+vis {
-			scrollOffset = sel - vis + 1
-		}
-		if scrollOffset < 0 {
-			scrollOffset = 0
-		}
-		if maxS := max(0, len(rows)-vis); scrollOffset > maxS {
-			scrollOffset = maxS
-		}
+		hasShelf := status != "" || (sel >= 0 && sel < len(rows) && rows[sel].Note != "")
+		vis := browseVisibleLines(h, hasShelf)
+		scrollOffset = browseWindowOffset(sel, scrollOffset, len(rows), h, hasShelf)
 		pointedID = ""
 		if sel < len(rows) {
 			pointedID = rows[sel].PaneID
@@ -5515,6 +5641,8 @@ func runPicker() int {
 		case txBrowse:
 			frame = renderTranscript(w, h, txLines, txLine)
 		case showHelp:
+			entries := filterHelpEntries(allHelpEntries(), helpEd.Text())
+			helpScrollOffset = helpWindowOffset(helpSel, helpScrollOffset, len(entries), h)
 			frame = renderHelp(w, h, helpEd.View("/", helpSearching), helpSel, helpScrollOffset)
 		case showJev:
 			ex := 0
@@ -5532,7 +5660,9 @@ func runPicker() int {
 				if jevSel < len(items) {
 					jevPointed = items[jevSel]
 				}
-				frame = renderJev(w, h, viewNames(st), tab, items, jevSel, jevScrollOffset, ex, inboxTopScored(frozen, st, 5))
+				inboxTop := inboxTopScored(frozen, st, 5)
+				jevScrollOffset = jevWindowOffset(jevSel, jevScrollOffset, len(items), h, len(inboxTop))
+				frame = renderJev(w, h, viewNames(st), tab, items, jevSel, jevScrollOffset, ex, inboxTop)
 			}
 		case confirmName != "":
 			frame = renderConfirm(w, h, viewNames(st), tab, confirmSel, confirmName)
@@ -5680,8 +5810,10 @@ func runPicker() int {
 			continue
 		}
 		if showHelp {
+			helpVis := helpVisibleLines(h)
 			entries := filterHelpEntries(allHelpEntries(), helpEd.Text())
 			total := len(entries)
+			helpScrollOffset = helpWindowOffset(helpSel, helpScrollOffset, total, h)
 			if helpSel >= total {
 				helpSel = max(0, total-1)
 			}
@@ -5689,6 +5821,31 @@ func runPicker() int {
 				helpSel = 0
 			}
 			if helpSearching {
+				// List navigation while typing in Help search (never delete query text).
+				if key == "ctrl-f" || key == "pagedown" {
+					helpSel = minInt(helpSel+helpVis, max(0, total-1))
+					continue
+				}
+				if key == "ctrl-b" || key == "pageup" {
+					helpSel = max(0, helpSel-helpVis)
+					continue
+				}
+				if key == "ctrl-d" {
+					helpSel = minInt(helpSel+half, max(0, total-1))
+					continue
+				}
+				if key == "ctrl-n" || key == "down" {
+					if helpSel < total-1 {
+						helpSel++
+					}
+					continue
+				}
+				if key == "ctrl-p" || key == "up" || key == "ctrl-k" {
+					if helpSel > 0 {
+						helpSel--
+					}
+					continue
+				}
 				switch helpEd.Feed(key) {
 				case vimline.ActOut:
 					helpSearching = false
@@ -5734,6 +5891,16 @@ func runPicker() int {
 					helpSel = minInt(helpSel+half, max(0, total-1))
 				case "ctrl-u":
 					helpSel = max(0, helpSel-half)
+				case "ctrl-f", "pagedown":
+					helpSel = minInt(helpSel+helpVis, max(0, total-1))
+				case "ctrl-b", "pageup":
+					helpSel = max(0, helpSel-helpVis)
+				case "H":
+					helpSel = minInt(total-1, helpScrollOffset)
+				case "M":
+					helpSel = minInt(total-1, helpScrollOffset+helpVis/2)
+				case "L":
+					helpSel = minInt(total-1, max(0, helpScrollOffset+helpVis-1))
 				case "?", "q", "esc":
 					showHelp = false
 				}
@@ -5743,6 +5910,9 @@ func runPicker() int {
 		if showJev {
 			items := jevSelectableItems(st)
 			total := len(items)
+			inboxTop := inboxTopScored(frozen, st, 5)
+			jevVis := jevVisibleLines(h, len(inboxTop))
+			jevScrollOffset = jevWindowOffset(jevSel, jevScrollOffset, total, h, len(inboxTop))
 			if jevSel >= total {
 				jevSel = max(0, total-1)
 			}
@@ -5778,10 +5948,20 @@ func runPicker() int {
 				jevSel = 0
 			case "G":
 				jevSel = max(0, total-1)
+			case "H":
+				jevSel = minInt(total-1, jevScrollOffset)
+			case "M":
+				jevSel = minInt(total-1, jevScrollOffset+jevVis/2)
+			case "L":
+				jevSel = minInt(total-1, max(0, jevScrollOffset+jevVis-1))
 			case "ctrl-d":
 				jevSel = minInt(jevSel+half, max(0, total-1))
 			case "ctrl-u":
 				jevSel = max(0, jevSel-half)
+			case "ctrl-f", "pagedown":
+				jevSel = minInt(jevSel+jevVis, max(0, total-1))
+			case "ctrl-b", "pageup":
+				jevSel = max(0, jevSel-jevVis)
 			case "enter":
 				var it jevItem
 				if jevSel < len(items) {
@@ -6096,13 +6276,19 @@ func runPicker() int {
 				refreshTx(searchEd.String())
 				continue
 			}
-			// Half-page navigation while search is focused across all tabs (never delete query text).
-			if key == "ctrl-u" || key == "ctrl-d" {
+			// Half-page and full-page navigation while search is focused across all tabs (never delete query text).
+			if key == "ctrl-u" || key == "ctrl-d" || key == "ctrl-f" || key == "ctrl-b" || key == "pageup" || key == "pagedown" {
 				step := half
+				if key == "ctrl-f" || key == "ctrl-b" || key == "pageup" || key == "pagedown" {
+					step = vis
+				}
 				if views(st)[tab].Kind == "transcripts" {
 					step = txHalfPage(h)
+					if key == "ctrl-f" || key == "ctrl-b" || key == "pageup" || key == "pagedown" {
+						step = txHalfPage(h) * 2
+					}
 				}
-				if key == "ctrl-d" {
+				if key == "ctrl-d" || key == "ctrl-f" || key == "pagedown" {
 					sel = moveSel(sel, step, len(rows))
 				} else {
 					sel = moveSel(sel, -step, len(rows))
@@ -6131,6 +6317,19 @@ func runPicker() int {
 				txRole = nextTxRole(txRole)
 				txStamp = ""
 				refreshTx(searchEd.String())
+				continue
+			}
+			// List selection navigation while typing in search mode (never delete query text).
+			if key == "ctrl-n" || key == "down" {
+				if sel < len(rows)-1 {
+					sel++
+				}
+				continue
+			}
+			if key == "ctrl-p" || key == "up" || key == "ctrl-k" {
+				if sel > 0 {
+					sel--
+				}
 				continue
 			}
 			switch searchEd.Feed(key) {
@@ -6323,7 +6522,11 @@ func runPicker() int {
 				continue
 			}
 			if a.Name == "goto-top" {
-				sel = 0
+				if a.Count > 0 {
+					sel = min(len(rows)-1, max(0, a.Count-1))
+				} else {
+					sel = 0
+				}
 				status = ""
 				continue
 			}
@@ -6398,7 +6601,7 @@ func runPicker() int {
 			if sel < len(rows)-1 {
 				sel++
 			}
-		case key == "enter":
+		case key == "enter" || (key == "o" && !searching && !showHelp && !showJev && !reminding && !noting && !teaching):
 			if !pointed() {
 				break
 			}
@@ -6461,12 +6664,12 @@ func runPicker() int {
 			jevScrollOffset = 0
 			jevTyping = false
 			jevEd = vimline.New("")
-		case (key == "left" || key == "right") && !searching && !showHelp:
+		case (key == "left" || key == "right" || key == "[" || key == "]") && !searching && !showHelp:
 			nTabs := len(views(st))
 			if nTabs < 1 {
 				nTabs = 1
 			}
-			if key == "left" {
+			if key == "left" || key == "[" {
 				tab = (tab + nTabs - 1) % nTabs
 			} else {
 				tab = (tab + 1) % nTabs
@@ -6705,7 +6908,29 @@ func runPicker() int {
 		case key == "g" && !searching:
 			sel = 0
 		case key == "G" && !searching:
-			sel = max(0, len(rows)-1)
+			if browseCount > 0 {
+				sel = min(len(rows)-1, max(0, browseCount-1))
+			} else {
+				sel = max(0, len(rows)-1)
+			}
+		case key == "H" && !searching:
+			sel = min(len(rows)-1, scrollOffset)
+		case key == "M" && !searching:
+			sel = min(len(rows)-1, scrollOffset+vis/2)
+		case key == "L" && !searching:
+			sel = min(len(rows)-1, max(0, scrollOffset+vis-1))
+		case (key == "ctrl-f" || key == "pagedown") && !searching:
+			step := vis
+			if views(st)[tab].Kind == "transcripts" {
+				step = txHalfPage(h) * 2
+			}
+			sel = moveSel(sel, step, len(rows))
+		case (key == "ctrl-b" || key == "pageup") && !searching:
+			step := vis
+			if views(st)[tab].Kind == "transcripts" {
+				step = txHalfPage(h) * 2
+			}
+			sel = moveSel(sel, -step, len(rows))
 		case (key == "j" || key == "down") && !searching:
 			n := browseCount
 			if n < 1 {
@@ -6731,7 +6956,7 @@ func runPicker() int {
 			if sel < len(rows)-1 {
 				sel++
 			}
-		case key == "ctrl-p" || (key == "up" && searching):
+		case key == "ctrl-p" || (key == "up" && searching) || (key == "ctrl-k" && searching):
 			if sel > 0 {
 				sel--
 			}
