@@ -1154,6 +1154,20 @@ func recordFocus() (string, error) {
 	}
 	now := time.Now().Unix()
 	ps := st.ensurePane(id)
+
+	// Deduplicate focus hooks: Herdr emits both workspace.focused and tab.focused
+	// on focus transitions, and rapid switching can fire back-to-back hooks within
+	// milliseconds. If the same pane was recorded within the last 3 seconds,
+	// refresh its timestamp and label without double-incrementing the visit counter.
+	if st.ActivePaneID == id && now-ps.Last < 3 {
+		ps.Last = now
+		if label != "" {
+			ps.Label = label
+		}
+		return id, saveStore(st)
+	}
+
+	st.ActivePaneID = id
 	ps.Visits++
 	ps.Last = now
 	if label != "" {
@@ -1168,6 +1182,25 @@ func recordFocus() (string, error) {
 	}
 	st.prune(liveSet(snap), pruneKeep)
 	return id, saveStore(st)
+}
+
+// pruneClosedPanes prunes panes that are no longer live in Herdr without recording a visit.
+func pruneClosedPanes() error {
+	snap, err := loadSnapshot()
+	if err != nil {
+		return err
+	}
+	lk := &storeLock{}
+	if err := lk.acquire(); err != nil {
+		return err
+	}
+	defer lk.release()
+	st, err := loadStore()
+	if err != nil {
+		return err
+	}
+	st.prune(liveSet(snap), pruneKeep)
+	return saveStore(st)
 }
 
 func liveSet(s *snapshot) map[string]bool {
@@ -2456,13 +2489,10 @@ func jevWindowOffset(sel, scrollOffset, total, h, inboxTopLen int) int {
 // and visited (operator last access) or visits (for Most used).
 func listColHeader(width int, metricKind string) string {
 	narrow := width < 80
-	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	starW, dotW, priW := 2, 2, 3
 	actW := 24
 	visW := 14
-	if isVisits && width >= 95 {
-		visW = 20
-	} else if narrow {
+	if narrow {
 		actW = 14
 		visW = 10
 	}
@@ -2569,50 +2599,36 @@ func visitedCell(r row, width int, selected bool, now int64, metricKind string) 
 	narrow := width < 80
 	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	visW := 14
-	if isVisits && width >= 95 {
-		visW = 20
-	} else if narrow {
+	if narrow {
 		visW = 10
 	}
 
 	plain := ""
 	if isVisits {
-		// Most used tab: lead with visit count!
-		times := "once"
+		// Most used tab: show visit count strictly!
 		switch {
 		case r.Visits == 0:
-			times = "never"
+			plain = "never"
 		case r.Visits > 1:
 			if narrow {
-				times = fmt.Sprintf("%dx", r.Visits)
+				plain = fmt.Sprintf("%dx", r.Visits)
 			} else {
-				times = fmt.Sprintf("%d visits", r.Visits)
+				plain = fmt.Sprintf("%d visits", r.Visits)
 			}
 		default:
 			if narrow {
-				times = "1x"
+				plain = "1x"
 			} else {
-				times = "1 visit"
+				plain = "1 visit"
 			}
 		}
-		if r.Last > 0 && width >= 95 {
-			d := now - r.Last
-			plain = fmt.Sprintf("%s (%s ago)", times, durationPhrase(d))
-		} else {
-			plain = times
-		}
 	} else {
-		// Recent / default tabs: lead with recency!
+		// Recent / default tabs: show visit time (recency) strictly!
 		if r.Last == 0 {
 			plain = "unopened"
 		} else if now >= r.Last {
 			d := now - r.Last
-			phrase := durationPhrase(d) + " ago"
-			if width >= 105 && r.Visits > 1 {
-				plain = fmt.Sprintf("%s (%dx)", phrase, r.Visits)
-			} else {
-				plain = phrase
-			}
+			plain = durationPhrase(d) + " ago"
 		} else {
 			plain = "just now"
 		}
@@ -4148,13 +4164,10 @@ func renderFrame(rows []row, sel, scrollOffset int, fv vimline.View, status stri
 	// Column budget: a narrow overlay keeps the status dot and a short visit
 	// count on the same row as a clipped label; a wide one gets the full form.
 	narrow := width < 80
-	isVisits := metricKind == "most" || metricKind == "least" || metricKind == "times"
 	starW, dotW, priW := 2, 2, 3
 	actW := 24
 	visW := 14
-	if isVisits && width >= 95 {
-		visW = 20
-	} else if narrow {
+	if narrow {
 		actW = 14
 		visW = 10
 	}
@@ -7180,6 +7193,13 @@ func main() {
 		}
 		os.Exit(runPicker())
 	case "hook":
+		if len(os.Args) >= 3 && strings.HasSuffix(os.Args[2], ".closed") {
+			// Tab or workspace closed: prune closed panes without recording a new visit.
+			if err := pruneClosedPanes(); err != nil {
+				os.Exit(0)
+			}
+			os.Exit(0)
+		}
 		// any focus event: record the currently focused pane
 		if _, err := recordFocus(); err != nil {
 			// never fail a hook loudly; the pane is still usable

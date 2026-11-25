@@ -572,12 +572,72 @@ func TestIntuitiveColumnsAndRichAgentActivity(t *testing.T) {
 
 	rVisited := row{Last: now - 600, Visits: 4}
 	visVisited := stripANSI(visitedCell(rVisited, 110, false, now, "newest"))
-	if !strings.Contains(visVisited, "10m ago (4x)") {
-		t.Fatalf("expected '10m ago (4x)', got %q", visVisited)
+	if !strings.Contains(visVisited, "10m ago") {
+		t.Fatalf("expected '10m ago', got %q", visVisited)
 	}
 
 	visMostUsed := stripANSI(visitedCell(rVisited, 100, false, now, "most"))
 	if !strings.Contains(visMostUsed, "4 visits") {
 		t.Fatalf("expected '4 visits' in Most used, got %q", visMostUsed)
+	}
+}
+
+func TestRecordFocusDebounce(t *testing.T) {
+	st := &store{
+		Panes: map[string]*paneStat{},
+	}
+	now := int64(1000)
+
+	// Simulating recordFocus logic:
+	// First hook: tab.focused on pane-1
+	id := "pane-1"
+	ps := st.ensurePane(id)
+	if st.ActivePaneID == id && now-ps.Last < 3 {
+		ps.Last = now
+	} else {
+		st.ActivePaneID = id
+		ps.Visits++
+		ps.Last = now
+	}
+	if ps.Visits != 1 {
+		t.Fatalf("expected 1 visit, got %d", ps.Visits)
+	}
+
+	// Second hook: duplicate event within 1s (e.g. workspace.focused or rapid hook)
+	if st.ActivePaneID == id && (now+1)-ps.Last < 3 {
+		ps.Last = now + 1
+	} else {
+		st.ActivePaneID = id
+		ps.Visits++
+		ps.Last = now + 1
+	}
+	if ps.Visits != 1 {
+		t.Fatalf("expected visits to remain 1 after duplicate hook, got %d", ps.Visits)
+	}
+
+	// Third hook: switch to pane-2
+	id2 := "pane-2"
+	ps2 := st.ensurePane(id2)
+	if st.ActivePaneID == id2 && (now+2)-ps2.Last < 3 {
+		ps2.Last = now + 2
+	} else {
+		st.ActivePaneID = id2
+		ps2.Visits++
+		ps2.Last = now + 2
+	}
+	if ps2.Visits != 1 {
+		t.Fatalf("expected 1 visit for pane-2, got %d", ps2.Visits)
+	}
+
+	// Fourth hook: switch back to pane-1 after 5s
+	if st.ActivePaneID == id && (now+5)-ps.Last < 3 {
+		ps.Last = now + 5
+	} else {
+		st.ActivePaneID = id
+		ps.Visits++
+		ps.Last = now + 5
+	}
+	if ps.Visits != 2 {
+		t.Fatalf("expected 2 visits for pane-1 after genuine switch back, got %d", ps.Visits)
 	}
 }

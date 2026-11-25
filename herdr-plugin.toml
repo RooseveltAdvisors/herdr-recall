@@ -26,10 +26,6 @@ on = "tab.focused"
 command = ["./bin/herdr-recall", "hook", "tab.focused"]
 
 [[events]]
-on = "workspace.focused"
-command = ["./bin/herdr-recall", "hook", "workspace.focused"]
-
-[[events]]
 on = "tab.closed"
 command = ["./bin/herdr-recall", "hook", "tab.closed"]
 
